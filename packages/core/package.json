@@ -1,7 +1,7 @@
 {
   "name": "@guardhouse/core",
-  "version": "0.0.1",
-  "description": "Environment-agnostic Guardhouse SDK with shared types, API client, and PKCE utilities",
+  "version": "0.1.0",
+  "description": "Universal JavaScript/TypeScript SDK for OAuth 2.0 with PKCE",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
@@ -17,13 +17,48 @@
   ],
   "scripts": {
     "build": "tsup src/index.ts --format cjs,esm --dts --clean",
-    "dev": "tsup src/index.ts --format cjs,esm --dts --watch"
+    "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src --ext .ts"
+  },
+  "dependencies": {},
+  "peerDependencies": {
+    "typescript": ">=5.0.0"
   },
   "devDependencies": {
+    "@types/jest": "^29.5.0",
+    "jest": "^29.7.0",
     "tsup": "^8.0.0",
     "typescript": "^5.3.0"
   },
+  "jest": {
+    "preset": "ts-jest",
+    "testEnvironment": "node",
+    "testMatch": [
+      "**/__tests__/**/*.test.[jt]s?(x)"
+    ],
+    "collectCoverageFrom": [
+      "src/**/*.{js,ts}"
+    ],
+    "coverageThreshold": {
+      "global": {
+        "branches": 80,
+        "functions": 80,
+        "lines": 80,
+        "statements": 80
+      }
+    },
+    "moduleNameMapper": {
+      "^@guardhouse/core/(.*)$": "<rootDir>/src/$1"
+    }
+  },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
