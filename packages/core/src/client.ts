@@ -28,16 +28,14 @@
  *    - Useful for automatic token management
  */
 
-import type {
-  GuardhouseConfig,
-  GuardhouseError,
-  StorageAdapter,
-} from "./config";
+import type { GuardhouseConfig } from "./config";
+
+import { GuardhouseError } from "./config";
 
 export interface RequestOptions {
   method?: "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
   headers?: Record<string, string>;
-  body?: string | URLSearchParams;
+  body?: string;
   token?: string;
   skipAuthHeader?: boolean;
 }
@@ -58,6 +56,22 @@ export interface UserInfoResponse {
   picture?: string;
   roles?: string[];
   scopes?: string[];
+  [key: string]: any;
+}
+
+export interface IntrospectionResponse {
+  active: boolean;
+  scope?: string;
+  client_id?: string;
+  username?: string;
+  token_type?: string;
+  exp?: number;
+  iat?: number;
+  nbf?: number;
+  sub?: string;
+  aud?: string | string[];
+  iss?: string;
+  jti?: string;
   [key: string]: any;
 }
 
@@ -125,7 +139,7 @@ export class GuardhouseClient {
    *
    * @param endpoint - API endpoint path (e.g., '/connect/userinfo')
    * @param options - Request options
-   * @returns Typed response with data, status, headers
+   * @returns Response with data, status, headers
    *
    * @throws {GuardhouseError} On HTTP or network errors
    */
@@ -133,7 +147,7 @@ export class GuardhouseClient {
     endpoint: string,
     options: RequestOptions = {},
   ): Promise<{
-    data: any;
+    data: unknown;
     status: number;
     headers: Headers;
   }> {
@@ -164,6 +178,10 @@ export class GuardhouseClient {
       });
 
       if (!response.ok) {
+        const errorText = await response.text();
+        console.log(`[GuardhouseClient] Response Status: ${response.status}`);
+        console.log(`[GuardhouseClient] Response Body:`, errorText);
+
         const errorData = await this.parseErrorResponse(response);
         throw new GuardhouseError(
           errorData.error_description || errorData.error || "Request failed",
@@ -249,16 +267,16 @@ export class GuardhouseClient {
 
     console.log("[GuardhouseClient] Exchanging authorization code for tokens");
 
-    const response = await this.fetch<TokenResponse>("/connect/token", {
+    const response = await this.fetch("/connect/token", {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
       },
-      body,
+      body: body.toString(),
       skipAuthHeader: true, // Don't add auth header for token exchange
     });
 
-    return response.data;
+    return response.data as TokenResponse;
   }
 
   /**
@@ -288,16 +306,16 @@ export class GuardhouseClient {
 
     console.log("[GuardhouseClient] Refreshing access token");
 
-    const response = await this.fetch<TokenResponse>("/connect/token", {
+    const response = await this.fetch("/connect/token", {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
       },
-      body,
+      body: body.toString(),
       skipAuthHeader: true,
     });
 
-    return response.data;
+    return response.data as TokenResponse;
   }
 
   /**
@@ -313,11 +331,11 @@ export class GuardhouseClient {
    * @throws {GuardhouseError} On fetch failure
    */
   async getUserInfo(token: string): Promise<UserInfoResponse> {
-    const response = await this.fetch<UserInfoResponse>("/connect/userinfo", {
+    const response = await this.fetch("/connect/userinfo", {
       token,
     });
 
-    return response.data;
+    return response.data as UserInfoResponse;
   }
 
   /**
@@ -340,10 +358,32 @@ export class GuardhouseClient {
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
       },
-      body,
+      body: body.toString(),
       skipAuthHeader: true,
     });
 
     console.log("[GuardhouseClient] Token revoked");
+  }
+
+  /**
+   * POST request with form-encoded body
+   *
+   * @param endpoint - API endpoint path
+   * @param body - Form data
+   * @returns Response with data, status, headers
+   *
+   * @throws {GuardhouseError} On HTTP or network errors
+   */
+  async postForm<T>(endpoint: string, body: URLSearchParams): Promise<T> {
+    const response = await this.fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: body.toString(),
+      skipAuthHeader: false,
+    });
+
+    return response.data as T;
   }
 }

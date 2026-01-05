@@ -129,16 +129,44 @@ export class GuardhouseNodeClient {
       this.options.scope || GuardhouseConstants.Defaults.DefaultScope;
 
     try {
-      const tokenResponse = await client.postForm<TokenResponse>(
+      const body = new URLSearchParams({
+        grant_type: "client_credentials",
+        scope,
+      });
+
+      console.log("\n🔵 DEBUG: Requesting token");
+      console.log(
+        "   URL:",
         `${this.options.authority}/${GuardhouseConstants.Endpoints.ConnectToken}`,
-        {
-          grant_type: "client_credentials",
-          scope,
-        },
       );
+      console.log("   Method: POST");
+      console.log(
+        "   Headers: Content-Type: application/x-www-form-urlencoded",
+      );
+      console.log("   Body:", Object.fromEntries(body.entries()));
+      console.log("");
+
+      const tokenResponse = await client.postForm<TokenResponse>(
+        `/${GuardhouseConstants.Endpoints.ConnectToken}`,
+        body,
+      );
+
+      console.log("\n🟢 DEBUG: Token response received");
+      console.log("   Status: Success");
+      console.log("   Response:", {
+        access_token: tokenResponse.access_token.substring(0, 20) + "...",
+        token_type: tokenResponse.token_type,
+        expires_in: tokenResponse.expires_in,
+        scope: tokenResponse.scope,
+      });
+      console.log("");
 
       return tokenResponse;
     } catch (error) {
+      console.log("\n🔴 DEBUG: Token request failed");
+      console.log("   Error:", error instanceof Error ? error.message : error);
+      console.log("");
+
       const errorMessage = stripStackTrace(error as Error);
       throw new Error(
         `Failed to request token: ${errorMessage}. ` +
@@ -156,12 +184,13 @@ export class GuardhouseNodeClient {
     });
 
     try {
+      const body = new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+      });
       const tokenResponse = await client.postForm<TokenResponse>(
-        `${this.options.authority}/${GuardhouseConstants.Endpoints.ConnectToken}`,
-        {
-          grant_type: "refresh_token",
-          refresh_token: refreshToken,
-        },
+        `/${GuardhouseConstants.Endpoints.ConnectToken}`,
+        body,
       );
 
       return tokenResponse;

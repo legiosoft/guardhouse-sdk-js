@@ -43,6 +43,7 @@
  */
 
 export interface CryptoAdapter {
+  name?: string;
   randomBytes(length: number): Promise<Uint8Array>;
   sha256(data: Uint8Array): Promise<Uint8Array>;
 }
@@ -72,7 +73,7 @@ class SubtleCryptoAdapter implements CryptoAdapter {
     if (typeof globalThis.crypto?.subtle === "object") {
       const buffer = await globalThis.crypto.subtle.digest(
         { name: "SHA-256" },
-        data,
+        data as any,
       );
       return new Uint8Array(buffer);
     }
@@ -162,7 +163,7 @@ class FallbackCryptoAdapter implements CryptoAdapter {
     });
   }
 
-  async sha256(data: Uint8Array): Promise<Uint8Array> {
+  async sha256(_data: Uint8Array): Promise<Uint8Array> {
     throw new Error(
       "SHA-256 not available in fallback adapter. Please provide a crypto provider.",
     );

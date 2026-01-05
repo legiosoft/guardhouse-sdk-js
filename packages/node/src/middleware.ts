@@ -16,7 +16,6 @@ import {
   createWWWAuthenticateHeader,
   validateHttpsUrl,
   validateTrustedAuthority,
-  validateJwksContentType,
   validateMaxTokenAge,
   generateCorrelationId,
   stripStackTrace,
@@ -39,8 +38,6 @@ export class GuardhouseResourceService {
   private jwksClient: JwksClient | null = null;
   private introspectionCache = new Map<string, IntrospectionCacheEntry>();
   private keyCache = new Map<string, KeyCacheEntry>();
-  private refreshInProgress = false;
-  private pendingRefreshPromises: Promise<void>[] = [];
   private jwksUri: string;
 
   constructor(private options: GuardhouseResourceOptions) {
@@ -111,56 +108,6 @@ export class GuardhouseResourceService {
         }
       });
     });
-  }
-
-  private async refreshJwksKeys(): Promise<void> {
-    if (this.refreshInProgress) {
-      return new Promise((resolve) => {
-        this.pendingRefreshPromises.push(resolve as any);
-      });
-    }
-
-    this.refreshInProgress = true;
-
-    try {
-      const response = await fetch(this.jwksUri, {
-        headers: {
-          Accept: `${GuardhouseConstants.ContentTypes.Json}, ${GuardhouseConstants.ContentTypes.JwkSet}`,
-        },
-      });
-
-      if (!response.ok) {
-        throw new Error(`JWKS request failed: ${response.status}`);
-      }
-
-      const contentType = response.headers.get("content-type") || "";
-      validateJwksContentType(contentType);
-
-      const body = await response.json();
-
-      const cacheDuration =
-        (this.options.jwksCacheDurationHours ??
-          GuardhouseConstants.Defaults.JwksCacheDurationHours) *
-        60 *
-        60 *
-        1000;
-
-      for (const key of body.keys || []) {
-        if (key.kid) {
-          this.keyCache.set(key.kid, {
-            key: key.kty,
-            expiresAt: Date.now() + cacheDuration,
-          });
-        }
-      }
-    } catch (error) {
-      console.warn(`JWKS refresh failed, using stale keys: ${error}`);
-    } finally {
-      this.refreshInProgress = false;
-      const promises = [...this.pendingRefreshPromises];
-      this.pendingRefreshPromises = [];
-      promises.forEach((p) => p());
-    }
   }
 
   private validateTokenHeader(token: string): {
@@ -328,21 +275,21 @@ export class GuardhouseResourceService {
 
     if (useBasicAuth) {
       introspectionResult = await client.postForm<IntrospectionResponse>(
-        `${this.options.authority}/${GuardhouseConstants.Endpoints.ConnectIntrospect}`,
-        {
+        `/${GuardhouseConstants.Endpoints.ConnectIntrospect}`,
+        new URLSearchParams({
           token,
           token_type_hint: "access_token",
-        },
+        }),
       );
     } else {
       introspectionResult = await client.postForm<IntrospectionResponse>(
-        `${this.options.authority}/${GuardhouseConstants.Endpoints.ConnectIntrospect}`,
-        {
+        `/${GuardhouseConstants.Endpoints.ConnectIntrospect}`,
+        new URLSearchParams({
           token,
           token_type_hint: "access_token",
           client_id: this.options.introspectionClientId,
           client_secret: this.options.introspectionClientSecret,
-        },
+        }),
       );
     }
 
@@ -647,4 +594,9 @@ export function guardhouseMiddleware(
         )
         .json({
           error: "unauthorized",
-} from "./types";
+          error_description: GuardhouseConstants.ErrorMessages.InvalidToken,
+          correlation_id: correlationId,
+        });
+    }
+  };
+}

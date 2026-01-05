@@ -27,8 +27,6 @@
  *    - Don't assume token is valid just because it decodes
  */
 
-import type { CryptoAdapter } from "./crypto";
-
 export interface JWTPayload {
   sub?: string;
   name?: string;

@@ -44,6 +44,11 @@
 // Public API exports
 export { GuardhouseClient } from "./client";
 export type { GuardhouseConfig, GuardhouseError } from "./config";
+export type {
+  TokenResponse,
+  UserInfoResponse,
+  IntrospectionResponse,
+} from "./client";
 
 // PKCE exports
 export { generatePKCE, generateState, generateNonce } from "./pkce";
