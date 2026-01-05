@@ -1,0 +1,63 @@
+# Dependencies
+node_modules/
+nodejs/
+
+# Build output
+dist/
+build/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# iOS
+ios/Pods/
+ios/build/
+ios/*.xcworkspace
+!ios/*.xcodeproj/project.xcworkspace/contents.xcworkspacedata
+!ios/*.xcodeproj/xcshareddata/
+ios/*.xcodeproj/project.xcworkspace/xcshareddata/
+ios/Exponent.xcworkspace
+ios/Exponent.xcodeproj
+ios/Podfile.lock
+ios/.xcode.env.local
+
+# Android
+android/.gradle/
+android/app/build/
+android/app/release/
+android/captures/
+android/local.properties
+android/*.iml
+android/.idea/
+android/.externalNativeBuild
+
+# React Native
+.expo/
+.expo-shared/
+.watchmanman/
+
+# Expo
+.expo/
+dist/
+web-build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+coverage/
+*.lcov
+
+# Misc
+*.swp
+*.swo
+*~
