@@ -1,4 +1,4 @@
-export { GuardhouseProvider, useAuth } from "./context";
+export { GuardhouseProvider, AuthContext, useAuth } from "./GuardhouseProvider";
 export type {
   GuardhouseConfig,
   AppState,
@@ -7,22 +7,16 @@ export type {
   LoginOptions,
   LogoutOptions,
   SecurityError,
-} from "./types";
-export {
   RefreshTokenError,
   BiometricAuthFailedError,
   SessionExpiredError,
+  AuthContextValue,
+  AuthContext,
 } from "./types";
 export {
-  SecureStorageAdapter,
-  StorageKeys,
-  generateBase64UrlEncodedString,
-  parseQueryParams,
-  sanitizeUrl,
-  redactToken,
-  validateIdToken,
-  validateUrlProtocol,
-  logSecurityEvent,
-  isTokenExpired,
+  SecureStorage,
+  SessionData,
   PromiseLock,
-} from "./utils";
+  STORAGE_KEYS,
+  isTokenExpired,
+} from "./utils/storage";
