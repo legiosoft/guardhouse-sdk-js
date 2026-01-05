@@ -1,0 +1,171 @@
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  color-scheme: light dark;
+  color: rgba(255, 255, 255, 0.87);
+  background-color: #242424;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 2rem;
+  flex: 1;
+}
+
+.header {
+  background: #1a1a1a;
+  padding: 1rem 2rem;
+  border-bottom: 1px solid #333;
+}
+
+.header-content {
+  max-width: 1200px;
+  margin: 0 auto;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.logo {
+  font-size: 1.5rem;
+  font-weight: bold;
+  color: #646cff;
+}
+
+.nav-links {
+  display: flex;
+  gap: 1rem;
+}
+
+.nav-links a {
+  color: #888;
+  text-decoration: none;
+  transition: color 0.2s;
+}
+
+.nav-links a:hover {
+  color: #fff;
+}
+
+.card {
+  background: #1a1a1a;
+  border-radius: 8px;
+  padding: 2rem;
+  margin-bottom: 2rem;
+  border: 1px solid #333;
+}
+
+.card h2 {
+  margin-top: 0;
+  color: #fff;
+}
+
+.button {
+  background: #646cff;
+  color: white;
+  border: none;
+  padding: 0.75rem 1.5rem;
+  border-radius: 4px;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.button:hover {
+  background: #535bf2;
+}
+
+.button:disabled {
+  background: #333;
+  cursor: not-allowed;
+}
+
+.button.secondary {
+  background: transparent;
+  border: 1px solid #646cff;
+}
+
+.button.secondary:hover {
+  background: rgba(100, 108, 255, 0.1);
+}
+
+.info-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0;
+}
+
+.info-item {
+  background: #242424;
+  padding: 1rem;
+  border-radius: 4px;
+}
+
+.info-label {
+  color: #888;
+  font-size: 0.875rem;
+  margin-bottom: 0.5rem;
+}
+
+.info-value {
+  color: #fff;
+  font-family: monospace;
+  word-break: break-all;
+}
+
+.error {
+  background: #2a0a0a;
+  border: 1px solid #a00;
+  color: #faa;
+  padding: 1rem;
+  border-radius: 4px;
+  margin: 1rem 0;
+}
+
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  color: #888;
+}
+
+.spinner {
+  border: 3px solid #333;
+  border-top: 3px solid #646cff;
+  border-radius: 50%;
+  width: 24px;
+  height: 24px;
+  animation: spin 1s linear infinite;
+  margin-right: 0.5rem;
+}
+
+@keyframes spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}

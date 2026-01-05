@@ -1,0 +1,29 @@
+{
+  "name": "@guardhouse/core",
+  "version": "0.0.1",
+  "description": "Environment-agnostic Guardhouse SDK with shared types, API client, and PKCE utilities",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts --clean",
+    "dev": "tsup src/index.ts --format cjs,esm --dts --watch"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

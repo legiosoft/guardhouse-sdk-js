@@ -1,0 +1,137 @@
+# ==========================
+# 1. General Node & Build
+# ==========================
+node_modules/
+dist/
+lib/
+build/
+out/
+.pnp
+.pnp.js
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ==========================
+# 2. Monorepo & Tooling (Nx / Turbo / Yarn)
+# ==========================
+# TurboRepo Cache
+.turbo/
+
+# Nx Cache
+.nx/
+
+# Lerna
+.lerna/
+
+# Yarn Berry (Zero-installs: Comment out if you use PnP)
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# ==========================
+# 3. Security & Environment (CRITICAL)
+# ==========================
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.env
+
+# Security Keys & Certificates
+*.pem
+*.key
+*.keystore
+*.jks
+*.p12
+*.cer
+id_rsa
+id_rsa.pub
+
+# React Native Keychain mock/local files
+*keychain*
+
+# ==========================
+# 4. React Native - Android
+# ==========================
+# Build & Gradle
+android/.gradle
+android/app/build/
+android/build/
+**/android/build/
+
+# Local configuration (SDK location)
+local.properties
+
+# Android Studio
+.idea/
+.gradle/
+*.iml
+
+# Keystores (Redundant but safe)
+*.keystore
+*.jks
+
+# Fastlane (If used)
+**/android/fastlane/report.xml
+**/android/fastlane/Preview.html
+
+# ==========================
+# 5. React Native - iOS
+# ==========================
+# CocoaPods
+**/ios/Pods/
+**/ios/build/
+**/ios/*.xcworkspace
+# Keep the .xcodeproj but ignore user data
+**/ios/*.xcodeproj/project.xcworkspace
+**/ios/*.xcodeproj/xcuserdata
+**/ios/*.xcworkspace/xcuserdata
+
+# Derived Data
+DerivedData/
+
+# Crashlytics / Firebase
+com_crashlytics_export_strings.xml
+
+# Fastlane
+**/ios/fastlane/report.xml
+**/ios/fastlane/screenshots
+**/ios/fastlane/test_output
+
+# ==========================
+# 6. Testing & Quality
+# ==========================
+coverage/
+jest-test-results.json
+junit.xml
+
+# ==========================
+# 7. System & IDEs
+# ==========================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# VS Code
+.vscode/
+*.code-workspace
+history/
+
+# TypeScript
+*.tsbuildinfo
