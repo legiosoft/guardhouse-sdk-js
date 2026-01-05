@@ -8,6 +8,7 @@ export interface GuardhouseConfig {
   scope?: string;
   responseType?: string;
   logoutRedirectUri?: string;
+  requireBiometrics?: boolean;
 }
 
 export interface AppState {
@@ -45,4 +46,31 @@ export interface LogoutOptions {
 
 export interface SecurityError extends Error {
   code: "STATE_MISMATCH" | "INVALID_JWT" | "TOKEN_EXPIRED" | "STORAGE_ERROR";
+}
+
+export class RefreshTokenError extends Error {
+  constructor(
+    message: string,
+    public statusCode?: number,
+  ) {
+    super(message);
+    this.name = "RefreshTokenError";
+  }
+}
+
+export class BiometricAuthFailedError extends Error {
+  constructor(
+    message: string,
+    public userCancelled?: boolean,
+  ) {
+    super(message);
+    this.name = "BiometricAuthFailedError";
+  }
+}
+
+export class SessionExpiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SessionExpiredError";
+  }
 }

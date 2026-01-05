@@ -22,14 +22,29 @@ export const StorageKeys = {
 };
 
 export class SecureStorageAdapter {
+  private requireBiometrics: boolean;
+
+  constructor(requireBiometrics: boolean = false) {
+    this.requireBiometrics = requireBiometrics;
+  }
+
   async getItem(key: string): Promise<string | null> {
     try {
-      const result = await Keychain.getGenericPassword({ service: key });
+      const result = await Keychain.getGenericPassword({
+        service: key,
+      });
       if (result) {
         return result.password;
       }
       return null;
-    } catch (error) {
+    } catch (error: any) {
+      if (
+        this.requireBiometrics &&
+        (error?.message?.includes("UserCanceled") ||
+          error?.name === "UserCanceled")
+      ) {
+        throw new Error("Biometric authentication cancelled by user");
+      }
       console.error(
         `SecureStorageAdapter.getItem error for key ${key}:`,
         error,
@@ -40,9 +55,13 @@ export class SecureStorageAdapter {
 
   async setItem(key: string, value: string): Promise<void> {
     try {
+      const accessControl = this.requireBiometrics
+        ? Keychain.ACCESS_CONTROL.BIOMETRY_CURRENT_SET_OR_DEVICE_PASSCODE
+        : Keychain.ACCESS_CONTROL.USER_PRESENCE;
+
       await Keychain.setGenericPassword(key, value, {
         service: key,
-        accessControl: Keychain.ACCESS_CONTROL.BIOMETRY_ANY_OR_DEVICE_PASSCODE,
+        accessControl,
         accessible: Keychain.ACCESSIBLE.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
       });
     } catch (error) {
@@ -252,4 +271,48 @@ export function logSecurityEvent(
     : {};
 
   console.log(`[Guardhouse Security] ${event}`, sanitizedDetails);
+}
+
+export function isTokenExpired(token: string): boolean {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) {
+      return true;
+    }
+
+    const payload = JSON.parse(
+      atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")),
+    );
+
+    const now = Math.floor(Date.now() / 1000);
+
+    if (!payload.exp) {
+      return false;
+    }
+
+    return payload.exp < now + 60;
+  } catch (error) {
+    console.error("Failed to check token expiration:", error);
+    return true;
+  }
+}
+
+export class PromiseLock {
+  private promise: Promise<any> | null = null;
+
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.promise) {
+      console.log("[PromiseLock] Waiting for existing promise to complete");
+      return this.promise as Promise<T>;
+    }
+
+    this.promise = fn();
+
+    try {
+      const result = await this.promise;
+      return result;
+    } finally {
+      this.promise = null;
+    }
+  }
 }

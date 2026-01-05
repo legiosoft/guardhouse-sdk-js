@@ -9,6 +9,11 @@ export type {
   SecurityError,
 } from "./types";
 export {
+  RefreshTokenError,
+  BiometricAuthFailedError,
+  SessionExpiredError,
+} from "./types";
+export {
   SecureStorageAdapter,
   StorageKeys,
   generateBase64UrlEncodedString,
@@ -18,4 +23,6 @@ export {
   validateIdToken,
   validateUrlProtocol,
   logSecurityEvent,
+  isTokenExpired,
+  PromiseLock,
 } from "./utils";

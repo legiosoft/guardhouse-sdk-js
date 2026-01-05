@@ -20,6 +20,9 @@ import {
   LoginOptions,
   LogoutOptions,
   SecurityError,
+  RefreshTokenError,
+  BiometricAuthFailedError,
+  SessionExpiredError,
 } from "./types";
 import {
   SecureStorageAdapter,
@@ -30,6 +33,8 @@ import {
   validateIdToken,
   validateUrlProtocol,
   logSecurityEvent,
+  isTokenExpired,
+  PromiseLock,
 } from "./utils";
 
 interface AuthContextValue extends AuthState {
@@ -47,6 +52,7 @@ interface GuardhouseProviderProps {
   clientId: string;
   redirectUri: string;
   scopes?: string[];
+  requireBiometrics?: boolean;
   children: ReactNode;
 }
 
@@ -55,6 +61,7 @@ export function GuardhouseProvider({
   clientId,
   redirectUri,
   scopes = ["openid", "profile", "offline_access"],
+  requireBiometrics = false,
   children,
 }: GuardhouseProviderProps) {
   const [state, setState] = useState<AuthState>({
@@ -65,8 +72,9 @@ export function GuardhouseProvider({
   });
   const [accessToken, setAccessToken] = useState<string | null>(null);
 
-  const secureStorage = new SecureStorageAdapter();
+  const secureStorage = new SecureStorageAdapter(requireBiometrics);
   const authUrlRef = useRef<string | null>(null);
+  const refreshLock = useRef(new PromiseLock());
 
   const handleError = useCallback((error: string) => {
     setState((prev) => ({
@@ -126,37 +134,60 @@ export function GuardhouseProvider({
       handleLoading();
       logSecurityEvent("Checking existing session");
 
-      const accessTokenStored = await secureStorage.getItem(
-        StorageKeys.ACCESS_TOKEN,
-      );
-      const expiresAt = await secureStorage.getItem(StorageKeys.EXPIRES_AT);
-      const userStr = await secureStorage.getItem(StorageKeys.USER);
+      let accessTokenStored: string | null = null;
+      let userStr: string | null = null;
+
+      try {
+        accessTokenStored = await secureStorage.getItem(
+          StorageKeys.ACCESS_TOKEN,
+        );
+        userStr = await secureStorage.getItem(StorageKeys.USER);
+      } catch (error: any) {
+        if (requireBiometrics && error?.message?.includes("cancelled")) {
+          console.log(
+            "Biometric authentication cancelled during session check",
+          );
+          setState((prev) => ({
+            ...prev,
+            isLoading: false,
+            isAuthenticated: false,
+          }));
+          return;
+        }
+        throw error;
+      }
 
       if (!accessTokenStored || !userStr) {
         logSecurityEvent("No existing session found");
-        setState((prev) => ({ ...prev, isLoading: false }));
-        return;
-      }
-
-      const now = Math.floor(Date.now() / 1000);
-      if (expiresAt && parseInt(expiresAt) < now) {
-        logSecurityEvent("Session expired", {
-          expiresAt: parseInt(expiresAt),
-          now,
-        });
-        await clearAuthState();
         setState((prev) => ({
           ...prev,
           isLoading: false,
           isAuthenticated: false,
-          user: null,
+        }));
+        return;
+      }
+
+      if (isTokenExpired(accessTokenStored)) {
+        logSecurityEvent("Session expired, will require biometrics on refresh");
+        setState((prev) => ({
+          ...prev,
+          isLoading: false,
+          isAuthenticated: false,
         }));
         return;
       }
 
       const userData: CoreUser = JSON.parse(userStr);
       setAccessToken(accessTokenStored);
-      handleSuccess(userData);
+      setState((prev) => ({
+        ...prev,
+        isLoading: false,
+        error: null,
+        isAuthenticated: true,
+        user: userData,
+      }));
+
+      logSecurityEvent("Session check successful");
     } catch (error) {
       console.error("Session check failed:", error);
       logSecurityEvent("Session check failed", { error: String(error) });
@@ -167,7 +198,7 @@ export function GuardhouseProvider({
         user: null,
       }));
     }
-  }, [secureStorage, clearAuthState, handleLoading, handleSuccess]);
+  }, [secureStorage, clearAuthState, handleLoading, requireBiometrics]);
 
   useEffect(() => {
     checkSession();
@@ -466,93 +497,134 @@ export function GuardhouseProvider({
   );
 
   const getAccessToken = useCallback(async (): Promise<string | null> => {
-    try {
-      const accessTokenStored = await secureStorage.getItem(
-        StorageKeys.ACCESS_TOKEN,
-      );
-      const expiresAt = await secureStorage.getItem(StorageKeys.EXPIRES_AT);
-      const refreshToken = await secureStorage.getItem(
-        StorageKeys.REFRESH_TOKEN,
-      );
+    return refreshLock.current.run(async () => {
+      try {
+        logSecurityEvent("Getting access token (with lock)");
 
-      if (!accessTokenStored) {
-        logSecurityEvent("No access token found");
-        return null;
-      }
+        let accessTokenStored: string | null = null;
+        let refreshToken: string | null = null;
 
-      const now = Math.floor(Date.now() / 1000);
+        try {
+          accessTokenStored = await secureStorage.getItem(
+            StorageKeys.ACCESS_TOKEN,
+          );
+          refreshToken = await secureStorage.getItem(StorageKeys.REFRESH_TOKEN);
+        } catch (error: any) {
+          if (requireBiometrics && error?.message?.includes("cancelled")) {
+            throw new BiometricAuthFailedError(
+              "Biometric authentication cancelled",
+              true,
+            );
+          }
+          throw error;
+        }
 
-      if (expiresAt && parseInt(expiresAt) > now + 60) {
-        logSecurityEvent("Access token is still valid", {
-          expiresAt: parseInt(expiresAt),
-          now,
+        if (!accessTokenStored) {
+          logSecurityEvent("No access token found");
+          return null;
+        }
+
+        if (!isTokenExpired(accessTokenStored)) {
+          logSecurityEvent("Access token is still valid");
+          return accessTokenStored;
+        }
+
+        logSecurityEvent("Access token expired, attempting refresh");
+
+        if (!refreshToken) {
+          logSecurityEvent("No refresh token available");
+          throw new SessionExpiredError(
+            "Session expired and no refresh token available",
+          );
+        }
+
+        const tokenEndpoint = `${authority}/connect/token`;
+
+        const response = await fetch(tokenEndpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body: new URLSearchParams({
+            grant_type: "refresh_token",
+            refresh_token: refreshToken,
+            client_id: clientId,
+          }),
         });
-        return accessTokenStored;
-      }
 
-      logSecurityEvent("Access token expired, attempting refresh");
+        if (!response.ok) {
+          const errorText = await response.text();
+          logSecurityEvent("Token refresh failed", {
+            error: errorText,
+            status: response.status,
+          });
+          throw new RefreshTokenError(
+            `Failed to refresh token: ${errorText}`,
+            response.status,
+          );
+        }
 
-      if (!refreshToken) {
-        logSecurityEvent("No refresh token available, clearing session");
-        await clearAuthState();
-        return null;
-      }
+        const tokenData: TokenData = await response.json();
 
-      const tokenEndpoint = `${authority}/connect/token`;
+        const newExpiresAt =
+          Math.floor(Date.now() / 1000) + tokenData.expires_in;
 
-      const response = await fetch(tokenEndpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: new URLSearchParams({
-          grant_type: "refresh_token",
-          refresh_token: refreshToken,
-          client_id: clientId,
-        }),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        logSecurityEvent("Token refresh failed", { error: errorText });
-        await clearAuthState();
-        return null;
-      }
-
-      const tokenData: TokenData = await response.json();
-
-      const newExpiresAt = Math.floor(Date.now() / 1000) + tokenData.expires_in;
-
-      await secureStorage.setItem(
-        StorageKeys.ACCESS_TOKEN,
-        tokenData.access_token,
-      );
-      if (tokenData.refresh_token) {
         await secureStorage.setItem(
-          StorageKeys.REFRESH_TOKEN,
-          tokenData.refresh_token,
+          StorageKeys.ACCESS_TOKEN,
+          tokenData.access_token,
         );
+        if (tokenData.refresh_token) {
+          await secureStorage.setItem(
+            StorageKeys.REFRESH_TOKEN,
+            tokenData.refresh_token,
+          );
+        }
+        if (tokenData.id_token) {
+          await secureStorage.setItem(StorageKeys.ID_TOKEN, tokenData.id_token);
+        }
+        await secureStorage.setItem(
+          StorageKeys.EXPIRES_AT,
+          newExpiresAt.toString(),
+        );
+
+        setAccessToken(tokenData.access_token);
+
+        logSecurityEvent("Token refreshed successfully");
+
+        return tokenData.access_token;
+      } catch (error) {
+        if (error instanceof BiometricAuthFailedError) {
+          console.log("Biometric authentication cancelled:", error.message);
+          throw error;
+        }
+
+        if (
+          error instanceof SessionExpiredError ||
+          error instanceof RefreshTokenError
+        ) {
+          console.error("Token refresh failed:", error);
+          await clearAuthState();
+          setState((prev) => ({
+            ...prev,
+            isAuthenticated: false,
+            user: null,
+            error: error.message,
+          }));
+          throw error;
+        }
+
+        console.error("Get access token failed:", error);
+        logSecurityEvent("Get access token failed", { error: String(error) });
+        await clearAuthState();
+        setState((prev) => ({
+          ...prev,
+          isAuthenticated: false,
+          user: null,
+        }));
+        return null;
       }
-      if (tokenData.id_token) {
-        await secureStorage.setItem(StorageKeys.ID_TOKEN, tokenData.id_token);
-      }
-      await secureStorage.setItem(
-        StorageKeys.EXPIRES_AT,
-        newExpiresAt.toString(),
-      );
-
-      setAccessToken(tokenData.access_token);
-
-      logSecurityEvent("Token refreshed successfully");
-
-      return tokenData.access_token;
-    } catch (error) {
-      console.error("Get access token failed:", error);
-      logSecurityEvent("Get access token failed", { error: String(error) });
-      await clearAuthState();
-      return null;
-    }
-  }, [authority, clientId, secureStorage, clearAuthState]);
+    });
+  }, [authority, clientId, secureStorage, clearAuthState, requireBiometrics]);
 
   const contextValue: AuthContextValue = {
     ...state,
