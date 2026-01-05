@@ -20,6 +20,7 @@ export const GuardhouseConstants = {
   },
   TokenTypes: {
     Jwt: "JWT",
+    AtJwt: "at+jwt",
   },
   Headers: {
     Authorization: "Authorization",

@@ -178,13 +178,32 @@ export class GuardhouseClient {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        console.log(`[GuardhouseClient] Response Status: ${response.status}`);
-        console.log(`[GuardhouseClient] Response Body:`, errorText);
-
         const errorData = await this.parseErrorResponse(response);
+        let errorMessage =
+          errorData.error_description ||
+          errorData.error ||
+          `Request failed with status ${response.status}`;
+
+        if (
+          errorData.errors &&
+          Array.isArray(errorData.errors) &&
+          errorData.errors.length > 0
+        ) {
+          const error = errorData.errors[0];
+          if (error.message) {
+            errorMessage = error.message;
+          } else if (typeof error === "string") {
+            errorMessage = error;
+          }
+        }
+
+        console.error(`[GuardhouseClient] Error response:`, {
+          status: response.status,
+          statusText: response.statusText,
+          errorData: JSON.stringify(errorData, null, 2),
+        });
         throw new GuardhouseError(
-          errorData.error_description || errorData.error || "Request failed",
+          errorMessage,
           errorData.error,
           response.status,
         );
@@ -222,13 +241,9 @@ export class GuardhouseClient {
    * @param response - Fetch response object
    * @returns Parsed error object
    */
-  private async parseErrorResponse(response: Response): Promise<{
-    error?: string;
-    error_description?: string;
-  }> {
+  private async parseErrorResponse(response: Response): Promise<any> {
     try {
-      const data = await response.json();
-      return data as any;
+      return await response.json();
     } catch {
       return {};
     }
@@ -320,15 +335,18 @@ export class GuardhouseClient {
 
   /**
    * Fetch user info using access token
-   * 
+   *
    * SECURITY:
    * - Uses Bearer token in Authorization header
    * - Standard OIDC endpoint: /connect/userinfo
-   * 
+   *
    * @param token - Access token
-   @returns User information
-   * 
+   * @returns User information
+   *
    * @throws {GuardhouseError} On fetch failure
+   *
+   * NOTE: This endpoint is designed for user tokens (from authorization code flow).
+   * For client credentials tokens, use introspectToken() instead.
    */
   async getUserInfo(token: string): Promise<UserInfoResponse> {
     const response = await this.fetch("/connect/userinfo", {
@@ -336,6 +354,35 @@ export class GuardhouseClient {
     });
 
     return response.data as UserInfoResponse;
+  }
+
+  /**
+   * Introspect token to get token information
+   *
+   * SECURITY:
+   * - Uses Basic auth for client credentials
+   * - Standard OAuth 2.0 endpoint: /connect/introspect
+   *
+   * @param token - Access token to introspect
+   * @returns Token information
+   *
+   * @throws {GuardhouseError} On introspection failure
+   *
+   * NOTE: Use this for client credentials tokens since userinfo doesn't support them.
+   */
+  async introspectToken(token: string): Promise<IntrospectionResponse> {
+    const body = new URLSearchParams({
+      token,
+      token_type_hint: "access_token",
+    });
+
+    const response = await this.postForm<IntrospectionResponse>(
+      "/connect/introspect",
+      body,
+      true,
+    );
+
+    return response;
   }
 
   /**
@@ -370,18 +417,23 @@ export class GuardhouseClient {
    *
    * @param endpoint - API endpoint path
    * @param body - Form data
+   * @param skipAuthHeader - Skip adding auth header
    * @returns Response with data, status, headers
    *
    * @throws {GuardhouseError} On HTTP or network errors
    */
-  async postForm<T>(endpoint: string, body: URLSearchParams): Promise<T> {
+  async postForm<T>(
+    endpoint: string,
+    body: URLSearchParams,
+    skipAuthHeader = false,
+  ): Promise<T> {
     const response = await this.fetch(endpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
       },
       body: body.toString(),
-      skipAuthHeader: false,
+      skipAuthHeader,
     });
 
     return response.data as T;

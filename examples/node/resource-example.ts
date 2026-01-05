@@ -5,7 +5,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3002;
 
 const AUTHORITY = process.env.AUTHORITY || "https://auth.example.com";
 const AUDIENCE = process.env.AUDIENCE || "your-api-audience";

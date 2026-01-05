@@ -132,41 +132,20 @@ export class GuardhouseNodeClient {
       const body = new URLSearchParams({
         grant_type: "client_credentials",
         scope,
+        client_id: this.options.clientId,
+        client_secret: this.options.clientSecret,
       });
-
-      console.log("\n🔵 DEBUG: Requesting token");
-      console.log(
-        "   URL:",
-        `${this.options.authority}/${GuardhouseConstants.Endpoints.ConnectToken}`,
-      );
-      console.log("   Method: POST");
-      console.log(
-        "   Headers: Content-Type: application/x-www-form-urlencoded",
-      );
-      console.log("   Body:", Object.fromEntries(body.entries()));
-      console.log("");
 
       const tokenResponse = await client.postForm<TokenResponse>(
         `/${GuardhouseConstants.Endpoints.ConnectToken}`,
         body,
+        true,
       );
 
-      console.log("\n🟢 DEBUG: Token response received");
-      console.log("   Status: Success");
-      console.log("   Response:", {
-        access_token: tokenResponse.access_token.substring(0, 20) + "...",
-        token_type: tokenResponse.token_type,
-        expires_in: tokenResponse.expires_in,
-        scope: tokenResponse.scope,
-      });
-      console.log("");
+      return tokenResponse;
 
       return tokenResponse;
     } catch (error) {
-      console.log("\n🔴 DEBUG: Token request failed");
-      console.log("   Error:", error instanceof Error ? error.message : error);
-      console.log("");
-
       const errorMessage = stripStackTrace(error as Error);
       throw new Error(
         `Failed to request token: ${errorMessage}. ` +

@@ -44,7 +44,7 @@ export class GuardhouseResourceService {
     this.jwksUri = "";
 
     if (this.options.validationMode === "jwt_signature") {
-      this.jwksUri = `${this.options.authority}/.well-known/jwks.json`;
+      this.jwksUri = `${this.options.authority}/.well-known/jwks`;
 
       validateHttpsUrl(this.jwksUri, "JWKS endpoint");
 
@@ -147,7 +147,7 @@ export class GuardhouseResourceService {
       throw new Error("Invalid algorithm: 'none' is not allowed");
     }
 
-    if (typ && typ !== GuardhouseConstants.TokenTypes.Jwt) {
+    if (typ && !this.options.tokenTypes?.includes(typ)) {
       throw new Error(`Invalid token type: ${typ}`);
     }
 
@@ -165,12 +165,12 @@ export class GuardhouseResourceService {
 
     const signingKey = await this.getSigningKey(kid);
 
+    const normalizedAuthority = this.options.authority?.endsWith("/")
+      ? this.options.authority.slice(0, -1)
+      : this.options.authority;
+
     const verified = jwt.verify(token, signingKey, {
       algorithms: [alg as jwt.Algorithm],
-      issuer:
-        this.options.validateIssuer !== false
-          ? this.options.authority
-          : undefined,
       audience:
         this.options.validateAudience !== false
           ? this.options.audience
@@ -185,7 +185,11 @@ export class GuardhouseResourceService {
     const payload = verified as any;
 
     if (this.options.validateIssuer !== false) {
-      if (payload.iss !== this.options.authority) {
+      const normalizedIssuer = payload.iss?.endsWith("/")
+        ? payload.iss.slice(0, -1)
+        : payload.iss;
+
+      if (normalizedIssuer !== normalizedAuthority) {
         throw new Error("Invalid issuer");
       }
     }
@@ -302,6 +306,9 @@ export class GuardhouseResourceService {
       this.options.tokenTypes &&
       !this.options.tokenTypes.includes(introspectionResult.token_type)
     ) {
+      console.log(
+        `[Guardhouse] Rejecting token with type: ${introspectionResult.token_type}`,
+      );
       throw new Error(`Invalid token type: ${introspectionResult.token_type}`);
     }
 
@@ -462,7 +469,10 @@ export function guardhouseMiddleware(
     validAlgorithms: options.validAlgorithms || [
       GuardhouseConstants.Algorithms.RS256,
     ],
-    tokenTypes: options.tokenTypes || [GuardhouseConstants.TokenTypes.Jwt],
+    tokenTypes: options.tokenTypes || [
+      GuardhouseConstants.TokenTypes.Jwt,
+      GuardhouseConstants.TokenTypes.AtJwt,
+    ],
     introspectionCredentialTransmission,
     requireHttpsMetadata: options.requireHttpsMetadata,
     ...options,
