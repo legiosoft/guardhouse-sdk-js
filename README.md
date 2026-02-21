@@ -15,6 +15,15 @@
 - Run `npm run build:core` to build the core package first.
 - Use `npm run build` to build all packages in the correct order.
 
+## Debug Mode
+
+All SDK packages expose a `debug` option. When enabled, SDK internals now emit detailed logs for lifecycle events, network calls, token operations, cache decisions, and auth flow transitions.
+
+- `@guardhouse/core`: pass `debug: true` in `GuardhouseClient` config (or call `setGuardhouseDebug(true)`)
+- `@guardhouse/node`: pass `debug: true` in `GuardhouseNodeClient` and `guardhouseMiddleware` options
+- `@guardhouse/react`: pass `debug: true` in `GuardhouseProvider` config
+- `@guardhouse/react-native`: pass `debug={true}` to `GuardhouseProvider`
+
 ## License
 
 See LICENSE file for details.

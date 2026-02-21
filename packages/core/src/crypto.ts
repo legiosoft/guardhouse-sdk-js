@@ -184,6 +184,8 @@ class FallbackCryptoAdapter implements CryptoAdapter {
  * SECURITY: Runtime detection ensures we use best available crypto
  */
 export function detectCryptoAdapter(): CryptoAdapter {
+  logger.debug("Detecting crypto adapter");
+
   if (
     typeof globalThis.crypto?.subtle === "object" &&
     typeof globalThis.crypto?.getRandomValues === "function"
@@ -267,11 +269,19 @@ export function setCryptoAdapter(adapter: CryptoAdapter): void {
  */
 export async function getCryptoAdapter(): Promise<CryptoAdapter> {
   if (globalCryptoAdapter) {
+    logger.debug("Using cached crypto adapter", {
+      adapter: globalCryptoAdapter.name,
+    });
     return globalCryptoAdapter;
   }
 
   const adapter = detectCryptoAdapter();
   globalCryptoAdapter = adapter;
+
+  logger.info("Detected crypto adapter", {
+    adapter: adapter.name,
+  });
+
   return adapter;
 }
 
@@ -283,5 +293,11 @@ export async function getCryptoAdapter(): Promise<CryptoAdapter> {
  */
 export async function initializeCrypto(): Promise<CryptoAdapter> {
   logger.debug("Initializing crypto adapter");
-  return await getCryptoAdapter();
+  const adapter = await getCryptoAdapter();
+
+  logger.debug("Crypto adapter initialized", {
+    adapter: adapter.name,
+  });
+
+  return adapter;
 }

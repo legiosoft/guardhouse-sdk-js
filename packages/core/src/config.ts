@@ -66,6 +66,12 @@ export class ConfigValidationError extends GuardhouseError {
 export function validateConfig(config: GuardhouseConfig): void {
   const logger = createGuardhouseLogger("Config", config.debug);
 
+  logger.debug("Validating configuration", {
+    authority: config.authority,
+    clientId: config.clientId,
+    hasClientSecret: Boolean(config.clientSecret),
+  });
+
   if (!config.authority) {
     throw new ConfigValidationError("Authority is required");
   }
@@ -99,6 +105,10 @@ export function validateConfig(config: GuardhouseConfig): void {
     if (error instanceof ConfigValidationError) {
       throw error;
     }
+
+    logger.error("Configuration validation failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
 
     throw new ConfigValidationError(`Invalid authority URL: ${error}`);
   }
@@ -141,6 +151,11 @@ export function buildUrl(
 ): string {
   const logger = createGuardhouseLogger("Config", config.debug);
 
+  logger.debug("Building URL", {
+    path,
+    queryParamCount: Object.keys(params).length,
+  });
+
   try {
     const url = new URL(config.authority);
 
@@ -165,6 +180,11 @@ export function buildUrl(
 
     return builtUrl;
   } catch (error) {
+    logger.error("Failed to build URL", {
+      path,
+      error: error instanceof Error ? error.message : String(error),
+    });
+
     throw new GuardhouseError(
       `Failed to build URL: ${error instanceof Error ? error.message : "Unknown error"}`,
       "URL_BUILD_ERROR",

@@ -26,8 +26,18 @@ export class GuardhouseNodeClient {
     });
   }
 
+  protected redactUrl(url: string): string {
+    return url.replace(/https?:\/\/[^\/]+/, "***");
+  }
+
   private getTokenCacheKey(): string {
-    return `guardhouse_access_token_${this.options.clientId}`;
+    const cacheKey = `guardhouse_access_token_${this.options.clientId}`;
+
+    this.logger.debug("Computed token cache key", {
+      cacheKey,
+    });
+
+    return cacheKey;
   }
 
   private isTokenExpired(
@@ -35,17 +45,30 @@ export class GuardhouseNodeClient {
     bufferSeconds: number = 60,
   ): boolean {
     const now = Math.floor(Date.now() / 1000);
-    return now >= token.expiresAt - bufferSeconds;
+    const expired = now >= token.expiresAt - bufferSeconds;
+
+    this.logger.debug("Checked cached token expiration", {
+      expired,
+      expiresAt: token.expiresAt,
+      now,
+      bufferSeconds,
+    });
+
+    return expired;
   }
 
   private async withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
     const existingLock = TokenLocks.get(key);
     if (existingLock) {
+      this.logger.debug("Waiting for existing token lock", { key });
       return existingLock.then(() => fn());
     }
 
+    this.logger.debug("Acquired token lock", { key });
+
     const promise = fn()
       .finally(() => {
+        this.logger.debug("Releasing token lock", { key });
         TokenLocks.delete(key);
       })
       .catch((error) => {
@@ -70,6 +93,8 @@ export class GuardhouseNodeClient {
   }
 
   async getAccessToken(): Promise<string> {
+    this.logger.debug("Requesting access token");
+
     const cacheKey = this.getTokenCacheKey();
     const enableCaching = this.options.enableTokenCaching !== false;
     const bufferSeconds =
@@ -79,14 +104,24 @@ export class GuardhouseNodeClient {
     if (enableCaching) {
       const cached = this.tokenCache.get(cacheKey);
       if (cached && !this.isTokenExpired(cached, bufferSeconds)) {
+        this.logger.debug("Using cached access token", {
+          cacheKey,
+        });
         return cached.accessToken;
       }
+
+      this.logger.debug("Cached token not available or expired", {
+        cacheKey,
+      });
     }
 
     return this.withLock(cacheKey, async () => {
       if (enableCaching) {
         const cached = this.tokenCache.get(cacheKey);
         if (cached && !this.isTokenExpired(cached, bufferSeconds)) {
+          this.logger.debug("Using cached token after lock acquisition", {
+            cacheKey,
+          });
           return cached.accessToken;
         }
       }
@@ -129,6 +164,11 @@ export class GuardhouseNodeClient {
   }
 
   async requestToken(): Promise<TokenResponse> {
+    this.logger.info("Requesting client credentials token", {
+      authority: this.options.authority,
+      clientId: this.options.clientId,
+    });
+
     const coreClientConfig: Record<string, unknown> = {
       authority: this.options.authority,
       clientId: this.options.clientId,
@@ -158,9 +198,17 @@ export class GuardhouseNodeClient {
         true,
       );
 
+      this.logger.info("Client credentials token request succeeded", {
+        expiresIn: tokenResponse.expires_in,
+        hasRefreshToken: Boolean(tokenResponse.refresh_token),
+      });
+
       return tokenResponse;
     } catch (error) {
       const errorMessage = stripStackTrace(error as Error);
+      this.logger.error("Client credentials token request failed", {
+        error: errorMessage,
+      });
       throw new Error(
         `Failed to request token: ${errorMessage}. ` +
           `Please verify your Guardhouse credentials. ` +
@@ -170,6 +218,10 @@ export class GuardhouseNodeClient {
   }
 
   async refreshToken(refreshToken: string): Promise<TokenResponse> {
+    this.logger.info("Refreshing access token", {
+      hasRefreshToken: Boolean(refreshToken),
+    });
+
     const coreClientConfig: Record<string, unknown> = {
       authority: this.options.authority,
       clientId: this.options.clientId,
@@ -192,9 +244,16 @@ export class GuardhouseNodeClient {
         body,
       );
 
+      this.logger.info("Access token refresh succeeded", {
+        expiresIn: tokenResponse.expires_in,
+      });
+
       return tokenResponse;
     } catch (error) {
       const errorMessage = stripStackTrace(error as Error);
+      this.logger.error("Access token refresh failed", {
+        error: errorMessage,
+      });
       throw new Error(
         `Failed to refresh token: ${errorMessage}. ` +
           `Your refresh token may have expired.`,
@@ -208,8 +267,20 @@ export class GuardhouseNodeClient {
       this.options.maxRetryAttempts ||
       GuardhouseConstants.Defaults.MaxRetryAttempts;
 
+    this.logger.debug("Starting authenticated request", {
+      url: this.redactUrl(url),
+      maxRetries,
+      method: options?.method || "GET",
+    });
+
     while (retryCount <= maxRetries) {
       const correlationId = generateCorrelationId();
+
+      this.logger.debug(`Attempting request [${correlationId}]`, {
+        retryCount,
+        url: this.redactUrl(url),
+        method: options?.method || "GET",
+      });
 
       try {
         const accessToken = await this.getAccessToken();
@@ -226,7 +297,7 @@ export class GuardhouseNodeClient {
 
         if (response.status === 401 && retryCount === 0) {
           this.logger.warn(`Received 401, clearing cache [${correlationId}]`, {
-            url: url.replace(/https?:\/\/[^\/]+/, "***"),
+            url: this.redactUrl(url),
           });
 
           const cachedKey = this.getTokenCacheKey();
@@ -239,7 +310,7 @@ export class GuardhouseNodeClient {
           const errorText = await response.text();
           this.logger.warn(`Request failed [${correlationId}]`, {
             status: response.status,
-            url: url.replace(/https?:\/\/[^\/]+/, "***"),
+            url: this.redactUrl(url),
             error: errorText.substring(0, 200),
           });
           throw new Error(`Request failed with status ${response.status}`);
@@ -247,16 +318,26 @@ export class GuardhouseNodeClient {
 
         this.logger.info(`Request successful [${correlationId}]`, {
           status: response.status,
-          url: url.replace(/https?:\/\/[^\/]+/, "***"),
+          url: this.redactUrl(url),
         });
 
         return (await response.json()) as T;
       } catch (error) {
         if (retryCount >= maxRetries) {
+          this.logger.error("Authenticated request failed after retries", {
+            retryCount,
+            url: this.redactUrl(url),
+            error: stripStackTrace(error as Error),
+          });
           throw error;
         }
 
         const delay = Math.pow(2, retryCount) * 1000;
+        this.logger.warn("Retrying authenticated request", {
+          retryCount,
+          delay,
+          url: this.redactUrl(url),
+        });
         await new Promise((resolve) => setTimeout(resolve, delay));
         retryCount++;
       }
@@ -266,10 +347,17 @@ export class GuardhouseNodeClient {
   }
 
   async get<T>(url: string): Promise<T> {
+    this.logger.debug("Executing GET request", {
+      url: this.redactUrl(url),
+    });
     return this.fetch<T>(url, { method: "GET" });
   }
 
   async post<T>(url: string, data?: any): Promise<T> {
+    this.logger.debug("Executing POST request", {
+      url: this.redactUrl(url),
+      hasBody: Boolean(data),
+    });
     return this.fetch<T>(url, {
       method: "POST",
       body: data ? JSON.stringify(data) : undefined,
@@ -277,6 +365,10 @@ export class GuardhouseNodeClient {
   }
 
   async put<T>(url: string, data?: any): Promise<T> {
+    this.logger.debug("Executing PUT request", {
+      url: this.redactUrl(url),
+      hasBody: Boolean(data),
+    });
     return this.fetch<T>(url, {
       method: "PUT",
       body: data ? JSON.stringify(data) : undefined,
@@ -284,10 +376,17 @@ export class GuardhouseNodeClient {
   }
 
   async delete<T>(url: string): Promise<T> {
+    this.logger.debug("Executing DELETE request", {
+      url: this.redactUrl(url),
+    });
     return this.fetch<T>(url, { method: "DELETE" });
   }
 
   async patch<T>(url: string, data?: any): Promise<T> {
+    this.logger.debug("Executing PATCH request", {
+      url: this.redactUrl(url),
+      hasBody: Boolean(data),
+    });
     return this.fetch<T>(url, {
       method: "PATCH",
       body: data ? JSON.stringify(data) : undefined,
@@ -296,6 +395,7 @@ export class GuardhouseNodeClient {
 
   private cacheToken(tokenResponse: TokenResponse): void {
     if (this.options.enableTokenCaching === false) {
+      this.logger.debug("Skipping token cache because caching is disabled");
       return;
     }
 
@@ -325,10 +425,21 @@ export class GuardhouseNodeClient {
         expiresAt: new Date(expiresAt * 1000).toISOString(),
         bufferSeconds,
       });
+    } else {
+      this.logger.warn(
+        "Skipping cache because token would already be expired",
+        {
+          expiresIn: tokenResponse.expires_in,
+          bufferSeconds,
+        },
+      );
     }
   }
 
   async clearCache(): Promise<void> {
+    this.logger.info("Clearing in-memory token cache", {
+      sizeBefore: this.tokenCache.size,
+    });
     this.tokenCache.clear();
   }
 }
@@ -338,6 +449,12 @@ export class GuardhouseAdminClient extends GuardhouseNodeClient {
     const correlationId = generateCorrelationId();
     const auth = await this.getAccessToken();
     const url = `${this.options.authority}/api/users/${userId}`;
+
+    this.logger.debug(`Deleting user [${correlationId}]`, {
+      userId,
+      url: this.redactUrl(url),
+      hasAccessToken: Boolean(auth),
+    });
 
     try {
       const response = await fetch(url, {
@@ -371,6 +488,12 @@ export class GuardhouseAdminClient extends GuardhouseNodeClient {
     const correlationId = generateCorrelationId();
     const auth = await this.getAccessToken();
     const url = `${this.options.authority}/api/users/${userId}`;
+
+    this.logger.debug(`Getting user [${correlationId}]`, {
+      userId,
+      url: this.redactUrl(url),
+      hasAccessToken: Boolean(auth),
+    });
 
     try {
       const response = await fetch(url, {
@@ -418,6 +541,14 @@ export class GuardhouseAdminClient extends GuardhouseNodeClient {
     const queryString = searchParams.toString();
     const url = `${this.options.authority}/api/users${queryString ? `?${queryString}` : ""}`;
 
+    this.logger.debug(`Listing users [${correlationId}]`, {
+      url: this.redactUrl(url),
+      hasAccessToken: Boolean(auth),
+      hasSearch: Boolean(params?.search),
+      page: params?.page,
+      pageSize: params?.pageSize,
+    });
+
     try {
       const response = await fetch(url, {
         method: "GET",
@@ -451,6 +582,12 @@ export class GuardhouseAdminClient extends GuardhouseNodeClient {
     const correlationId = generateCorrelationId();
     const auth = await this.getAccessToken();
     const url = `${this.options.authority}/api/users`;
+
+    this.logger.debug(`Creating user [${correlationId}]`, {
+      url: this.redactUrl(url),
+      hasAccessToken: Boolean(auth),
+      hasUserData: Boolean(userData),
+    });
 
     try {
       const response = await fetch(url, {
@@ -486,6 +623,13 @@ export class GuardhouseAdminClient extends GuardhouseNodeClient {
     const correlationId = generateCorrelationId();
     const auth = await this.getAccessToken();
     const url = `${this.options.authority}/api/users/${userId}`;
+
+    this.logger.debug(`Updating user [${correlationId}]`, {
+      userId,
+      url: this.redactUrl(url),
+      hasAccessToken: Boolean(auth),
+      hasUserData: Boolean(userData),
+    });
 
     try {
       const response = await fetch(url, {

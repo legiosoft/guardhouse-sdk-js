@@ -7,7 +7,11 @@ import {
   useMemo,
   ReactNode,
 } from "react";
-import { generateAuthUrl, generatePKCE } from "@guardhouse/core";
+import {
+  generateAuthUrl,
+  generatePKCE,
+  setGuardhouseDebug,
+} from "@guardhouse/core";
 import type { User as CoreUser } from "@guardhouse/core";
 import {
   GuardhouseConfig,
@@ -67,20 +71,33 @@ export function GuardhouseProvider({
     [config.debug],
   );
 
-  const handleError = useCallback((error: string) => {
-    logger.error("Authentication flow failed", { error });
+  useEffect(() => {
+    setGuardhouseDebug(Boolean(config.debug));
+    logger.info("Debug mode updated", { enabled: Boolean(config.debug) });
+  }, [config.debug, logger]);
 
-    setState((prev) => ({
-      ...prev,
-      isLoading: false,
-      error,
-      isAuthenticated: false,
-      user: null,
-    }));
-  }, []);
+  const handleError = useCallback(
+    (error: string) => {
+      logger.error("Authentication flow failed", { error });
+
+      setState((prev) => ({
+        ...prev,
+        isLoading: false,
+        error,
+        isAuthenticated: false,
+        user: null,
+      }));
+    },
+    [logger],
+  );
 
   const handleSuccess = useCallback(
     (user: CoreUser, tokenData?: TokenData) => {
+      logger.debug("Updating auth state to authenticated", {
+        subject: user.sub,
+        hasTokenData: Boolean(tokenData),
+      });
+
       setState((prev) => ({
         ...prev,
         isLoading: false,
@@ -90,6 +107,7 @@ export function GuardhouseProvider({
       }));
 
       if (tokenData && config.onRedirectCallback) {
+        logger.debug("Running redirect callback");
         config.onRedirectCallback();
       }
 
@@ -117,6 +135,12 @@ export function GuardhouseProvider({
   const handleCallback = useCallback(async () => {
     const params = parseQueryParams(window.location.search);
 
+    logger.debug("Handling OAuth callback", {
+      hasCode: Boolean(params["code"]),
+      hasState: Boolean(params["state"]),
+      hasError: Boolean(params["error"]),
+    });
+
     const code = params["code"];
     const state = params["state"];
     const error = params["error"];
@@ -129,6 +153,7 @@ export function GuardhouseProvider({
     }
 
     if (!code || !state) {
+      logger.debug("No authorization callback parameters found");
       setState((prev) => ({ ...prev, isLoading: false }));
       return;
     }
@@ -138,6 +163,10 @@ export function GuardhouseProvider({
 
       const storedState = await sessionStorage.getItem(StorageKeys.STATE);
       if (storedState !== state) {
+        logger.warn("State mismatch detected during callback", {
+          receivedState: state,
+          hasStoredState: Boolean(storedState),
+        });
         throw new Error("State parameter mismatch. Possible CSRF attack.");
       }
 
@@ -147,6 +176,8 @@ export function GuardhouseProvider({
       if (!codeVerifier) {
         throw new Error("Code verifier not found in session storage");
       }
+
+      logger.debug("State and code verifier validated");
 
       const nonce = await sessionStorage.getItem(StorageKeys.NONCE);
 
@@ -180,6 +211,12 @@ export function GuardhouseProvider({
 
       const tokenData: TokenData = await response.json();
 
+      logger.debug("Token exchange succeeded", {
+        expiresIn: tokenData.expires_in,
+        hasRefreshToken: Boolean(tokenData.refresh_token),
+        hasIdToken: Boolean(tokenData.id_token),
+      });
+
       const expiresAt = Math.floor(Date.now() / 1000) + tokenData.expires_in;
 
       await storage.setItem(StorageKeys.ACCESS_TOKEN, tokenData.access_token);
@@ -189,6 +226,10 @@ export function GuardhouseProvider({
       );
       await storage.setItem(StorageKeys.ID_TOKEN, tokenData.id_token || "");
       await storage.setItem(StorageKeys.EXPIRES_AT, expiresAt.toString());
+
+      logger.debug("Token data stored", {
+        expiresAt,
+      });
 
       let fallbackUserFromIdToken: CoreUser | null = null;
 
@@ -234,6 +275,10 @@ export function GuardhouseProvider({
         const userData = await userResponse.json();
         authenticatedUser = userData;
         await storage.setItem(StorageKeys.USER, JSON.stringify(userData));
+
+        logger.debug("User profile fetched", {
+          subject: userData?.sub,
+        });
       }
 
       if (!authenticatedUser) {
@@ -243,6 +288,10 @@ export function GuardhouseProvider({
       }
 
       handleSuccess(authenticatedUser, tokenData);
+
+      logger.info("OAuth callback handled successfully", {
+        subject: authenticatedUser.sub,
+      });
 
       removeQueryParams();
     } catch (error) {
@@ -262,23 +311,33 @@ export function GuardhouseProvider({
     handleError,
     handleSuccess,
     clearAuthState,
+    logger,
   ]);
 
   const checkSession = useCallback(async () => {
     try {
       handleLoading();
+      logger.debug("Checking existing session");
 
       const accessToken = await storage.getItem(StorageKeys.ACCESS_TOKEN);
       const expiresAt = await storage.getItem(StorageKeys.EXPIRES_AT);
       const userStr = await storage.getItem(StorageKeys.USER);
 
       if (!accessToken || !userStr) {
+        logger.debug("No active session found in storage", {
+          hasAccessToken: Boolean(accessToken),
+          hasUser: Boolean(userStr),
+        });
         setState((prev) => ({ ...prev, isLoading: false }));
         return;
       }
 
       const now = Math.floor(Date.now() / 1000);
       if (expiresAt && parseInt(expiresAt) < now) {
+        logger.info("Stored session has expired", {
+          expiresAt,
+          now,
+        });
         await clearAuthState();
         setState((prev) => ({
           ...prev,
@@ -291,6 +350,10 @@ export function GuardhouseProvider({
 
       const userData: CoreUser = JSON.parse(userStr);
       handleSuccess(userData);
+
+      logger.info("Restored authenticated session", {
+        subject: userData.sub,
+      });
     } catch (error) {
       logger.error("Session check failed", {
         error: String(error),
@@ -307,6 +370,8 @@ export function GuardhouseProvider({
   useEffect(() => {
     if (typeof window === "undefined") return;
 
+    logger.debug("Initializing Guardhouse React provider");
+
     const params = parseQueryParams(window.location.search);
 
     if (params["code"] && params["state"]) {
@@ -314,12 +379,18 @@ export function GuardhouseProvider({
     } else {
       checkSession();
     }
-  }, [handleCallback, checkSession]);
+  }, [handleCallback, checkSession, logger]);
 
   const loginWithRedirect = useCallback(
     async (options?: LoginOptions) => {
       try {
         logger.info("Starting redirect login flow");
+
+        if (options?.scope) {
+          logger.debug("Login scope override provided", {
+            scope: options.scope,
+          });
+        }
 
         const { codeVerifier, codeChallenge } = await generatePKCE({
           debug: config.debug,
@@ -348,14 +419,21 @@ export function GuardhouseProvider({
             "gh_app_state",
             JSON.stringify(options.appState),
           );
+
+          logger.debug("Stored app state for post-login redirect", {
+            returnTo: options.appState.returnTo,
+          });
         }
 
+        logger.debug("Redirecting browser to authorization endpoint", {
+          authority: config.authority,
+        });
         window.location.href = authUrl;
       } catch (error) {
         handleError(error instanceof Error ? error.message : "Login failed");
       }
     },
-    [config, sessionStorage, handleError],
+    [config, sessionStorage, handleError, logger],
   );
 
   const logout = useCallback(
@@ -375,35 +453,51 @@ export function GuardhouseProvider({
         logoutUrl.searchParams.set("id_token_hint", idToken);
       }
 
+      logger.debug("Clearing local auth state before redirecting to logout");
       await clearAuthState();
 
+      logger.debug("Redirecting browser to logout endpoint", {
+        authority: config.authority,
+      });
       window.location.href = logoutUrl.toString();
     },
-    [config, storage, clearAuthState],
+    [config, storage, clearAuthState, logger],
   );
 
   const getAccessToken = useCallback(async (): Promise<string | null> => {
     const accessToken = await storage.getItem(StorageKeys.ACCESS_TOKEN);
+
+    logger.debug("Retrieved access token from storage", {
+      hasAccessToken: Boolean(accessToken),
+    });
+
     return accessToken;
-  }, [storage]);
+  }, [storage, logger]);
 
   const getAccessTokenSilently = useCallback(async (): Promise<
     string | null
   > => {
+    logger.debug("Attempting silent access token retrieval");
+
     const accessToken = await storage.getItem(StorageKeys.ACCESS_TOKEN);
     const expiresAt = await storage.getItem(StorageKeys.EXPIRES_AT);
     const refreshToken = await storage.getItem(StorageKeys.REFRESH_TOKEN);
 
     if (!accessToken) {
+      logger.debug("No access token available for silent retrieval");
       return null;
     }
 
     const now = Math.floor(Date.now() / 1000);
     if (expiresAt && parseInt(expiresAt) > now + 60) {
+      logger.debug("Using existing access token for silent retrieval", {
+        expiresAt,
+      });
       return accessToken;
     }
 
     if (!refreshToken) {
+      logger.warn("Silent token retrieval failed: missing refresh token");
       await clearAuthState();
       return null;
     }
@@ -424,6 +518,9 @@ export function GuardhouseProvider({
       });
 
       if (!response.ok) {
+        logger.warn("Silent refresh returned non-success status", {
+          status: response.status,
+        });
         await clearAuthState();
         return null;
       }
@@ -438,6 +535,10 @@ export function GuardhouseProvider({
         tokenData.refresh_token || "",
       );
       await storage.setItem(StorageKeys.EXPIRES_AT, newExpiresAt.toString());
+
+      logger.info("Silent token refresh succeeded", {
+        expiresAt: newExpiresAt,
+      });
 
       return tokenData.access_token;
     } catch (error) {

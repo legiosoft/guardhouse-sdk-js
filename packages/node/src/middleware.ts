@@ -79,7 +79,19 @@ export class GuardhouseResourceService {
         jwksRequestsPerMinute: 10,
         timeout: GuardhouseConstants.Defaults.RequestTimeoutSeconds * 1000,
       });
+
+      this.logger.debug("JWKS client initialized", {
+        jwksUri: this.jwksUri,
+      });
     }
+  }
+
+  private redactToken(token: string): string {
+    if (!token || token.length < 12) {
+      return "***";
+    }
+
+    return `${token.substring(0, 6)}...${token.substring(token.length - 6)}`;
   }
 
   private async getSigningKey(kid: string): Promise<string> {
@@ -93,12 +105,24 @@ export class GuardhouseResourceService {
 
     const cacheEntry = this.keyCache.get(kid);
     if (cacheEntry && cacheEntry.expiresAt > Date.now()) {
+      this.logger.debug("Using cached signing key", {
+        kid,
+      });
       return cacheEntry.key;
     }
+
+    this.logger.debug("Fetching signing key from JWKS", {
+      kid,
+      jwksUri: this.jwksUri,
+    });
 
     return new Promise((resolve, reject) => {
       this.jwksClient!.getSigningKey(kid, (err, key) => {
         if (err) {
+          this.logger.error("Failed to fetch signing key", {
+            kid,
+            error: String(err),
+          });
           reject(new Error("Failed to fetch signing key from JWKS"));
         } else if (key) {
           const publicKey = key.getPublicKey();
@@ -114,8 +138,16 @@ export class GuardhouseResourceService {
             expiresAt: Date.now() + cacheDuration,
           });
 
+          this.logger.debug("Signing key fetched and cached", {
+            kid,
+            cacheDuration,
+          });
+
           resolve(publicKey);
         } else {
+          this.logger.warn("Signing key not found in JWKS response", {
+            kid,
+          });
           reject(new Error("Signing key not found in JWKS"));
         }
       });
@@ -127,6 +159,10 @@ export class GuardhouseResourceService {
     typ?: string;
     kid?: string;
   } {
+    this.logger.debug("Validating token header", {
+      token: this.redactToken(token),
+    });
+
     const tokenParts = token.split(".");
     if (tokenParts.length !== 3) {
       throw new Error("Invalid token structure");
@@ -153,6 +189,10 @@ export class GuardhouseResourceService {
   }
 
   private async validateJwtToken(token: string): Promise<GuardhouseUser> {
+    this.logger.debug("Validating JWT token", {
+      token: this.redactToken(token),
+    });
+
     const { alg, typ, kid } = this.validateTokenHeader(token);
 
     if (alg === "none" || alg === "NONE") {
@@ -261,10 +301,20 @@ export class GuardhouseResourceService {
       throw new Error("Token issued in future (iat check failed)");
     }
 
+    this.logger.debug("JWT token validated successfully", {
+      subject: payload.sub,
+      algorithm: alg,
+      tokenType: typ,
+    });
+
     return this.buildUserFromJwtPayload(payload);
   }
 
   private async introspectToken(token: string): Promise<GuardhouseUser> {
+    this.logger.debug("Validating token via introspection", {
+      token: this.redactToken(token),
+    });
+
     if (
       !this.options.introspectionClientId ||
       !this.options.introspectionClientSecret
@@ -283,6 +333,13 @@ export class GuardhouseResourceService {
       });
       return this.buildUserFromIntrospection(cached.result);
     }
+
+    this.logger.debug("Requesting token introspection", {
+      authority: this.options.authority,
+      credentialMode:
+        this.options.introspectionCredentialTransmission ||
+        IntrospectionCredentialTransmission.BasicAuth,
+    });
 
     const coreClientConfig: Record<string, unknown> = {
       authority: this.options.authority,
@@ -388,6 +445,12 @@ export class GuardhouseResourceService {
       }
     }
 
+    this.logger.debug("Token introspection succeeded", {
+      active: introspectionResult.active,
+      subject: introspectionResult.sub,
+      expiresAt: introspectionResult.exp,
+    });
+
     return this.buildUserFromIntrospection(introspectionResult);
   }
 
@@ -408,7 +471,7 @@ export class GuardhouseResourceService {
       payload.roles.split(" ").forEach((r: string) => roles.add(r));
     }
 
-    return {
+    const user: GuardhouseUser = {
       sub: payload.sub,
       name: payload.name || payload.preferred_username || payload.username,
       username: payload.username,
@@ -423,6 +486,14 @@ export class GuardhouseResourceService {
       nbf: payload.nbf,
       azp: payload.azp,
     };
+
+    this.logger.debug("Built user claims from JWT payload", {
+      subject: user.sub,
+      roleCount: user.roles?.length || 0,
+      scopeCount: user.scopes?.length || 0,
+    });
+
+    return user;
   }
 
   private buildUserFromIntrospection(
@@ -434,7 +505,7 @@ export class GuardhouseResourceService {
       throw new Error("Introspection response missing required 'sub' claim");
     }
 
-    return {
+    const user: GuardhouseUser = {
       sub: claims.sub,
       name: claims.name,
       username: claims.username,
@@ -449,16 +520,38 @@ export class GuardhouseResourceService {
       nbf: claims.nbf,
       clientId: claims.clientId,
     };
+
+    this.logger.debug("Built user claims from introspection", {
+      subject: user.sub,
+      roleCount: user.roles?.length || 0,
+      scopeCount: user.scopes?.length || 0,
+    });
+
+    return user;
   }
 
   async validateToken(token: string): Promise<GuardhouseUser> {
     if (this.options.validationMode === "introspection") {
       this.logger.debug("Validating token via introspection");
-      return this.introspectToken(token);
+      const user = await this.introspectToken(token);
+
+      this.logger.debug("Token validation succeeded", {
+        subject: user.sub,
+        mode: "introspection",
+      });
+
+      return user;
     }
 
     this.logger.debug("Validating token via JWT signature");
-    return this.validateJwtToken(token);
+    const user = await this.validateJwtToken(token);
+
+    this.logger.debug("Token validation succeeded", {
+      subject: user.sub,
+      mode: "jwt_signature",
+    });
+
+    return user;
   }
 }
 
@@ -518,6 +611,12 @@ export function guardhouseMiddleware(
 
   const service = new GuardhouseResourceService(opts);
 
+  logger.info("Guardhouse middleware initialized", {
+    authority: opts.authority,
+    audience: opts.audience,
+    validationMode: opts.validationMode,
+  });
+
   return async (
     req: ExpressRequest,
     res: ExpressResponse,
@@ -526,6 +625,12 @@ export function guardhouseMiddleware(
     const correlationId = generateCorrelationId();
     req.correlationId = correlationId;
 
+    logger.debug(`Processing authentication request [${correlationId}]`, {
+      hasAuthorizationHeader: Object.keys(req.headers).some(
+        (key) => key.toLowerCase() === "authorization",
+      ),
+    });
+
     try {
       const authHeaders = Object.entries(req.headers)
         .filter(([key]) => key.toLowerCase() === "authorization")
@@ -533,6 +638,10 @@ export function guardhouseMiddleware(
         .filter((value) => value !== undefined && value !== null);
 
       if (authHeaders.length === 0) {
+        logger.warn(`Missing authorization header [${correlationId}]`, {
+          audience: opts.audience,
+        });
+
         res
           .status(401)
           .setHeader(
@@ -549,6 +658,10 @@ export function guardhouseMiddleware(
       }
 
       if (authHeaders.length > 1) {
+        logger.warn(
+          `Multiple authorization headers supplied [${correlationId}]`,
+        );
+
         res.status(400).json({
           error: "invalid_request",
           error_description: "Multiple authorization headers provided",
@@ -560,6 +673,8 @@ export function guardhouseMiddleware(
       const authHeader = authHeaders[0];
 
       if (!authHeader || typeof authHeader !== "string") {
+        logger.warn(`Invalid authorization header format [${correlationId}]`);
+
         res
           .status(401)
           .setHeader(
@@ -576,6 +691,8 @@ export function guardhouseMiddleware(
       }
 
       if (!authHeader.startsWith(GuardhouseConstants.Headers.BearerPrefix)) {
+        logger.warn(`Authorization header is not Bearer [${correlationId}]`);
+
         res
           .status(401)
           .setHeader(
@@ -594,7 +711,13 @@ export function guardhouseMiddleware(
         .substring(GuardhouseConstants.Headers.BearerPrefix.length)
         .trim();
 
+      logger.debug(`Bearer token extracted [${correlationId}]`, {
+        tokenLength: token.length,
+      });
+
       if (!token) {
+        logger.warn(`Bearer token missing after prefix [${correlationId}]`);
+
         res
           .status(401)
           .setHeader(
@@ -611,6 +734,11 @@ export function guardhouseMiddleware(
       }
 
       if (token.length > GuardhouseConstants.Defaults.MaxTokenLengthBytes) {
+        logger.warn(`Token exceeds maximum length [${correlationId}]`, {
+          tokenLength: token.length,
+          maxAllowed: GuardhouseConstants.Defaults.MaxTokenLengthBytes,
+        });
+
         res.status(400).json({
           error: "invalid_request",
           error_description: "Token exceeds maximum allowed length",

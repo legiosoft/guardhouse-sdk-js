@@ -142,24 +142,41 @@ export async function generatePKCE(
  *
  * @throws {Error} If crypto is not available
  */
-export async function generateState(length?: number): Promise<string>;
+export async function generateState(
+  length?: number,
+  debug?: boolean,
+): Promise<string>;
 export async function generateState(
   cryptoAdapter: CryptoAdapter,
   length?: number,
+  debug?: boolean,
 ): Promise<string>;
 export async function generateState(
   adapterOrLength: CryptoAdapter | number = 16,
-  maybeLength: number = 16,
+  maybeLengthOrDebug: number | boolean = 16,
+  maybeDebug = false,
 ): Promise<string> {
-  const logger = createGuardhouseLogger("PKCE");
+  const usesExplicitAdapter = isCryptoAdapter(adapterOrLength);
 
-  const cryptoAdapter = isCryptoAdapter(adapterOrLength)
+  const cryptoAdapter = usesExplicitAdapter
     ? adapterOrLength
     : await getCryptoAdapter();
 
-  const length = isCryptoAdapter(adapterOrLength)
-    ? maybeLength
+  const length = usesExplicitAdapter
+    ? typeof maybeLengthOrDebug === "number"
+      ? maybeLengthOrDebug
+      : 16
     : adapterOrLength;
+
+  const debug = usesExplicitAdapter
+    ? typeof maybeLengthOrDebug === "boolean"
+      ? maybeLengthOrDebug
+      : maybeDebug
+    : typeof maybeLengthOrDebug === "boolean"
+      ? maybeLengthOrDebug
+      : maybeDebug;
+
+  const logger = createGuardhouseLogger("PKCE", debug);
 
   logger.debug("Generating state", {
     length,
@@ -192,24 +209,41 @@ export async function generateState(
  *
  * @throws {Error} If crypto is not available
  */
-export async function generateNonce(length?: number): Promise<string>;
+export async function generateNonce(
+  length?: number,
+  debug?: boolean,
+): Promise<string>;
 export async function generateNonce(
   cryptoAdapter: CryptoAdapter,
   length?: number,
+  debug?: boolean,
 ): Promise<string>;
 export async function generateNonce(
   adapterOrLength: CryptoAdapter | number = 16,
-  maybeLength: number = 16,
+  maybeLengthOrDebug: number | boolean = 16,
+  maybeDebug = false,
 ): Promise<string> {
-  const logger = createGuardhouseLogger("PKCE");
+  const usesExplicitAdapter = isCryptoAdapter(adapterOrLength);
 
-  const cryptoAdapter = isCryptoAdapter(adapterOrLength)
+  const cryptoAdapter = usesExplicitAdapter
     ? adapterOrLength
     : await getCryptoAdapter();
 
-  const length = isCryptoAdapter(adapterOrLength)
-    ? maybeLength
+  const length = usesExplicitAdapter
+    ? typeof maybeLengthOrDebug === "number"
+      ? maybeLengthOrDebug
+      : 16
     : adapterOrLength;
+
+  const debug = usesExplicitAdapter
+    ? typeof maybeLengthOrDebug === "boolean"
+      ? maybeLengthOrDebug
+      : maybeDebug
+    : typeof maybeLengthOrDebug === "boolean"
+      ? maybeLengthOrDebug
+      : maybeDebug;
+
+  const logger = createGuardhouseLogger("PKCE", debug);
 
   logger.debug("Generating nonce", {
     length,

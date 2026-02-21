@@ -115,31 +115,45 @@ export function GuardhouseProvider({
     logger.info("Debug mode updated", { enabled: debug });
   }, [debug, logger]);
 
-  const handleError = useCallback((error: string) => {
-    setState((prev) => ({
-      ...prev,
-      isLoading: false,
-      error,
-      isAuthenticated: false,
-      user: null,
-    }));
-    setAccessToken(null);
-  }, []);
+  const handleError = useCallback(
+    (error: string) => {
+      logger.error("Authentication state updated to error", { error });
 
-  const handleSuccess = useCallback((user: CoreUser, tokenData: TokenData) => {
-    setState((prev) => ({
-      ...prev,
-      isLoading: false,
-      error: null,
-      isAuthenticated: true,
-      user,
-    }));
-    setAccessToken(tokenData.access_token);
-  }, []);
+      setState((prev) => ({
+        ...prev,
+        isLoading: false,
+        error,
+        isAuthenticated: false,
+        user: null,
+      }));
+      setAccessToken(null);
+    },
+    [logger],
+  );
+
+  const handleSuccess = useCallback(
+    (user: CoreUser, tokenData: TokenData) => {
+      logger.info("Authentication state updated to success", {
+        subject: user.sub,
+        hasRefreshToken: Boolean(tokenData.refresh_token),
+      });
+
+      setState((prev) => ({
+        ...prev,
+        isLoading: false,
+        error: null,
+        isAuthenticated: true,
+        user,
+      }));
+      setAccessToken(tokenData.access_token);
+    },
+    [logger],
+  );
 
   const handleLoading = useCallback(() => {
+    logger.debug("Authentication state set to loading");
     setState((prev) => ({ ...prev, isLoading: true }));
-  }, []);
+  }, [logger]);
 
   /**
    * Clear all authentication data from secure storage
@@ -298,6 +312,10 @@ export function GuardhouseProvider({
       try {
         handleLoading();
 
+        logger.debug("Handling OAuth callback", {
+          callbackOrigin: new URL(callbackUrl).origin,
+        });
+
         const url = new URL(callbackUrl);
         const params = new URLSearchParams(url.search);
 
@@ -317,6 +335,10 @@ export function GuardhouseProvider({
         // CRITICAL: Validate state parameter (CSRF protection)
         const storedState = await storage.getItem(STORAGE_KEYS.STATE);
         if (storedState !== stateParam) {
+          logger.warn("State mismatch detected", {
+            hasStoredState: Boolean(storedState),
+            receivedState: stateParam,
+          });
           throw new Error("State parameter mismatch. Possible CSRF attack.");
         }
 
@@ -324,6 +346,8 @@ export function GuardhouseProvider({
         if (!codeVerifier) {
           throw new Error("Code verifier not found in secure storage");
         }
+
+        logger.debug("State and code verifier validated");
 
         const nonce = await storage.getItem(STORAGE_KEYS.NONCE);
 
@@ -356,6 +380,12 @@ export function GuardhouseProvider({
         }
 
         const tokenData: TokenData = await response.json();
+
+        logger.debug("Token exchange succeeded", {
+          expiresIn: tokenData.expires_in,
+          hasRefreshToken: Boolean(tokenData.refresh_token),
+          hasIdToken: Boolean(tokenData.id_token),
+        });
 
         if (tokenData.id_token && nonce) {
           const decodedIdToken = decodeJWT(tokenData.id_token);
@@ -397,6 +427,10 @@ export function GuardhouseProvider({
 
         await storage.saveSession(sessionData);
 
+        logger.debug("Session stored in secure storage", {
+          expiresAt,
+        });
+
         handleSuccess(userData, tokenData);
 
         // Handle app state (returnTo after login)
@@ -406,6 +440,9 @@ export function GuardhouseProvider({
 
           const appState = JSON.parse(appStateStr);
           if (appState?.returnTo) {
+            logger.debug("Handling post-login app state redirect", {
+              returnTo: appState.returnTo,
+            });
             const returnUrl = new URL(appState.returnTo);
             if (await Linking.canOpenURL(returnUrl.toString())) {
               await Linking.openURL(returnUrl.toString());
@@ -447,6 +484,11 @@ export function GuardhouseProvider({
       try {
         handleLoading();
 
+        logger.info("Starting login flow", {
+          hasAppState: Boolean(options?.appState),
+          scope: options?.scope || scopes.join(" "),
+        });
+
         const { codeVerifier, codeChallenge } = await generatePKCE({
           debug,
         } as any);
@@ -466,6 +508,10 @@ export function GuardhouseProvider({
             STORAGE_KEYS.APP_STATE,
             JSON.stringify(options.appState),
           );
+
+          logger.debug("Stored app state before auth redirect", {
+            hasReturnTo: Boolean(options.appState.returnTo),
+          });
         }
 
         const scope = options?.scope || scopes.join(" ");

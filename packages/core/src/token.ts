@@ -109,14 +109,27 @@ const ALLOWED_ALGORITHMS: string[] = [
  * @returns Decoded JWT with header and payload
  * @throws {Error} If token format is invalid
  */
-export function decodeJWT(token: string): DecodedJWT {
+export function decodeJWT(
+  token: string,
+  options: { debug?: boolean } = {},
+): DecodedJWT {
+  const logger = createGuardhouseLogger("Token", options.debug);
+
+  logger.debug("Decoding JWT", {
+    tokenLength: token?.length ?? 0,
+  });
+
   if (!token || typeof token !== "string") {
+    logger.error("Token decode failed: token is empty or not a string");
     throw new Error("Token must be a non-empty string");
   }
 
   const parts = token.split(".");
 
   if (parts.length !== 3) {
+    logger.error("Token decode failed: invalid JWT structure", {
+      partCount: parts.length,
+    });
     throw new Error("Invalid JWT format. Expected 3 parts separated by dots");
   }
 
@@ -124,11 +137,19 @@ export function decodeJWT(token: string): DecodedJWT {
     const header = JSON.parse(base64UrlDecode(parts[0]));
     const payload = JSON.parse(base64UrlDecode(parts[1]));
 
+    logger.debug("JWT decoded", {
+      algorithm: header?.alg,
+      hasSubject: Boolean(payload?.sub),
+    });
+
     return {
       header,
       payload,
     };
   } catch (error) {
+    logger.error("Token decode failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
     throw new Error(
       `Failed to decode JWT: ${error instanceof Error ? error.message : "Unknown error"}`,
     );
@@ -285,14 +306,26 @@ export function validateToken(
 export function isTokenExpired(
   decodedJWT: DecodedJWT,
   clockSkewTolerance: number = 30,
+  debug?: boolean,
 ): boolean {
+  const logger = createGuardhouseLogger("Token", debug);
+
   if (!decodedJWT.payload.exp) {
+    logger.debug("Token does not contain exp claim; treating token as active");
     return false;
   }
 
   const now = Math.floor(Date.now() / 1000);
+  const expired = decodedJWT.payload.exp < now - clockSkewTolerance;
 
-  return decodedJWT.payload.exp < now - clockSkewTolerance;
+  logger.debug("Token expiration checked", {
+    expired,
+    exp: decodedJWT.payload.exp,
+    now,
+    clockSkewTolerance,
+  });
+
+  return expired;
 }
 
 /**
@@ -332,13 +365,24 @@ function base64UrlDecode(encoded: string): string {
 export function getTokenExpiresIn(
   decodedJWT: DecodedJWT,
   clockSkewTolerance: number = 30,
+  debug?: boolean,
 ): number | null {
+  const logger = createGuardhouseLogger("Token", debug);
+
   if (!decodedJWT.payload.exp) {
+    logger.debug("Token does not contain exp claim; expiresIn unavailable");
     return null;
   }
 
   const now = Math.floor(Date.now() / 1000);
   const expiresIn = decodedJWT.payload.exp - now - clockSkewTolerance;
+
+  logger.debug("Computed token expiration window", {
+    expiresIn,
+    exp: decodedJWT.payload.exp,
+    now,
+    clockSkewTolerance,
+  });
 
   return expiresIn > 0 ? expiresIn : 0;
 }

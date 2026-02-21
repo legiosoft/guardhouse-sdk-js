@@ -129,11 +129,16 @@ export class GuardhouseClient {
    */
   private buildBasicAuthHeader(): string {
     if (!this.config.clientSecret) {
+      this.logger.debug(
+        "Skipping basic auth header because clientSecret is missing",
+      );
       return "";
     }
 
     const credentials = `${this.config.clientId}:${this.config.clientSecret}`;
     const encoded = btoa(credentials);
+
+    this.logger.debug("Built basic auth header for confidential client");
 
     return `Basic ${encoded}`;
   }
@@ -181,6 +186,12 @@ export class GuardhouseClient {
     if (!options.token && !options.skipAuthHeader && this.config.clientSecret) {
       headers["Authorization"] = this.buildBasicAuthHeader();
     }
+
+    this.logger.debug("Prepared request headers", {
+      hasAuthorization: Boolean(headers["Authorization"]),
+      contentType: headers["Content-Type"],
+      bodyLength: options.body?.length ?? 0,
+    });
 
     try {
       const response = await fetch(url, {
@@ -271,8 +282,20 @@ export class GuardhouseClient {
    */
   private async parseErrorResponse(response: Response): Promise<any> {
     try {
-      return await response.json();
-    } catch {
+      const errorData = await response.json();
+
+      this.logger.debug("Parsed HTTP error response", {
+        status: response.status,
+        hasOAuthError: Boolean(errorData?.error),
+      });
+
+      return errorData;
+    } catch (error) {
+      this.logger.warn("Failed to parse HTTP error response body", {
+        status: response.status,
+        error: error instanceof Error ? error.message : String(error),
+      });
+
       return {};
     }
   }
@@ -323,7 +346,15 @@ export class GuardhouseClient {
       skipAuthHeader: true, // Don't add auth header for token exchange
     });
 
-    return response.data as TokenResponse;
+    const tokenResponse = response.data as TokenResponse;
+
+    this.logger.info("Authorization code exchange succeeded", {
+      expiresIn: tokenResponse.expires_in,
+      hasRefreshToken: Boolean(tokenResponse.refresh_token),
+      hasIdToken: Boolean(tokenResponse.id_token),
+    });
+
+    return tokenResponse;
   }
 
   /**
@@ -362,7 +393,14 @@ export class GuardhouseClient {
       skipAuthHeader: true,
     });
 
-    return response.data as TokenResponse;
+    const tokenResponse = response.data as TokenResponse;
+
+    this.logger.info("Access token refreshed", {
+      expiresIn: tokenResponse.expires_in,
+      hasRefreshToken: Boolean(tokenResponse.refresh_token),
+    });
+
+    return tokenResponse;
   }
 
   /**
@@ -389,7 +427,14 @@ export class GuardhouseClient {
       token,
     });
 
-    return response.data as UserInfoResponse;
+    const user = response.data as UserInfoResponse;
+
+    this.logger.debug("User info fetched", {
+      subject: user.sub,
+      hasEmail: Boolean(user.email),
+    });
+
+    return user;
   }
 
   /**
@@ -421,6 +466,11 @@ export class GuardhouseClient {
       body,
       true,
     );
+
+    this.logger.debug("Token introspection completed", {
+      active: Boolean(response.active),
+      hasSubject: Boolean(response.sub),
+    });
 
     return response;
   }
@@ -471,6 +521,12 @@ export class GuardhouseClient {
     body: URLSearchParams,
     skipAuthHeader = false,
   ): Promise<T> {
+    this.logger.debug("Submitting form request", {
+      endpoint,
+      paramCount: Array.from(body.keys()).length,
+      skipAuthHeader,
+    });
+
     const response = await this.fetch(endpoint, {
       method: "POST",
       headers: {
@@ -478,6 +534,11 @@ export class GuardhouseClient {
       },
       body: body.toString(),
       skipAuthHeader,
+    });
+
+    this.logger.debug("Form request succeeded", {
+      endpoint,
+      status: response.status,
     });
 
     return response.data as T;

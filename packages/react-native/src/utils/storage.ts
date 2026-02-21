@@ -109,8 +109,16 @@ export class SecureStorage {
       });
 
       if (result) {
+        this.logger.debug("Secure storage read succeeded", {
+          key,
+          hasValue: true,
+        });
         return result.password;
       }
+
+      this.logger.debug("Secure storage read returned empty value", {
+        key,
+      });
 
       return null;
     } catch (error: any) {
@@ -147,6 +155,10 @@ export class SecureStorage {
         accessControl,
         accessible: Keychain.ACCESSIBLE.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
       });
+
+      this.logger.debug("Secure storage write succeeded", {
+        key,
+      });
     } catch (error) {
       this.logger.error("Failed to write to secure storage", {
         key,
@@ -162,6 +174,10 @@ export class SecureStorage {
   async removeItem(key: string): Promise<void> {
     try {
       await Keychain.resetGenericPassword({ service: key });
+
+      this.logger.debug("Secure storage key removed", {
+        key,
+      });
     } catch (error) {
       this.logger.warn("Failed to remove secure storage key", {
         key,
@@ -177,6 +193,8 @@ export class SecureStorage {
    */
   async clear(): Promise<void> {
     try {
+      this.logger.debug("Clearing all Guardhouse secure storage keys");
+
       const services = await Keychain.getAllGenericPasswordServices();
 
       for (const service of services) {
@@ -184,6 +202,8 @@ export class SecureStorage {
           await Keychain.resetGenericPassword({ service });
         }
       }
+
+      this.logger.debug("Finished clearing Guardhouse secure storage keys");
     } catch (error) {
       this.logger.error("Failed to clear secure storage", {
         error: String(error),
@@ -197,6 +217,12 @@ export class SecureStorage {
    * SECURITY: Stores all tokens and user data in single atomic operation
    */
   async saveSession(data: SessionData): Promise<void> {
+    this.logger.debug("Saving secure session", {
+      hasRefreshToken: Boolean(data.refreshToken),
+      hasIdToken: Boolean(data.idToken),
+      expiresAt: data.expiresAt,
+    });
+
     await Promise.all([
       this.setItem(STORAGE_KEYS.ACCESS_TOKEN, data.accessToken),
       data.refreshToken
@@ -208,6 +234,8 @@ export class SecureStorage {
       this.setItem(STORAGE_KEYS.EXPIRES_AT, data.expiresAt.toString()),
       this.setItem(STORAGE_KEYS.USER, JSON.stringify(data.user)),
     ]);
+
+    this.logger.debug("Secure session saved");
   }
 
   /**
@@ -217,6 +245,8 @@ export class SecureStorage {
    */
   async getSession(): Promise<SessionData | null> {
     try {
+      this.logger.debug("Loading secure session");
+
       const [accessToken, refreshToken, idToken, expiresAtStr, userStr] =
         await Promise.all([
           this.getItem(STORAGE_KEYS.ACCESS_TOKEN),
@@ -227,19 +257,27 @@ export class SecureStorage {
         ]);
 
       if (!accessToken || !userStr) {
+        this.logger.debug("Secure session not found");
         return null;
       }
 
       const expiresAt = expiresAtStr ? parseInt(expiresAtStr) : 0;
       const user = JSON.parse(userStr);
 
-      return {
+      const session: SessionData = {
         accessToken,
         refreshToken: refreshToken || undefined,
         idToken: idToken || undefined,
         expiresAt,
         user,
       };
+
+      this.logger.debug("Secure session loaded", {
+        expiresAt: session.expiresAt,
+        hasRefreshToken: Boolean(session.refreshToken),
+      });
+
+      return session;
     } catch (error) {
       this.logger.error("Failed to read secure session", {
         error: String(error),
@@ -296,14 +334,17 @@ export class PromiseLock {
     }
 
     // Start new promise
+    this.logger.debug("Starting locked promise execution");
     this.promise = fn();
 
     try {
       const result = await this.promise;
+      this.logger.debug("Locked promise execution completed");
       return result;
     } finally {
       // Clear promise when done (success or failure)
       this.promise = null;
+      this.logger.debug("Lock released");
     }
   }
 
@@ -338,6 +379,7 @@ export function isTokenExpired(
 
     if (parts.length !== 3) {
       // Invalid JWT format, treat as expired
+      logger.warn("Token has invalid JWT format; treating as expired");
       return true;
     }
 
@@ -347,6 +389,7 @@ export function isTokenExpired(
 
     if (!payload.exp) {
       // No expiration claim, assume valid
+      logger.debug("Token has no exp claim; treating as active");
       return false;
     }
 
@@ -354,7 +397,16 @@ export function isTokenExpired(
 
     // Token is expired if exp < now + buffer
     // Buffer prevents edge case where token expires while in transit
-    return payload.exp < now + bufferSeconds;
+    const expired = payload.exp < now + bufferSeconds;
+
+    logger.debug("Token expiration evaluated", {
+      expired,
+      exp: payload.exp,
+      now,
+      bufferSeconds,
+    });
+
+    return expired;
   } catch (error) {
     // Failed to parse JWT, treat as expired (safe fallback)
     logger.error("Failed to check token expiration", {
