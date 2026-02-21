@@ -135,3 +135,6 @@ history/
 
 # TypeScript
 *.tsbuildinfo
+
+# Local temporary examples
+examples/temp-react-auth-example/

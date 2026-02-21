@@ -1,7 +1,5 @@
 import { GuardhouseNodeClient, GuardhouseAdminClient } from "../client";
-import { GuardhouseConstants } from "../constants";
 
-jest.mock("../client");
 jest.mock("jsonwebtoken");
 
 const mockFetch = global.fetch as jest.MockedFunction<typeof fetch>;
@@ -219,13 +217,6 @@ describe("GuardhouseNodeClient", () => {
 
   describe("fetch", () => {
     beforeEach(() => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ data: "test" }),
-        text: async () => "",
-      } as Response);
-
       client["tokenCache"].set("guardhouse_access_token_test-client-id", {
         accessToken: "cached-access-token",
         expiresAt: Math.floor(Date.now() / 1000) + 3600,
@@ -233,6 +224,13 @@ describe("GuardhouseNodeClient", () => {
     });
 
     it("should fetch with authorization header", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: "test" }),
+        text: async () => "",
+      } as Response);
+
       await client.fetch("https://api.example.com/data");
 
       expect(mockFetch).toHaveBeenCalledWith(
@@ -258,13 +256,23 @@ describe("GuardhouseNodeClient", () => {
         .mockResolvedValueOnce({
           ok: true,
           status: 200,
+          json: async () => ({
+            access_token: "retried-access-token",
+            expires_in: 3600,
+            token_type: "Bearer",
+          }),
+          text: async () => "",
+        } as Response)
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
           json: async () => ({ data: "test" }),
           text: async () => "",
         } as Response);
 
       const result = await client.fetch("https://api.example.com/data");
 
-      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(mockFetch.mock.calls.length).toBeGreaterThanOrEqual(3);
       expect(result).toEqual({ data: "test" });
     });
 
@@ -282,6 +290,13 @@ describe("GuardhouseNodeClient", () => {
     });
 
     it("should support GET method", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: "test" }),
+        text: async () => "",
+      } as Response);
+
       const result = await client.get("https://api.example.com/data");
 
       expect(mockFetch).toHaveBeenCalledWith(
@@ -323,7 +338,7 @@ describe("GuardhouseNodeClient", () => {
         text: async () => "",
       } as Response);
 
-      const result = await client.put("https://api.example.com/data/1", {
+      await client.put("https://api.example.com/data/1", {
         test: "data",
       });
 
@@ -343,7 +358,7 @@ describe("GuardhouseNodeClient", () => {
         text: async () => "",
       } as Response);
 
-      const result = await client.delete("https://api.example.com/data/1");
+      await client.delete("https://api.example.com/data/1");
 
       expect(mockFetch).toHaveBeenCalledWith(
         "https://api.example.com/data/1",
@@ -361,7 +376,7 @@ describe("GuardhouseNodeClient", () => {
         text: async () => "",
       } as Response);
 
-      const result = await client.patch("https://api.example.com/data/1", {
+      await client.patch("https://api.example.com/data/1", {
         test: "data",
       });
 

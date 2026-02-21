@@ -1,11 +1,14 @@
-import { BrowserRouter as Router, Routes, Route, Link } from "react-router-dom";
+import {
+  BrowserRouter as Router,
+  Routes,
+  Route,
+  Link,
+  useNavigate,
+} from "react-router-dom";
 import { GuardhouseProvider, useAuth } from "@guardhouse/react";
-import { useState } from "react";
-
-const AUTHORITY = import.meta.env.VITE_AUTHORITY || "https://auth.example.com";
-const CLIENT_ID = import.meta.env.VITE_CLIENT_ID || "your-client-id";
-const REDIRECT_URI =
-  import.meta.env.VITE_REDIRECT_URI || "http://localhost:3000";
+import type { AppState } from "@guardhouse/react";
+import { useEffect, useMemo, useState } from "react";
+import { appConfig } from "./config";
 
 function Home() {
   const { user, isAuthenticated, isLoading, loginWithRedirect, logout } =
@@ -168,7 +171,7 @@ function ApiDemo() {
         throw new Error("No access token available");
       }
 
-      const response = await fetch("http://localhost:3001/protected", {
+      const response = await fetch(`${appConfig.apiBaseUrl}/protected`, {
         headers: {
           Authorization: `Bearer ${token}`,
         },
@@ -237,16 +240,46 @@ function ApiDemo() {
   );
 }
 
-function App() {
+function CallbackPage() {
+  const navigate = useNavigate();
+  const { isLoading, error } = useAuth();
+
+  useEffect(() => {
+    if (!isLoading) {
+      navigate("/", { replace: true });
+    }
+  }, [isLoading, navigate]);
+
   return (
-    <GuardhouseProvider
-      authority={AUTHORITY}
-      clientId={CLIENT_ID}
-      redirectUri={REDIRECT_URI}
-      onRedirectCallback={(appState) => {
+    <div className="card">
+      <h2>Completing sign-in...</h2>
+      {error ? (
+        <p>
+          Login failed: {error}. <Link to="/">Go back home</Link>
+        </p>
+      ) : (
+        <p>Please wait while we complete authentication.</p>
+      )}
+    </div>
+  );
+}
+
+function App() {
+  const config = useMemo(
+    () => ({
+      authority: appConfig.authority,
+      clientId: appConfig.clientId,
+      redirectUri: appConfig.redirectUri,
+      scope: appConfig.scope,
+      onRedirectCallback: (appState?: AppState) => {
         console.log("Redirect callback:", appState);
-      }}
-    >
+      },
+    }),
+    [],
+  );
+
+  return (
+    <GuardhouseProvider config={config}>
       <Router>
         <div className="header">
           <div className="header-content">
@@ -262,6 +295,7 @@ function App() {
         <div className="container">
           <Routes>
             <Route path="/" element={<Home />} />
+            <Route path="/callback" element={<CallbackPage />} />
             <Route path="/protected" element={<ProtectedPage />} />
             <Route path="/api" element={<ApiDemo />} />
           </Routes>

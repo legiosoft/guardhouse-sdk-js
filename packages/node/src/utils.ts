@@ -131,8 +131,14 @@ export function buildClaimsFromIntrospection(
     claims.name = introspectionResult.username;
   }
 
+  if (introspectionResult.email) {
+    claims.email = introspectionResult.email;
+  }
+
   if (Array.isArray(introspectionResult.role)) {
     introspectionResult.role.forEach((role: string) => roles.add(role));
+  } else if (typeof introspectionResult.role === "string") {
+    roles.add(introspectionResult.role);
   }
 
   if (introspectionResult.roles) {

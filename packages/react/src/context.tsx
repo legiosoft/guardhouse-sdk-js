@@ -1,30 +1,24 @@
-import React, {
+import {
   createContext,
   useContext,
   useState,
   useEffect,
   useCallback,
+  useMemo,
   ReactNode,
 } from "react";
-import {
-  GuardhouseClient,
-  generateAuthUrl,
-  generatePKCE,
-  User as CoreUser,
-  type AuthUrlOptions as CoreAuthUrlOptions,
-} from "@guardhouse/core";
+import { generateAuthUrl, generatePKCE } from "@guardhouse/core";
+import type { User as CoreUser } from "@guardhouse/core";
 import {
   GuardhouseConfig,
   AuthState,
   TokenData,
   LoginOptions,
   LogoutOptions,
-  AppState,
   StorageAdapter,
 } from "./types";
 import {
   LocalStorageAdapter,
-  InMemoryStorageAdapter,
   SessionStorageAdapter,
   StorageKeys,
   generateBase64UrlEncodedString,
@@ -62,17 +56,11 @@ export function GuardhouseProvider({
     user: null,
   });
 
-  const storage: StorageAdapter = config.storage || new LocalStorageAdapter();
-  const sessionStorage = new SessionStorageAdapter();
-
-  const client = React.useMemo(
-    () =>
-      new GuardhouseClient({
-        authority: config.authority,
-        clientId: config.clientId,
-      }),
-    [config.authority, config.clientId],
+  const storage: StorageAdapter = useMemo(
+    () => config.storage || new LocalStorageAdapter(),
+    [config.storage],
   );
+  const sessionStorage = useMemo(() => new SessionStorageAdapter(), []);
 
   const handleError = useCallback((error: string) => {
     setState((prev) => ({
@@ -186,14 +174,17 @@ export function GuardhouseProvider({
       await storage.setItem(StorageKeys.ID_TOKEN, tokenData.id_token || "");
       await storage.setItem(StorageKeys.EXPIRES_AT, expiresAt.toString());
 
+      let fallbackUserFromIdToken: CoreUser | null = null;
+
       if (tokenData.id_token && nonce) {
         try {
-          validateIdToken(
+          const idTokenPayload = validateIdToken(
             tokenData.id_token,
             nonce,
             config.authority,
             config.clientId,
           );
+          fallbackUserFromIdToken = idTokenPayload as CoreUser;
         } catch (idTokenError) {
           console.warn("ID token validation failed:", idTokenError);
         }
@@ -206,14 +197,32 @@ export function GuardhouseProvider({
         },
       });
 
+      let authenticatedUser: CoreUser | null = null;
+
       if (!userResponse.ok) {
         const errorText = await userResponse.text();
         console.warn("Failed to fetch user info:", errorText);
+
+        if (fallbackUserFromIdToken) {
+          authenticatedUser = fallbackUserFromIdToken;
+          await storage.setItem(
+            StorageKeys.USER,
+            JSON.stringify(authenticatedUser),
+          );
+        }
       } else {
         const userData = await userResponse.json();
+        authenticatedUser = userData;
         await storage.setItem(StorageKeys.USER, JSON.stringify(userData));
-        handleSuccess(userData, tokenData);
       }
+
+      if (!authenticatedUser) {
+        throw new Error(
+          "Failed to load user profile. Ensure the client allows openid/profile scopes and /connect/userinfo.",
+        );
+      }
+
+      handleSuccess(authenticatedUser, tokenData);
 
       removeQueryParams();
     } catch (error) {

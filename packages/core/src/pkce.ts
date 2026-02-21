@@ -29,6 +29,7 @@
  *    - Standard for OAuth 2.0 and JWT
  */
 
+import { getCryptoAdapter } from "./crypto";
 import type { CryptoAdapter } from "./crypto";
 
 export interface PKCECodePair {
@@ -39,6 +40,15 @@ export interface PKCECodePair {
 export interface PKCEOptions {
   length?: number;
   method?: "S256" | "plain";
+}
+
+function isCryptoAdapter(value: unknown): value is CryptoAdapter {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "randomBytes" in value &&
+    "sha256" in value
+  );
 }
 
 /**
@@ -53,9 +63,24 @@ export interface PKCEOptions {
  * @throws {Error} If crypto is not available
  */
 export async function generatePKCE(
+  options?: PKCEOptions,
+): Promise<PKCECodePair>;
+export async function generatePKCE(
   cryptoAdapter: CryptoAdapter,
-  options: PKCEOptions = {},
+  options?: PKCEOptions,
+): Promise<PKCECodePair>;
+export async function generatePKCE(
+  adapterOrOptions: CryptoAdapter | PKCEOptions = {},
+  maybeOptions: PKCEOptions = {},
 ): Promise<PKCECodePair> {
+  const cryptoAdapter = isCryptoAdapter(adapterOrOptions)
+    ? adapterOrOptions
+    : await getCryptoAdapter();
+
+  const options = isCryptoAdapter(adapterOrOptions)
+    ? maybeOptions
+    : adapterOrOptions;
+
   const {
     length = 43, // 128 bits (RFC 7636 recommended minimum)
     method = "S256", // Force S256 (plain is insecure)
@@ -110,10 +135,23 @@ export async function generatePKCE(
  *
  * @throws {Error} If crypto is not available
  */
+export async function generateState(length?: number): Promise<string>;
 export async function generateState(
   cryptoAdapter: CryptoAdapter,
-  length: number = 16, // 128 bits (CSRF protection minimum)
+  length?: number,
+): Promise<string>;
+export async function generateState(
+  adapterOrLength: CryptoAdapter | number = 16,
+  maybeLength: number = 16,
 ): Promise<string> {
+  const cryptoAdapter = isCryptoAdapter(adapterOrLength)
+    ? adapterOrLength
+    : await getCryptoAdapter();
+
+  const length = isCryptoAdapter(adapterOrLength)
+    ? maybeLength
+    : adapterOrLength;
+
   console.log(`[PKCE] Generating state (length: ${length})`);
 
   // SECURITY: Use CSPRNG (Math.random() is NOT secure)
@@ -140,10 +178,23 @@ export async function generateState(
  *
  * @throws {Error} If crypto is not available
  */
+export async function generateNonce(length?: number): Promise<string>;
 export async function generateNonce(
   cryptoAdapter: CryptoAdapter,
-  length: number = 16, // 128 bits (replay protection minimum)
+  length?: number,
+): Promise<string>;
+export async function generateNonce(
+  adapterOrLength: CryptoAdapter | number = 16,
+  maybeLength: number = 16,
 ): Promise<string> {
+  const cryptoAdapter = isCryptoAdapter(adapterOrLength)
+    ? adapterOrLength
+    : await getCryptoAdapter();
+
+  const length = isCryptoAdapter(adapterOrLength)
+    ? maybeLength
+    : adapterOrLength;
+
   console.log(`[PKCE] Generating nonce (length: ${length})`);
 
   // SECURITY: Use CSPRNG (Math.random() is NOT secure)

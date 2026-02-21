@@ -16,6 +16,5 @@
     "resolveJsonModule": true,
     "isolatedModules": true
   },
-  "include": ["src"],
-  "references": [{ "path": "../../packages/react" }]
+  "include": ["src"]
 }

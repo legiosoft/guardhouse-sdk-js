@@ -62,6 +62,12 @@ export interface AuthUrlOptions {
   state?: string;
   codeChallenge?: string;
   codeChallengeMethod?: string;
+  nonce?: string;
+  prompt?: string;
+  audience?: string;
+  responseMode?: string;
+  maxAge?: number;
+  extraParams?: Record<string, string | number | undefined>;
 }
 
 export interface PKCEPair {

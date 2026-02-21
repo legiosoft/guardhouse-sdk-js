@@ -1,4 +1,8 @@
-import { GuardhouseNodeClient, GuardhouseAdminClient } from "@guardhouse/node";
+import {
+  GuardhouseNodeClient,
+  GuardhouseAdminClient,
+  type GuardhouseClientOptions,
+} from "@guardhouse/node";
 import { GuardhouseClient } from "@guardhouse/core";
 import dotenv from "dotenv";
 
@@ -14,7 +18,7 @@ async function main() {
 
   console.log("1. Using GuardhouseNodeClient for Client Credentials flow:");
 
-  const nodeClientOptions: any = {
+  const nodeClientOptions: GuardhouseClientOptions = {
     authority: AUTHORITY,
     clientId: CLIENT_ID,
     clientSecret: CLIENT_SECRET,
@@ -38,16 +42,18 @@ async function main() {
       clientSecret: CLIENT_SECRET,
     });
 
-    const userInfo = await client.getUserInfo(accessToken);
-    console.log("   User ID:", userInfo.sub);
-    console.log("   Name:", userInfo.name);
-    console.log("   Email:", userInfo.email);
+    const introspection = await client.introspectToken(accessToken);
+    console.log("   Active:", introspection.active);
+    console.log("   Client ID:", introspection.client_id);
+    console.log("   Scope:", introspection.scope);
 
     console.log(
       "\n3. Using GuardhouseNodeClient to make authenticated requests:",
     );
 
-    const data = await nodeClient.get(`${AUTHORITY}/connect/userinfo`);
+    const data = await nodeClient.get<{ sub?: string }>(
+      `${AUTHORITY}/connect/userinfo`,
+    );
     console.log("   User info fetched:", data.sub);
   } catch (error) {
     console.error("   Error:", error instanceof Error ? error.message : error);
@@ -55,7 +61,7 @@ async function main() {
 
   console.log("\n4. Using GuardhouseAdminClient for administrative tasks:");
 
-  const adminClientOptions: any = {
+  const adminClientOptions: GuardhouseClientOptions = {
     authority: AUTHORITY,
     clientId: CLIENT_ID,
     clientSecret: CLIENT_SECRET,

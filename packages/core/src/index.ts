@@ -44,11 +44,13 @@
 // Public API exports
 export { GuardhouseClient } from "./client";
 export type { GuardhouseConfig, GuardhouseError } from "./config";
+export type { User, AuthUrlOptions } from "./types";
 export type {
   TokenResponse,
   UserInfoResponse,
   IntrospectionResponse,
 } from "./client";
+export { generateAuthUrl } from "./auth";
 
 // PKCE exports
 export { generatePKCE, generateState, generateNonce } from "./pkce";
@@ -57,6 +59,7 @@ export type { PKCECodePair, PKCEOptions } from "./pkce";
 // Crypto exports
 export {
   detectCryptoAdapter,
+  getCryptoAdapter,
   initializeCrypto,
   setCryptoAdapter,
 } from "./crypto";

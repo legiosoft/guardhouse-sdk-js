@@ -38,34 +38,34 @@ import React, {
   useEffect,
   useCallback,
   ReactNode,
+  useMemo,
   useRef,
 } from "react";
 import { Linking } from "react-native";
 import InAppBrowser from "react-native-inappbrowser-reborn";
 import {
+  decodeJWT,
   generateAuthUrl,
+  generateNonce,
   generatePKCE,
-  User as CoreUser,
+  generateState,
+  validateToken,
 } from "@guardhouse/core";
-import {
-  AuthState,
-  TokenData,
-  LoginOptions,
-  LogoutOptions,
-  AppState,
-} from "../types";
+import type { User as CoreUser } from "@guardhouse/core";
+import { AuthState, TokenData, LoginOptions, LogoutOptions } from "./types";
 import {
   SecureStorage,
   SessionData,
   PromiseLock,
   isTokenExpired,
   STORAGE_KEYS,
-} from "../utils/storage";
+} from "./utils/storage";
 
 interface AuthContextValue extends AuthState {
   login: (options?: LoginOptions) => Promise<void>;
   logout: (options?: LogoutOptions) => Promise<void>;
   getAccessToken: () => Promise<string | null>;
+  accessToken: string | null;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -96,7 +96,10 @@ export function GuardhouseProvider({
 
   const [accessToken, setAccessToken] = useState<string | null>(null);
 
-  const storage = new SecureStorage(requireBiometrics);
+  const storage = useMemo(
+    () => new SecureStorage(requireBiometrics),
+    [requireBiometrics],
+  );
   const refreshLock = useRef(new PromiseLock());
 
   const handleError = useCallback((error: string) => {
@@ -333,6 +336,21 @@ export function GuardhouseProvider({
 
         const tokenData: TokenData = await response.json();
 
+        if (tokenData.id_token && nonce) {
+          const decodedIdToken = decodeJWT(tokenData.id_token);
+          const validation = validateToken(decodedIdToken, {
+            issuer: authority,
+            audience: clientId,
+            nonce,
+          });
+
+          if (!validation.valid) {
+            throw new Error(
+              `ID token validation failed: ${validation.errors.join(", ")}`,
+            );
+          }
+        }
+
         const expiresAt = Math.floor(Date.now() / 1000) + tokenData.expires_in;
 
         // Save session data to secure storage
@@ -407,24 +425,8 @@ export function GuardhouseProvider({
 
         const { codeVerifier, codeChallenge } = await generatePKCE();
 
-        // Generate cryptographically secure state and nonce (CSPRNG)
-        const array = new Uint8Array(32);
-        if (typeof crypto !== "undefined" && crypto.getRandomValues) {
-          crypto.getRandomValues(array);
-        } else {
-          throw new Error("CSPRNG not available");
-        }
-        const state = Buffer.from(array)
-          .toString("base64")
-          .replace(/\+/g, "-")
-          .replace(/\//g, "_")
-          .replace(/=/g, "");
-
-        const nonce = Buffer.from(new Uint8Array(32))
-          .toString("base64")
-          .replace(/\+/g, "-")
-          .replace(/\//g, "_")
-          .replace(/=/g, "");
+        const state = await generateState(32);
+        const nonce = await generateNonce(32);
 
         // Store temporary PKCE values
         await Promise.all([

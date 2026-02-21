@@ -11,12 +11,11 @@ export type {
   BiometricAuthFailedError,
   SessionExpiredError,
   AuthContextValue,
-  AuthContext,
 } from "./types";
 export {
   SecureStorage,
-  SessionData,
   PromiseLock,
   STORAGE_KEYS,
   isTokenExpired,
 } from "./utils/storage";
+export type { SessionData } from "./utils/storage";

@@ -20,7 +20,7 @@ describe("GuardhouseResourceService", () => {
     jest.clearAllMocks();
 
     mockJwksRsa.mockReturnValue({
-      getSigningKey: jest.fn((kid, callback) => {
+      getSigningKey: jest.fn((_kid, callback) => {
         callback(null, {
           getPublicKey: jest.fn(() => "mock_public_key"),
         });
@@ -247,7 +247,7 @@ describe("guardhouseMiddleware", () => {
     jest.clearAllMocks();
 
     mockJwksRsa.mockReturnValue({
-      getSigningKey: jest.fn((kid, callback) => {
+      getSigningKey: jest.fn((_kid, callback) => {
         callback(null, {
           getPublicKey: jest.fn(() => "mock_public_key"),
         });
@@ -431,9 +431,16 @@ describe("guardhouseMiddleware", () => {
 });
 
 function createMockJwtToken(overrides = {}): string {
-  const header = Buffer.from(
-    JSON.stringify({ alg: "RS256", typ: "JWT", kid: "mock-key-id" }),
-  ).toString("base64");
+  const {
+    alg = "RS256",
+    typ = "JWT",
+    kid = "mock-key-id",
+    ...payloadOverrides
+  } = overrides as Record<string, unknown>;
+
+  const header = Buffer.from(JSON.stringify({ alg, typ, kid })).toString(
+    "base64",
+  );
   const payload = Buffer.from(
     JSON.stringify({
       sub: "user-123",
@@ -441,7 +448,7 @@ function createMockJwtToken(overrides = {}): string {
       aud: "test-audience",
       exp: Math.floor(Date.now() / 1000) + 3600,
       iat: Math.floor(Date.now() / 1000),
-      ...overrides,
+      ...payloadOverrides,
     }),
   ).toString("base64");
   const signature = "mock-signature";

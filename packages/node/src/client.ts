@@ -143,8 +143,6 @@ export class GuardhouseNodeClient {
       );
 
       return tokenResponse;
-
-      return tokenResponse;
     } catch (error) {
       const errorMessage = stripStackTrace(error as Error);
       throw new Error(
@@ -295,9 +293,11 @@ export class GuardhouseNodeClient {
       this.tokenCache.set(this.getTokenCacheKey(), cachedToken);
 
       const timeout = (expiresAt - now) * 1000;
-      setTimeout(() => {
+      const evictionTimer = setTimeout(() => {
         this.tokenCache.delete(this.getTokenCacheKey());
       }, timeout);
+
+      (evictionTimer as unknown as { unref?: () => void }).unref?.();
 
       console.debug(`Token cached:`, {
         expiresAt: new Date(expiresAt * 1000).toISOString(),
@@ -341,7 +341,7 @@ export class GuardhouseAdminClient extends GuardhouseNodeClient {
         userId,
       });
     } catch (error) {
-      throw stripStackTrace(error as Error);
+      throw new Error(stripStackTrace(error as Error));
     }
   }
 
@@ -376,7 +376,7 @@ export class GuardhouseAdminClient extends GuardhouseNodeClient {
       });
       return data;
     } catch (error) {
-      throw stripStackTrace(error as Error);
+      throw new Error(stripStackTrace(error as Error));
     }
   }
 
@@ -421,7 +421,7 @@ export class GuardhouseAdminClient extends GuardhouseNodeClient {
       });
       return data;
     } catch (error) {
-      throw stripStackTrace(error as Error);
+      throw new Error(stripStackTrace(error as Error));
     }
   }
 
@@ -456,7 +456,7 @@ export class GuardhouseAdminClient extends GuardhouseNodeClient {
       });
       return data;
     } catch (error) {
-      throw stripStackTrace(error as Error);
+      throw new Error(stripStackTrace(error as Error));
     }
   }
 
@@ -492,7 +492,7 @@ export class GuardhouseAdminClient extends GuardhouseNodeClient {
       });
       return data;
     } catch (error) {
-      throw stripStackTrace(error as Error);
+      throw new Error(stripStackTrace(error as Error));
     }
   }
 }

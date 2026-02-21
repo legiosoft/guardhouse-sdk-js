@@ -147,7 +147,11 @@ export class GuardhouseResourceService {
       throw new Error("Invalid algorithm: 'none' is not allowed");
     }
 
-    if (typ && !this.options.tokenTypes?.includes(typ)) {
+    if (
+      typ &&
+      this.options.tokenTypes &&
+      !this.options.tokenTypes.includes(typ)
+    ) {
       throw new Error(`Invalid token type: ${typ}`);
     }
 
@@ -495,7 +499,8 @@ export function guardhouseMiddleware(
     try {
       const authHeaders = Object.entries(req.headers)
         .filter(([key]) => key.toLowerCase() === "authorization")
-        .map(([, value]) => value);
+        .flatMap(([, value]) => (Array.isArray(value) ? value : [value]))
+        .filter((value) => value !== undefined && value !== null);
 
       if (authHeaders.length === 0) {
         res

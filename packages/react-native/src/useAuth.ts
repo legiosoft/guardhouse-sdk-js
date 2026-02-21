@@ -21,7 +21,7 @@
 
 import { useContext } from "react";
 import { AuthContext } from "./GuardhouseProvider";
-import type { AuthContextValue } from "../types";
+import type { AuthContextValue } from "./types";
 
 /**
  * useAuth Hook

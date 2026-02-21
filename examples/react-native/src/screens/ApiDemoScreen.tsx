@@ -7,8 +7,10 @@ import {
   ScrollView,
   ActivityIndicator,
   Alert,
+  Platform,
 } from "react-native";
 import { useAuth } from "@guardhouse/react-native";
+import { appConfig } from "../config";
 
 function ApiDemoScreen({ navigation }: any) {
   const { getAccessToken, user } = useAuth();
@@ -28,7 +30,7 @@ function ApiDemoScreen({ navigation }: any) {
         throw new Error("No access token available");
       }
 
-      const response = await fetch("http://10.0.2.2:3001/protected", {
+      const response = await fetch(`${appConfig.apiBaseUrl}/protected`, {
         headers: {
           Authorization: `Bearer ${token}`,
         },
@@ -102,8 +104,7 @@ function ApiDemoScreen({ navigation }: any) {
         </TouchableOpacity>
 
         <Text style={styles.note}>
-          Note: For Android, use 10.0.2.2 to access localhost from the emulator.
-          For iOS, use localhost.
+          API base URL ({Platform.OS}): {appConfig.apiBaseUrl}
         </Text>
       </View>
     </ScrollView>

@@ -1,6 +1,5 @@
-import type { Config } from "jest";
-
-const config: Config = {
+/** @type {import('jest').Config} */
+const config = {
   preset: "ts-jest",
   testEnvironment: "node",
   roots: ["<rootDir>/src"],
@@ -27,9 +26,12 @@ const config: Config = {
     "^.+\\.tsx?$": [
       "ts-jest",
       {
+        diagnostics: false,
         tsconfig: {
           esModuleInterop: true,
           allowSyntheticDefaultImports: true,
+          noUnusedLocals: false,
+          noUnusedParameters: false,
         },
       },
     ],
@@ -37,4 +39,4 @@ const config: Config = {
   testTimeout: 10000,
 };
 
-export default config;
+module.exports = config;

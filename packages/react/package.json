@@ -20,7 +20,7 @@
     "dev": "tsup src/index.ts --format cjs,esm --dts --watch"
   },
   "dependencies": {
-    "@guardhouse/core": "0.0.1"
+    "@guardhouse/core": "^0.1.0"
   },
   "peerDependencies": {
     "react": ">=18.0.0"
