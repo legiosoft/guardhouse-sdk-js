@@ -18,6 +18,7 @@ export interface GuardhouseClientOptions {
   authority: string;
   clientId: string;
   clientSecret: string;
+  debug?: boolean;
   scope?: string;
   enableTokenCaching?: boolean;
   cacheExpirationBufferSeconds?: number;
@@ -33,6 +34,7 @@ export interface GuardhouseClientOptions {
 export interface GuardhouseResourceOptions {
   authority: string;
   audience: string;
+  debug?: boolean;
   validationMode?: TokenValidationMode;
   introspectionClientId?: string;
   introspectionClientSecret?: string;

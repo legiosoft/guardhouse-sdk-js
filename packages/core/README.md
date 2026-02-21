@@ -35,8 +35,8 @@ const client = new GuardhouseClient({
 const { codeVerifier, codeChallenge } = await generatePKCE();
 
 const authUrl = await generateAuthUrl({
-  authority: client.config.authority,
-  clientId: client.config.clientId,
+  authority: "https://auth.example.com",
+  clientId: "my-app-id",
   redirectUri: "https://myapp.com/callback",
   responseType: "code",
   scope: "openid profile offline_access",
@@ -234,7 +234,20 @@ interface GuardhouseConfig {
   redirectUri?: string; // Optional: OAuth callback URI
   scope?: string; // Optional: Default scopes
   storage?: StorageAdapter; // Optional: Custom storage
+  debug?: boolean; // Optional: Enable SDK debug logs
 }
+```
+
+### Debug Logging
+
+Enable verbose SDK logs by setting `debug: true` in the client config:
+
+```typescript
+const client = new GuardhouseClient({
+  authority: "https://auth.example.com",
+  clientId: "my-app-id",
+  debug: true,
+});
 ```
 
 ### TokenValidationOptions
@@ -350,8 +363,8 @@ const client = new GuardhouseClient({
 const { codeVerifier, codeChallenge } = await generatePKCE();
 
 const authUrl = await generateAuthUrl({
-  authority: client.config.authority,
-  clientId: client.config.clientId,
+  authority: "https://auth.example.com",
+  clientId: "my-app-id",
   redirectUri: "https://myapp.com/callback",
   responseType: "code",
   codeChallenge,

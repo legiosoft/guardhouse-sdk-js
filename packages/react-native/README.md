@@ -149,6 +149,7 @@ const index = () => {
       clientId="your-client-id"
       redirectUri="com.yourapp://callback"
       scopes={["openid", "profile", "offline_access"]}
+      debug={true}
     >
       <App />
     </GuardhouseProvider>
@@ -259,6 +260,7 @@ Props:
 - `clientId` (string, required): Your application's client ID
 - `redirectUri` (string, required): Deep link URI for callbacks (e.g., `com.myapp://callback`)
 - `scopes` (string[], optional): Default scopes (default: `['openid', 'profile', 'offline_access']`)
+- `debug` (boolean, optional): Enables verbose SDK logs when true
 - `children` (ReactNode, required): Your app components
 
 ### useAuth

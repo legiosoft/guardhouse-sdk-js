@@ -1,6 +1,7 @@
 import { GuardhouseClient, TokenResponse } from "@guardhouse/core";
 import { GuardhouseConstants } from "./constants";
 import { GuardhouseClientOptions } from "./types";
+import { createNodeLogger } from "./debug";
 import { generateCorrelationId, stripStackTrace } from "./utils";
 
 interface CachedToken {
@@ -13,8 +14,17 @@ const TokenLocks = new Map<string, Promise<CachedToken>>();
 
 export class GuardhouseNodeClient {
   protected tokenCache: Map<string, CachedToken> = new Map();
+  protected logger: ReturnType<typeof createNodeLogger>;
 
-  constructor(protected options: GuardhouseClientOptions) {}
+  constructor(protected options: GuardhouseClientOptions) {
+    this.logger = createNodeLogger("Client", options.debug);
+    this.logger.info("Initialized node client", {
+      authority: options.authority,
+      clientId: options.clientId,
+      enableTokenCaching: options.enableTokenCaching !== false,
+      enableTokenRefresh: options.enableTokenRefresh !== false,
+    });
+  }
 
   private getTokenCacheKey(): string {
     return `guardhouse_access_token_${this.options.clientId}`;
@@ -39,7 +49,7 @@ export class GuardhouseNodeClient {
         TokenLocks.delete(key);
       })
       .catch((error) => {
-        console.error(`Token acquisition failed [${key}]:`, {
+        this.logger.error(`Token acquisition failed [${key}]`, {
           error: stripStackTrace(error as Error),
         });
         throw error;
@@ -51,7 +61,7 @@ export class GuardhouseNodeClient {
 
   private logTokenRequest(): string {
     const correlationId = generateCorrelationId();
-    console.info(`Token request initiated [${correlationId}]:`, {
+    this.logger.info(`Token request initiated [${correlationId}]`, {
       authority: this.options.authority,
       clientId: this.options.clientId,
       scope: this.options.scope,
@@ -88,7 +98,7 @@ export class GuardhouseNodeClient {
         if (cached && cached.refreshToken) {
           try {
             const correlationId = generateCorrelationId();
-            console.info(`Token refresh attempt [${correlationId}]:`, {
+            this.logger.info(`Token refresh attempt [${correlationId}]`, {
               authority: this.options.authority,
               clientId: this.options.clientId,
             });
@@ -97,7 +107,7 @@ export class GuardhouseNodeClient {
             this.cacheToken(tokenResponse);
             return tokenResponse.access_token;
           } catch (error) {
-            console.warn(`Failed to refresh token, requesting new token:`, {
+            this.logger.warn("Failed to refresh token, requesting new token", {
               error: stripStackTrace(error as Error),
               authority: this.options.authority,
               clientId: this.options.clientId,
@@ -109,7 +119,7 @@ export class GuardhouseNodeClient {
       const correlationId = this.logTokenRequest();
       tokenResponse = await this.requestToken();
 
-      console.info(`Token request successful [${correlationId}]:`, {
+      this.logger.info(`Token request successful [${correlationId}]`, {
         expires_in: tokenResponse.expires_in,
       });
 
@@ -119,11 +129,17 @@ export class GuardhouseNodeClient {
   }
 
   async requestToken(): Promise<TokenResponse> {
-    const client = new GuardhouseClient({
+    const coreClientConfig: Record<string, unknown> = {
       authority: this.options.authority,
       clientId: this.options.clientId,
       clientSecret: this.options.clientSecret,
-    });
+    };
+
+    if (typeof this.options.debug === "boolean") {
+      coreClientConfig.debug = this.options.debug;
+    }
+
+    const client = new GuardhouseClient(coreClientConfig as any);
 
     const scope =
       this.options.scope || GuardhouseConstants.Defaults.DefaultScope;
@@ -154,11 +170,17 @@ export class GuardhouseNodeClient {
   }
 
   async refreshToken(refreshToken: string): Promise<TokenResponse> {
-    const client = new GuardhouseClient({
+    const coreClientConfig: Record<string, unknown> = {
       authority: this.options.authority,
       clientId: this.options.clientId,
       clientSecret: this.options.clientSecret,
-    });
+    };
+
+    if (typeof this.options.debug === "boolean") {
+      coreClientConfig.debug = this.options.debug;
+    }
+
+    const client = new GuardhouseClient(coreClientConfig as any);
 
     try {
       const body = new URLSearchParams({
@@ -203,7 +225,7 @@ export class GuardhouseNodeClient {
         });
 
         if (response.status === 401 && retryCount === 0) {
-          console.warn(`Received 401, clearing cache [${correlationId}]:`, {
+          this.logger.warn(`Received 401, clearing cache [${correlationId}]`, {
             url: url.replace(/https?:\/\/[^\/]+/, "***"),
           });
 
@@ -215,7 +237,7 @@ export class GuardhouseNodeClient {
 
         if (!response.ok) {
           const errorText = await response.text();
-          console.warn(`Request failed [${correlationId}]:`, {
+          this.logger.warn(`Request failed [${correlationId}]`, {
             status: response.status,
             url: url.replace(/https?:\/\/[^\/]+/, "***"),
             error: errorText.substring(0, 200),
@@ -223,7 +245,7 @@ export class GuardhouseNodeClient {
           throw new Error(`Request failed with status ${response.status}`);
         }
 
-        console.info(`Request successful [${correlationId}]:`, {
+        this.logger.info(`Request successful [${correlationId}]`, {
           status: response.status,
           url: url.replace(/https?:\/\/[^\/]+/, "***"),
         });
@@ -299,7 +321,7 @@ export class GuardhouseNodeClient {
 
       (evictionTimer as unknown as { unref?: () => void }).unref?.();
 
-      console.debug(`Token cached:`, {
+      this.logger.debug("Token cached", {
         expiresAt: new Date(expiresAt * 1000).toISOString(),
         bufferSeconds,
       });
@@ -329,7 +351,7 @@ export class GuardhouseAdminClient extends GuardhouseNodeClient {
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.warn(`Delete user failed [${correlationId}]:`, {
+        this.logger.warn(`Delete user failed [${correlationId}]`, {
           userId,
           status: response.status,
           error: errorText.substring(0, 200),
@@ -337,7 +359,7 @@ export class GuardhouseAdminClient extends GuardhouseNodeClient {
         throw new Error(`Failed to delete user`);
       }
 
-      console.info(`User deleted successfully [${correlationId}]:`, {
+      this.logger.info(`User deleted successfully [${correlationId}]`, {
         userId,
       });
     } catch (error) {
@@ -362,7 +384,7 @@ export class GuardhouseAdminClient extends GuardhouseNodeClient {
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.warn(`Get user failed [${correlationId}]:`, {
+        this.logger.warn(`Get user failed [${correlationId}]`, {
           userId,
           status: response.status,
           error: errorText.substring(0, 200),
@@ -371,7 +393,7 @@ export class GuardhouseAdminClient extends GuardhouseNodeClient {
       }
 
       const data = await response.json();
-      console.info(`User retrieved successfully [${correlationId}]:`, {
+      this.logger.info(`User retrieved successfully [${correlationId}]`, {
         userId,
       });
       return data;
@@ -408,7 +430,7 @@ export class GuardhouseAdminClient extends GuardhouseNodeClient {
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.warn(`List users failed [${correlationId}]:`, {
+        this.logger.warn(`List users failed [${correlationId}]`, {
           status: response.status,
           error: errorText.substring(0, 200),
         });
@@ -416,7 +438,7 @@ export class GuardhouseAdminClient extends GuardhouseNodeClient {
       }
 
       const data = await response.json();
-      console.info(`Users listed successfully [${correlationId}]:`, {
+      this.logger.info(`Users listed successfully [${correlationId}]`, {
         count: data.length,
       });
       return data;
@@ -443,7 +465,7 @@ export class GuardhouseAdminClient extends GuardhouseNodeClient {
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.warn(`Create user failed [${correlationId}]:`, {
+        this.logger.warn(`Create user failed [${correlationId}]`, {
           status: response.status,
           error: errorText.substring(0, 200),
         });
@@ -451,7 +473,7 @@ export class GuardhouseAdminClient extends GuardhouseNodeClient {
       }
 
       const data = await response.json();
-      console.info(`User created successfully [${correlationId}]:`, {
+      this.logger.info(`User created successfully [${correlationId}]`, {
         userId: data.id,
       });
       return data;
@@ -478,7 +500,7 @@ export class GuardhouseAdminClient extends GuardhouseNodeClient {
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.warn(`Update user failed [${correlationId}]:`, {
+        this.logger.warn(`Update user failed [${correlationId}]`, {
           userId,
           status: response.status,
           error: errorText.substring(0, 200),
@@ -487,7 +509,7 @@ export class GuardhouseAdminClient extends GuardhouseNodeClient {
       }
 
       const data = await response.json();
-      console.info(`User updated successfully [${correlationId}]:`, {
+      this.logger.info(`User updated successfully [${correlationId}]`, {
         userId,
       });
       return data;

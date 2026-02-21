@@ -31,6 +31,7 @@
  */
 
 import * as Keychain from "react-native-keychain";
+import { createReactNativeLogger } from "../debug";
 
 export interface StorageKeys {
   ACCESS_TOKEN: string;
@@ -85,9 +86,11 @@ export class BiometricAuthFailedError extends Error {
  */
 export class SecureStorage {
   private requireBiometrics: boolean;
+  private logger: ReturnType<typeof createReactNativeLogger>;
 
-  constructor(requireBiometrics: boolean = false) {
+  constructor(requireBiometrics: boolean = false, debug = false) {
     this.requireBiometrics = requireBiometrics;
+    this.logger = createReactNativeLogger("SecureStorage", debug);
   }
 
   /**
@@ -118,7 +121,10 @@ export class SecureStorage {
         );
       }
 
-      console.error(`SecureStorage.getItem error for key ${key}:`, error);
+      this.logger.error("Failed to read from secure storage", {
+        key,
+        error: String(error),
+      });
       return null;
     }
   }
@@ -142,7 +148,10 @@ export class SecureStorage {
         accessible: Keychain.ACCESSIBLE.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
       });
     } catch (error) {
-      console.error(`SecureStorage.setItem error for key ${key}:`, error);
+      this.logger.error("Failed to write to secure storage", {
+        key,
+        error: String(error),
+      });
       throw error;
     }
   }
@@ -154,7 +163,10 @@ export class SecureStorage {
     try {
       await Keychain.resetGenericPassword({ service: key });
     } catch (error) {
-      console.error(`SecureStorage.removeItem error for key ${key}:`, error);
+      this.logger.warn("Failed to remove secure storage key", {
+        key,
+        error: String(error),
+      });
     }
   }
 
@@ -173,7 +185,9 @@ export class SecureStorage {
         }
       }
     } catch (error) {
-      console.error("SecureStorage.clear error:", error);
+      this.logger.error("Failed to clear secure storage", {
+        error: String(error),
+      });
     }
   }
 
@@ -227,7 +241,9 @@ export class SecureStorage {
         user,
       };
     } catch (error) {
-      console.error("SecureStorage.getSession error:", error);
+      this.logger.error("Failed to read secure session", {
+        error: String(error),
+      });
       return null;
     }
   }
@@ -266,11 +282,16 @@ export class SecureStorage {
  */
 export class PromiseLock {
   private promise: Promise<any> | null = null;
+  private logger: ReturnType<typeof createReactNativeLogger>;
+
+  constructor(debug = false) {
+    this.logger = createReactNativeLogger("PromiseLock", debug);
+  }
 
   async run<T>(fn: () => Promise<T>): Promise<T> {
     // If a promise is already running, return it
     if (this.promise) {
-      console.log("[PromiseLock] Waiting for existing promise to complete");
+      this.logger.debug("Waiting for existing promise to complete");
       return this.promise as Promise<T>;
     }
 
@@ -305,7 +326,13 @@ export class PromiseLock {
  * - Faster than making a network call to introspect token
  * - Safe because we trust the token (we just received it)
  */
-export function isTokenExpired(token: string, bufferSeconds = 60): boolean {
+export function isTokenExpired(
+  token: string,
+  bufferSeconds = 60,
+  debug = false,
+): boolean {
+  const logger = createReactNativeLogger("Token", debug);
+
   try {
     const parts = token.split(".");
 
@@ -330,7 +357,9 @@ export function isTokenExpired(token: string, bufferSeconds = 60): boolean {
     return payload.exp < now + bufferSeconds;
   } catch (error) {
     // Failed to parse JWT, treat as expired (safe fallback)
-    console.error("Failed to check token expiration:", error);
+    logger.error("Failed to check token expiration", {
+      error: String(error),
+    });
     return true;
   }
 }

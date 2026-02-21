@@ -26,6 +26,7 @@ import {
   removeQueryParams,
   validateIdToken,
 } from "./utils";
+import { createReactLogger } from "./debug";
 
 interface AuthContextValue extends AuthState {
   loginWithRedirect: (options?: LoginOptions) => Promise<void>;
@@ -61,8 +62,14 @@ export function GuardhouseProvider({
     [config.storage],
   );
   const sessionStorage = useMemo(() => new SessionStorageAdapter(), []);
+  const logger = useMemo(
+    () => createReactLogger("Provider", config.debug),
+    [config.debug],
+  );
 
   const handleError = useCallback((error: string) => {
+    logger.error("Authentication flow failed", { error });
+
     setState((prev) => ({
       ...prev,
       isLoading: false,
@@ -85,21 +92,27 @@ export function GuardhouseProvider({
       if (tokenData && config.onRedirectCallback) {
         config.onRedirectCallback();
       }
+
+      logger.info("Authentication flow completed", {
+        subject: user.sub,
+      });
     },
-    [config.onRedirectCallback],
+    [config.onRedirectCallback, logger],
   );
 
   const handleLoading = useCallback(() => {
+    logger.debug("Authentication flow loading state enabled");
     setState((prev) => ({ ...prev, isLoading: true }));
-  }, []);
+  }, [logger]);
 
   const clearAuthState = useCallback(async () => {
+    logger.debug("Clearing stored auth state");
     await storage.removeItem(StorageKeys.ACCESS_TOKEN);
     await storage.removeItem(StorageKeys.REFRESH_TOKEN);
     await storage.removeItem(StorageKeys.ID_TOKEN);
     await storage.removeItem(StorageKeys.EXPIRES_AT);
     await storage.removeItem(StorageKeys.USER);
-  }, [storage]);
+  }, [storage, logger]);
 
   const handleCallback = useCallback(async () => {
     const params = parseQueryParams(window.location.search);
@@ -142,6 +155,9 @@ export function GuardhouseProvider({
       await sessionStorage.removeItem(StorageKeys.NONCE);
 
       const tokenEndpoint = `${config.authority}/connect/token`;
+      logger.debug("Exchanging authorization code for tokens", {
+        tokenEndpoint,
+      });
 
       const response = await fetch(tokenEndpoint, {
         method: "POST",
@@ -186,7 +202,9 @@ export function GuardhouseProvider({
           );
           fallbackUserFromIdToken = idTokenPayload as CoreUser;
         } catch (idTokenError) {
-          console.warn("ID token validation failed:", idTokenError);
+          logger.warn("ID token validation failed", {
+            error: String(idTokenError),
+          });
         }
       }
 
@@ -201,7 +219,9 @@ export function GuardhouseProvider({
 
       if (!userResponse.ok) {
         const errorText = await userResponse.text();
-        console.warn("Failed to fetch user info:", errorText);
+        logger.warn("Failed to fetch user info", {
+          error: errorText,
+        });
 
         if (fallbackUserFromIdToken) {
           authenticatedUser = fallbackUserFromIdToken;
@@ -272,7 +292,9 @@ export function GuardhouseProvider({
       const userData: CoreUser = JSON.parse(userStr);
       handleSuccess(userData);
     } catch (error) {
-      console.error("Session check failed:", error);
+      logger.error("Session check failed", {
+        error: String(error),
+      });
       setState((prev) => ({
         ...prev,
         isLoading: false,
@@ -280,7 +302,7 @@ export function GuardhouseProvider({
         user: null,
       }));
     }
-  }, [storage, clearAuthState, handleLoading, handleSuccess]);
+  }, [storage, clearAuthState, handleLoading, handleSuccess, logger]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -297,7 +319,11 @@ export function GuardhouseProvider({
   const loginWithRedirect = useCallback(
     async (options?: LoginOptions) => {
       try {
-        const { codeVerifier, codeChallenge } = await generatePKCE();
+        logger.info("Starting redirect login flow");
+
+        const { codeVerifier, codeChallenge } = await generatePKCE({
+          debug: config.debug,
+        } as any);
         const state = generateBase64UrlEncodedString(32);
         const nonce = generateBase64UrlEncodedString(32);
 
@@ -309,12 +335,13 @@ export function GuardhouseProvider({
           authority: config.authority,
           clientId: config.clientId,
           redirectUri: config.redirectUri,
+          debug: config.debug,
           responseType: config.responseType || "code",
           scope: options?.scope || config.scope || "openid profile email",
           state,
           codeChallenge,
           codeChallengeMethod: "S256",
-        });
+        } as any);
 
         if (options?.appState?.returnTo) {
           await sessionStorage.setItem(
@@ -335,6 +362,10 @@ export function GuardhouseProvider({
     async (options?: LogoutOptions) => {
       const returnTo =
         options?.returnTo || config.logoutRedirectUri || window.location.origin;
+
+      logger.info("Starting logout flow", {
+        returnTo,
+      });
 
       const logoutUrl = new URL(`${config.authority}/connect/endsession`);
       logoutUrl.searchParams.set("post_logout_redirect_uri", returnTo);
@@ -410,11 +441,13 @@ export function GuardhouseProvider({
 
       return tokenData.access_token;
     } catch (error) {
-      console.error("Token refresh failed:", error);
+      logger.error("Token refresh failed", {
+        error: String(error),
+      });
       await clearAuthState();
       return null;
     }
-  }, [config, storage, clearAuthState]);
+  }, [config, storage, clearAuthState, logger]);
 
   const contextValue: AuthContextValue = {
     ...state,

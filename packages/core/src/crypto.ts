@@ -42,6 +42,8 @@
  *    - Standard for OAuth 2.0 and JWT
  */
 
+import { createGuardhouseLogger } from "./debug";
+
 export interface CryptoAdapter {
   name?: string;
   randomBytes(length: number): Promise<Uint8Array>;
@@ -186,23 +188,23 @@ export function detectCryptoAdapter(): CryptoAdapter {
     typeof globalThis.crypto?.subtle === "object" &&
     typeof globalThis.crypto?.getRandomValues === "function"
   ) {
-    console.log("[Guardhouse Crypto] Using SubtleCrypto adapter");
+    logger.info("Using SubtleCrypto adapter");
     return new SubtleCryptoAdapter();
   }
 
   try {
     require("crypto");
-    console.log("[Guardhouse Crypto] Using Node.js crypto adapter");
+    logger.info("Using Node.js crypto adapter");
     return new NodeCryptoAdapter();
   } catch (error) {
-    console.log("[Guardhouse Crypto] Node.js crypto not available");
+    logger.debug("Node.js crypto not available", error);
   }
 
-  console.warn(
-    "[Guardhouse Crypto] No native crypto available. Using fallback adapter.",
-    "\nWARNING: Fallback adapter is NOT suitable for production.",
-    "For React Native: Inject a crypto provider like react-native-crypto-js",
-  );
+  logger.warn("No native crypto available. Using fallback adapter.", {
+    warning: "Fallback adapter is not suitable for production",
+    recommendation:
+      "Inject a custom crypto provider (for example react-native-quick-crypto)",
+  });
 
   return new FallbackCryptoAdapter();
 }
@@ -217,9 +219,9 @@ export function detectCryptoAdapter(): CryptoAdapter {
  * @returns The provided adapter
  */
 export function createCryptoAdapter(provider: CryptoAdapter): CryptoAdapter {
-  console.log(
-    `[Guardhouse Crypto] Using custom crypto provider: ${provider.name}`,
-  );
+  logger.info("Using custom crypto provider", {
+    provider: provider.name,
+  });
   return provider;
 }
 
@@ -230,6 +232,7 @@ export function createCryptoAdapter(provider: CryptoAdapter): CryptoAdapter {
  * Useful for React Native apps to inject react-native-crypto-js
  */
 let globalCryptoAdapter: CryptoAdapter | null = null;
+const logger = createGuardhouseLogger("Crypto");
 
 /**
  * Set global crypto adapter (dependency injection)
@@ -252,7 +255,9 @@ let globalCryptoAdapter: CryptoAdapter | null = null;
  */
 export function setCryptoAdapter(adapter: CryptoAdapter): void {
   globalCryptoAdapter = adapter;
-  console.log(`[Guardhouse Crypto] Crypto adapter set to: ${adapter.name}`);
+  logger.info("Crypto adapter set", {
+    adapter: adapter.name,
+  });
 }
 
 /**
@@ -277,6 +282,6 @@ export async function getCryptoAdapter(): Promise<CryptoAdapter> {
  * Returns the adapter for immediate use
  */
 export async function initializeCrypto(): Promise<CryptoAdapter> {
-  console.log("[Guardhouse Crypto] Initializing crypto adapter...");
+  logger.debug("Initializing crypto adapter");
   return await getCryptoAdapter();
 }

@@ -19,6 +19,8 @@
  *    - Client Secret optional (public clients don't need it)
  */
 
+import { createGuardhouseLogger } from "./debug";
+
 export interface GuardhouseConfig {
   authority: string;
   clientId: string;
@@ -26,6 +28,7 @@ export interface GuardhouseConfig {
   redirectUri?: string;
   scope?: string;
   storage?: StorageAdapter;
+  debug?: boolean;
 }
 
 export interface StorageAdapter {
@@ -61,6 +64,8 @@ export class ConfigValidationError extends GuardhouseError {
  * @throws {ConfigValidationError} If configuration is invalid
  */
 export function validateConfig(config: GuardhouseConfig): void {
+  const logger = createGuardhouseLogger("Config", config.debug);
+
   if (!config.authority) {
     throw new ConfigValidationError("Authority is required");
   }
@@ -81,11 +86,20 @@ export function validateConfig(config: GuardhouseConfig): void {
 
     // SECURITY: Prevent SSRF (Server-Side Request Forgery)
     if (config.clientSecret && !isLocalhost(url.hostname)) {
-      console.warn(
-        "[Guardhouse] WARNING: Using client_secret with non-localhost authority. Ensure you trust this server.",
+      logger.warn(
+        "Using client_secret with non-localhost authority. Ensure you trust this server.",
       );
     }
+
+    logger.debug("Configuration validated successfully", {
+      authority: url.origin,
+      hasClientSecret: Boolean(config.clientSecret),
+    });
   } catch (error) {
+    if (error instanceof ConfigValidationError) {
+      throw error;
+    }
+
     throw new ConfigValidationError(`Invalid authority URL: ${error}`);
   }
 }
@@ -125,6 +139,8 @@ export function buildUrl(
   path: string,
   params: Record<string, string> = {},
 ): string {
+  const logger = createGuardhouseLogger("Config", config.debug);
+
   try {
     const url = new URL(config.authority);
 
@@ -140,7 +156,14 @@ export function buildUrl(
       url.searchParams.set(key, value);
     });
 
-    return url.toString();
+    const builtUrl = url.toString();
+    logger.debug("Built URL", {
+      path,
+      queryParamCount: Object.keys(params).length,
+      url: builtUrl,
+    });
+
+    return builtUrl;
   } catch (error) {
     throw new GuardhouseError(
       `Failed to build URL: ${error instanceof Error ? error.message : "Unknown error"}`,

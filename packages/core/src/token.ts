@@ -27,6 +27,8 @@
  *    - Don't assume token is valid just because it decodes
  */
 
+import { createGuardhouseLogger } from "./debug";
+
 export interface JWTPayload {
   sub?: string;
   name?: string;
@@ -154,6 +156,7 @@ export interface TokenValidationOptions {
   audience?: string;
   nonce?: string;
   clockSkewTolerance?: number;
+  debug?: boolean;
 }
 
 export function validateToken(
@@ -165,7 +168,10 @@ export function validateToken(
     audience,
     nonce,
     clockSkewTolerance = 30, // 30 seconds default skew tolerance
+    debug,
   } = options;
+
+  const logger = createGuardhouseLogger("Token", debug);
 
   const result: TokenValidationResult = {
     valid: true,
@@ -183,7 +189,7 @@ export function validateToken(
   if (decodedJWT.header.alg === "none") {
     result.valid = false;
     result.errors.push('JWT "none" algorithm is not allowed');
-    console.error('[TokenService] CRITICAL: JWT uses "none" algorithm');
+    logger.error('CRITICAL: JWT uses "none" algorithm');
   }
 
   // SECURITY: Check algorithm whitelist
@@ -192,9 +198,7 @@ export function validateToken(
     result.errors.push(
       `JWT algorithm "${decodedJWT.header.alg}" is not allowed`,
     );
-    console.warn(
-      `[TokenService] Unknown JWT algorithm: ${decodedJWT.header.alg}`,
-    );
+    logger.warn(`Unknown JWT algorithm: ${decodedJWT.header.alg}`);
   }
 
   // SECURITY: Validate expiration (exp claim)
@@ -223,8 +227,8 @@ export function validateToken(
       result.errors.push(
         `Token issuer "${decodedJWT.payload.iss}" does not match expected "${issuer}"`,
       );
-      console.warn(
-        `[TokenService] Issuer mismatch: expected ${issuer}, got ${decodedJWT.payload.iss}`,
+      logger.warn(
+        `Issuer mismatch: expected ${issuer}, got ${decodedJWT.payload.iss}`,
       );
     }
   }
@@ -241,8 +245,8 @@ export function validateToken(
       result.errors.push(
         `Token audience does not contain expected "${audience}"`,
       );
-      console.warn(
-        `[TokenService] Audience mismatch: expected ${audience}, got ${audArray.join(", ")}`,
+      logger.warn(
+        `Audience mismatch: expected ${audience}, got ${audArray.join(", ")}`,
       );
     }
   }
@@ -255,11 +259,16 @@ export function validateToken(
       result.errors.push(
         `Token nonce "${decodedJWT.payload.nonce}" does not match expected "${nonce}"`,
       );
-      console.warn(
-        `[TokenService] Nonce mismatch: expected ${nonce}, got ${decodedJWT.payload.nonce}`,
+      logger.warn(
+        `Nonce mismatch: expected ${nonce}, got ${decodedJWT.payload.nonce}`,
       );
     }
   }
+
+  logger.debug("Token validation completed", {
+    valid: result.valid,
+    errorCount: result.errors.length,
+  });
 
   return result;
 }

@@ -1,4 +1,5 @@
 import type { AuthUrlOptions } from "./types";
+import { createGuardhouseLogger } from "./debug";
 
 function withNonEmptyParams(
   url: URL,
@@ -22,6 +23,7 @@ export function generateAuthUrl(options: AuthUrlOptions): string {
     redirectUri,
     responseType = "code",
     scope = "openid profile email",
+    debug,
     state,
     codeChallenge,
     codeChallengeMethod = "S256",
@@ -32,6 +34,8 @@ export function generateAuthUrl(options: AuthUrlOptions): string {
     maxAge,
     extraParams,
   } = options;
+
+  const logger = createGuardhouseLogger("Auth", debug);
 
   const url = new URL(authority);
   const basePath = url.pathname.replace(/\/+$/, "");
@@ -57,5 +61,15 @@ export function generateAuthUrl(options: AuthUrlOptions): string {
     withNonEmptyParams(url, extraParams);
   }
 
-  return url.toString();
+  const authorizationUrl = url.toString();
+
+  logger.debug("Generated authorization URL", {
+    authority,
+    redirectUri,
+    responseType,
+    hasCodeChallenge: Boolean(codeChallenge),
+    scope,
+  });
+
+  return authorizationUrl;
 }

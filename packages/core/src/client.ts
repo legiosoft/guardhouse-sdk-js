@@ -31,6 +31,7 @@
 import type { GuardhouseConfig } from "./config";
 
 import { GuardhouseError } from "./config";
+import { createGuardhouseLogger, setGuardhouseDebug } from "./debug";
 
 export interface RequestOptions {
   method?: "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
@@ -97,15 +98,23 @@ export interface IntrospectionResponse {
 export class GuardhouseClient {
   private config: GuardhouseConfig;
   private baseURL: string;
+  private logger: ReturnType<typeof createGuardhouseLogger>;
 
   constructor(config: GuardhouseConfig) {
     this.config = config;
 
+    if (typeof config.debug === "boolean") {
+      setGuardhouseDebug(config.debug);
+    }
+
+    this.logger = createGuardhouseLogger("CoreClient", config.debug);
+
     this.baseURL = config.authority.replace(/\/+$/, "");
 
-    console.log(
-      `[GuardhouseClient] Initialized for authority: ${this.baseURL}`,
-    );
+    this.logger.info("Initialized", {
+      authority: this.baseURL,
+      hasClientSecret: Boolean(config.clientSecret),
+    });
   }
 
   /**
@@ -153,7 +162,10 @@ export class GuardhouseClient {
   }> {
     const url = `${this.baseURL}${endpoint}`;
 
-    console.log(`[GuardhouseClient] ${options.method || "GET"} ${url}`);
+    this.logger.debug("HTTP request", {
+      method: options.method || "GET",
+      url,
+    });
 
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -177,6 +189,12 @@ export class GuardhouseClient {
         body: options.body,
       });
 
+      this.logger.debug("HTTP response received", {
+        method: options.method || "GET",
+        url,
+        status: response.status,
+      });
+
       if (!response.ok) {
         const errorData = await this.parseErrorResponse(response);
         let errorMessage =
@@ -197,7 +215,7 @@ export class GuardhouseClient {
           }
         }
 
-        console.error(`[GuardhouseClient] Error response:`, {
+        this.logger.error("HTTP request failed", {
           status: response.status,
           statusText: response.statusText,
           errorData: JSON.stringify(errorData, null, 2),
@@ -211,6 +229,12 @@ export class GuardhouseClient {
 
       const data = await response.json();
 
+      this.logger.debug("HTTP request succeeded", {
+        method: options.method || "GET",
+        url,
+        status: response.status,
+      });
+
       return {
         data,
         status: response.status,
@@ -221,7 +245,11 @@ export class GuardhouseClient {
         throw error;
       }
 
-      console.error(`[GuardhouseClient] Network error:`, error);
+      this.logger.error("Network request failed", {
+        method: options.method || "GET",
+        url,
+        error,
+      });
       throw new GuardhouseError(
         error instanceof Error ? error.message : "Network error",
         "NETWORK_ERROR",
@@ -280,7 +308,11 @@ export class GuardhouseClient {
       ...params,
     });
 
-    console.log("[GuardhouseClient] Exchanging authorization code for tokens");
+    this.logger.info("Exchanging authorization code for tokens", {
+      redirectUri,
+      hasCode: Boolean(code),
+      hasCodeVerifier: Boolean(codeVerifier),
+    });
 
     const response = await this.fetch("/connect/token", {
       method: "POST",
@@ -319,7 +351,7 @@ export class GuardhouseClient {
       ...params,
     });
 
-    console.log("[GuardhouseClient] Refreshing access token");
+    this.logger.info("Refreshing access token");
 
     const response = await this.fetch("/connect/token", {
       method: "POST",
@@ -349,6 +381,10 @@ export class GuardhouseClient {
    * For client credentials tokens, use introspectToken() instead.
    */
   async getUserInfo(token: string): Promise<UserInfoResponse> {
+    this.logger.debug("Fetching user info", {
+      hasToken: Boolean(token),
+    });
+
     const response = await this.fetch("/connect/userinfo", {
       token,
     });
@@ -371,6 +407,10 @@ export class GuardhouseClient {
    * NOTE: Use this for client credentials tokens since userinfo doesn't support them.
    */
   async introspectToken(token: string): Promise<IntrospectionResponse> {
+    this.logger.debug("Introspecting token", {
+      hasToken: Boolean(token),
+    });
+
     const body = new URLSearchParams({
       token,
       token_type_hint: "access_token",
@@ -395,6 +435,10 @@ export class GuardhouseClient {
    * @throws {GuardhouseError} On revocation failure
    */
   async revokeToken(token: string): Promise<void> {
+    this.logger.info("Revoking token", {
+      hasToken: Boolean(token),
+    });
+
     const body = new URLSearchParams({
       token,
       client_id: this.config.clientId,
@@ -409,7 +453,7 @@ export class GuardhouseClient {
       skipAuthHeader: true,
     });
 
-    console.log("[GuardhouseClient] Token revoked");
+    this.logger.info("Token revoked");
   }
 
   /**

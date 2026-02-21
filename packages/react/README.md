@@ -7,6 +7,7 @@ Frontend SDK for React 18+ web applications with hooks and protected routes.
 - **Auth Context**: GuardhouseProvider component for managing authentication state
 - **React Hooks**: useAuth hook for accessing user profile and auth methods
 - **Token Storage**: Customizable storage adapter (defaults to localStorage)
+- **Debug Mode**: Set `config.debug = true` to trace SDK activity
 - **Protected Routes**: ProtectedRoute component to secure routes
 - **React 18 Compatible**: Supports Concurrent Mode and Server Components
 
@@ -25,9 +26,12 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 function App() {
   return (
     <GuardhouseProvider
-      authority="https://auth.guardhouse.io"
-      clientId="your-client-id"
-      redirectUri={window.location.origin + '/callback'}
+      config={{
+        authority: 'https://auth.guardhouse.io',
+        clientId: 'your-client-id',
+        redirectUri: window.location.origin + '/callback',
+        debug: true,
+      }}
     >
       <BrowserRouter>
         <Routes>

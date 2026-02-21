@@ -4,6 +4,7 @@ export interface GuardhouseConfig {
   clientSecret?: string;
   redirectUri?: string;
   scope?: string;
+  debug?: boolean;
 }
 
 export interface User {
@@ -58,6 +59,7 @@ export interface AuthUrlOptions {
   clientId: string;
   redirectUri: string;
   scope?: string;
+  debug?: boolean;
   responseType?: string;
   state?: string;
   codeChallenge?: string;

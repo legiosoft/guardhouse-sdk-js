@@ -65,6 +65,14 @@ export {
 } from "./crypto";
 export type { CryptoAdapter } from "./crypto";
 
+// Debug exports
+export {
+  createGuardhouseLogger,
+  isGuardhouseDebugEnabled,
+  setGuardhouseDebug,
+} from "./debug";
+export type { GuardhouseLogger } from "./debug";
+
 // Token exports
 export {
   decodeJWT,

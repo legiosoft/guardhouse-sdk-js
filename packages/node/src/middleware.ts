@@ -21,6 +21,7 @@ import {
   stripStackTrace,
   getTokenHash,
 } from "./utils";
+import { createNodeLogger } from "./debug";
 import { GuardhouseClient, IntrospectionResponse } from "@guardhouse/core";
 
 interface IntrospectionCacheEntry {
@@ -39,12 +40,21 @@ export class GuardhouseResourceService {
   private introspectionCache = new Map<string, IntrospectionCacheEntry>();
   private keyCache = new Map<string, KeyCacheEntry>();
   private jwksUri: string;
+  private logger: ReturnType<typeof createNodeLogger>;
 
   constructor(private options: GuardhouseResourceOptions) {
     this.jwksUri = "";
+    this.logger = createNodeLogger("Middleware", options.debug);
+
+    this.logger.info("Initializing resource service", {
+      authority: options.authority,
+      audience: options.audience,
+      validationMode: options.validationMode || "jwt_signature",
+    });
 
     if (this.options.validationMode === "jwt_signature") {
-      this.jwksUri = `${this.options.authority}/.well-known/jwks`;
+      const normalizedAuthority = this.options.authority.replace(/\/+$/, "");
+      this.jwksUri = `${normalizedAuthority}/${GuardhouseConstants.Endpoints.WellKnownJwks}`;
 
       validateHttpsUrl(this.jwksUri, "JWKS endpoint");
 
@@ -56,7 +66,9 @@ export class GuardhouseResourceService {
         try {
           validateTrustedAuthority(this.jwksUri, this.options.authority);
         } catch (error) {
-          console.warn(`JWKS authority validation skipped: ${error}`);
+          this.logger.warn("JWKS authority validation skipped", {
+            error: String(error),
+          });
         }
       }
 
@@ -266,14 +278,23 @@ export class GuardhouseResourceService {
     const cached = this.introspectionCache.get(cacheKey);
 
     if (cached && cached.expiresAt > Date.now()) {
+      this.logger.debug("Using cached introspection result", {
+        tokenExp: cached.tokenExp,
+      });
       return this.buildUserFromIntrospection(cached.result);
     }
 
-    const client = new GuardhouseClient({
+    const coreClientConfig: Record<string, unknown> = {
       authority: this.options.authority,
       clientId: this.options.introspectionClientId,
       clientSecret: this.options.introspectionClientSecret,
-    });
+    };
+
+    if (typeof this.options.debug === "boolean") {
+      coreClientConfig.debug = this.options.debug;
+    }
+
+    const client = new GuardhouseClient(coreClientConfig as any);
 
     let introspectionResult: IntrospectionResponse;
 
@@ -310,9 +331,9 @@ export class GuardhouseResourceService {
       this.options.tokenTypes &&
       !this.options.tokenTypes.includes(introspectionResult.token_type)
     ) {
-      console.log(
-        `[Guardhouse] Rejecting token with type: ${introspectionResult.token_type}`,
-      );
+      this.logger.warn("Rejecting token because token type is not allowed", {
+        tokenType: introspectionResult.token_type,
+      });
       throw new Error(`Invalid token type: ${introspectionResult.token_type}`);
     }
 
@@ -358,6 +379,11 @@ export class GuardhouseResourceService {
           result: introspectionResult,
           expiresAt: Date.now() + cacheTtl * 1000,
           tokenExp: tokenExp,
+        });
+
+        this.logger.debug("Cached introspection result", {
+          cacheTtl,
+          tokenExp,
         });
       }
     }
@@ -427,9 +453,11 @@ export class GuardhouseResourceService {
 
   async validateToken(token: string): Promise<GuardhouseUser> {
     if (this.options.validationMode === "introspection") {
+      this.logger.debug("Validating token via introspection");
       return this.introspectToken(token);
     }
 
+    this.logger.debug("Validating token via JWT signature");
     return this.validateJwtToken(token);
   }
 }
@@ -437,6 +465,8 @@ export class GuardhouseResourceService {
 export function guardhouseMiddleware(
   options: GuardhouseResourceOptions,
 ): ExpressMiddleware {
+  const logger = createNodeLogger("Middleware", options.debug);
+
   const validationMode: TokenValidationMode =
     options.validationMode || "jwt_signature";
   const introspectionCredentialTransmission: IntrospectionCredentialTransmission =
@@ -592,9 +622,13 @@ export function guardhouseMiddleware(
       const user = await service.validateToken(token);
       req.user = user;
 
+      logger.debug(`Authentication succeeded [${correlationId}]`, {
+        subject: user.sub,
+      });
+
       next();
     } catch (error) {
-      console.warn(`Authentication failed [${correlationId}]:`, {
+      logger.warn(`Authentication failed [${correlationId}]`, {
         error: stripStackTrace(error as Error),
         authority: opts.authority,
         audience: opts.audience,

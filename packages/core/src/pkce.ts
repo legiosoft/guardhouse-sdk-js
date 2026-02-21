@@ -31,6 +31,7 @@
 
 import { getCryptoAdapter } from "./crypto";
 import type { CryptoAdapter } from "./crypto";
+import { createGuardhouseLogger } from "./debug";
 
 export interface PKCECodePair {
   codeVerifier: string;
@@ -40,6 +41,7 @@ export interface PKCECodePair {
 export interface PKCEOptions {
   length?: number;
   method?: "S256" | "plain";
+  debug?: boolean;
 }
 
 function isCryptoAdapter(value: unknown): value is CryptoAdapter {
@@ -84,11 +86,16 @@ export async function generatePKCE(
   const {
     length = 43, // 128 bits (RFC 7636 recommended minimum)
     method = "S256", // Force S256 (plain is insecure)
+    debug,
   } = options;
 
-  console.log(
-    `[PKCE] Generating PKCE pair (length: ${length}, method: ${method})`,
-  );
+  const logger = createGuardhouseLogger("PKCE", debug);
+
+  logger.debug("Generating PKCE pair", {
+    length,
+    method,
+    adapter: cryptoAdapter.name,
+  });
 
   // SECURITY: Use CSPRNG for code verifier (Math.random() is NOT secure)
   const randomBytes = await cryptoAdapter.randomBytes(length);
@@ -96,14 +103,14 @@ export async function generatePKCE(
   // Convert to base64url
   const codeVerifier = bufferToBase64Url(randomBytes);
 
-  console.log(
-    `[PKCE] Code verifier generated (length: ${codeVerifier.length})`,
-  );
+  logger.debug("Code verifier generated", {
+    length: codeVerifier.length,
+  });
 
   let codeChallenge: string;
 
   if (method === "plain") {
-    console.warn("[PKCE] WARNING: Plain text PKCE is NOT secure (RFC 7636)");
+    logger.warn("Plain text PKCE is insecure and should be avoided");
     codeChallenge = codeVerifier;
   } else {
     // SECURITY: S256 method (RFC 7636 RECOMMENDED)
@@ -112,7 +119,7 @@ export async function generatePKCE(
     const hash = await cryptoAdapter.sha256(data);
     codeChallenge = bufferToBase64Url(hash);
 
-    console.log(`[PKCE] Code challenge generated (S256)`);
+    logger.debug("Code challenge generated with S256");
   }
 
   return {
@@ -144,6 +151,8 @@ export async function generateState(
   adapterOrLength: CryptoAdapter | number = 16,
   maybeLength: number = 16,
 ): Promise<string> {
+  const logger = createGuardhouseLogger("PKCE");
+
   const cryptoAdapter = isCryptoAdapter(adapterOrLength)
     ? adapterOrLength
     : await getCryptoAdapter();
@@ -152,14 +161,19 @@ export async function generateState(
     ? maybeLength
     : adapterOrLength;
 
-  console.log(`[PKCE] Generating state (length: ${length})`);
+  logger.debug("Generating state", {
+    length,
+    adapter: cryptoAdapter.name,
+  });
 
   // SECURITY: Use CSPRNG (Math.random() is NOT secure)
   const randomBytes = await cryptoAdapter.randomBytes(length);
 
   const state = bufferToBase64Url(randomBytes);
 
-  console.log(`[PKCE] State generated (length: ${state.length})`);
+  logger.debug("State generated", {
+    length: state.length,
+  });
 
   return state;
 }
@@ -187,6 +201,8 @@ export async function generateNonce(
   adapterOrLength: CryptoAdapter | number = 16,
   maybeLength: number = 16,
 ): Promise<string> {
+  const logger = createGuardhouseLogger("PKCE");
+
   const cryptoAdapter = isCryptoAdapter(adapterOrLength)
     ? adapterOrLength
     : await getCryptoAdapter();
@@ -195,14 +211,19 @@ export async function generateNonce(
     ? maybeLength
     : adapterOrLength;
 
-  console.log(`[PKCE] Generating nonce (length: ${length})`);
+  logger.debug("Generating nonce", {
+    length,
+    adapter: cryptoAdapter.name,
+  });
 
   // SECURITY: Use CSPRNG (Math.random() is NOT secure)
   const randomBytes = await cryptoAdapter.randomBytes(length);
 
   const nonce = bufferToBase64Url(randomBytes);
 
-  console.log(`[PKCE] Nonce generated (length: ${nonce.length})`);
+  logger.debug("Nonce generated", {
+    length: nonce.length,
+  });
 
   return nonce;
 }

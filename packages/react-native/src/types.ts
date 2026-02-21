@@ -21,6 +21,7 @@ export interface GuardhouseConfig {
   authority: string;
   clientId: string;
   redirectUri: string;
+  debug?: boolean;
   onRedirectCallback?: (appState?: AppState) => void;
   scope?: string;
   responseType?: string;

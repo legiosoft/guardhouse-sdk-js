@@ -19,16 +19,16 @@ npm install @guardhouse/node express
 
 ```typescript
 import express from "express";
-import { authMiddleware, GuardhouseNodeClient } from "@guardhouse/node";
+import { guardhouseMiddleware, GuardhouseNodeClient } from "@guardhouse/node";
 
 const app = express();
 
 // Configure authentication
 app.use(
-  authMiddleware({
+  guardhouseMiddleware({
     authority: "https://auth.guardhouse.io",
     audience: "your-api-audience",
-    issuer: "https://auth.guardhouse.io",
+    debug: true,
   }),
 );
 
@@ -42,6 +42,7 @@ const adminClient = new GuardhouseNodeClient({
   authority: "https://auth.guardhouse.io",
   clientId: "your-admin-client-id",
   clientSecret: "your-admin-client-secret",
+  debug: true,
 });
 
 await adminClient.deleteUser("user-id");

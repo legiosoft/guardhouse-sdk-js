@@ -43,6 +43,7 @@ import React, {
 } from "react";
 import { Linking } from "react-native";
 import InAppBrowser from "react-native-inappbrowser-reborn";
+import * as GuardhouseCore from "@guardhouse/core";
 import {
   decodeJWT,
   generateAuthUrl,
@@ -60,6 +61,7 @@ import {
   isTokenExpired,
   STORAGE_KEYS,
 } from "./utils/storage";
+import { createReactNativeLogger } from "./debug";
 
 interface AuthContextValue extends AuthState {
   login: (options?: LoginOptions) => Promise<void>;
@@ -76,6 +78,7 @@ interface GuardhouseProviderProps {
   redirectUri: string;
   scopes?: string[];
   requireBiometrics?: boolean;
+  debug?: boolean;
   children: ReactNode;
 }
 
@@ -85,6 +88,7 @@ export function GuardhouseProvider({
   redirectUri,
   scopes = ["openid", "profile", "offline_access"],
   requireBiometrics = false,
+  debug = false,
   children,
 }: GuardhouseProviderProps) {
   const [state, setState] = useState<AuthState>({
@@ -97,10 +101,19 @@ export function GuardhouseProvider({
   const [accessToken, setAccessToken] = useState<string | null>(null);
 
   const storage = useMemo(
-    () => new SecureStorage(requireBiometrics),
-    [requireBiometrics],
+    () => new SecureStorage(requireBiometrics, debug),
+    [requireBiometrics, debug],
   );
-  const refreshLock = useRef(new PromiseLock());
+  const logger = useMemo(
+    () => createReactNativeLogger("Provider", debug),
+    [debug],
+  );
+  const refreshLock = useRef(new PromiseLock(debug));
+
+  useEffect(() => {
+    (GuardhouseCore as any).setGuardhouseDebug?.(debug);
+    logger.info("Debug mode updated", { enabled: debug });
+  }, [debug, logger]);
 
   const handleError = useCallback((error: string) => {
     setState((prev) => ({
@@ -135,7 +148,7 @@ export function GuardhouseProvider({
    * Prevents unauthorized access if device is lost/stolen
    */
   const clearAuthState = useCallback(async () => {
-    console.log("[Guardhouse] Clearing auth state");
+    logger.debug("Clearing auth state");
 
     await Promise.all([
       storage.removeItem(STORAGE_KEYS.ACCESS_TOKEN),
@@ -156,7 +169,7 @@ export function GuardhouseProvider({
       error: null,
     }));
     setAccessToken(null);
-  }, [storage]);
+  }, [storage, logger]);
 
   /**
    * Check for existing session on mount
@@ -172,14 +185,14 @@ export function GuardhouseProvider({
       const session = await storage.getSession();
 
       if (!session) {
-        console.log("[Guardhouse] No existing session found");
+        logger.info("No existing session found");
         setState((prev) => ({ ...prev, isLoading: false }));
         return;
       }
 
       // Check if token is expired
-      if (isTokenExpired(session.accessToken)) {
-        console.log("[Guardhouse] Session token is expired");
+      if (isTokenExpired(session.accessToken, 60, debug)) {
+        logger.info("Session token is expired");
         await clearAuthState();
         setState((prev) => ({ ...prev, isLoading: false }));
         return;
@@ -195,12 +208,12 @@ export function GuardhouseProvider({
         token_type: "Bearer",
       });
 
-      console.log("[Guardhouse] Session restored successfully");
+      logger.info("Session restored successfully");
     } catch (error) {
-      console.error("[Guardhouse] Session check failed:", error);
+      logger.error("Session check failed", { error: String(error) });
 
       if (error instanceof Error && error.name === "BiometricAuthFailedError") {
-        console.log("[Guardhouse] Biometric authentication cancelled");
+        logger.warn("Biometric authentication cancelled");
         setState((prev) => ({
           ...prev,
           isLoading: false,
@@ -211,7 +224,15 @@ export function GuardhouseProvider({
 
       handleError("Failed to check session");
     }
-  }, [storage, clearAuthState, handleLoading, handleError, handleSuccess]);
+  }, [
+    storage,
+    clearAuthState,
+    handleLoading,
+    handleError,
+    handleSuccess,
+    debug,
+    logger,
+  ]);
 
   // Check session on mount
   useEffect(() => {
@@ -229,7 +250,7 @@ export function GuardhouseProvider({
    */
   const openAuthSession = useCallback(
     async (url: string): Promise<{ url: string }> => {
-      console.log("[Guardhouse] Opening auth session");
+      logger.info("Opening auth session");
 
       try {
         if (!(await InAppBrowser.isAvailable())) {
@@ -258,11 +279,11 @@ export function GuardhouseProvider({
 
         throw new Error("Authentication failed with unknown error");
       } catch (error) {
-        console.error("[Guardhouse] Auth session error:", error);
+        logger.error("Auth session error", { error: String(error) });
         throw error;
       }
     },
-    [redirectUri],
+    [redirectUri, logger],
   );
 
   /**
@@ -361,7 +382,7 @@ export function GuardhouseProvider({
         });
 
         if (!userResponse.ok) {
-          console.warn("[Guardhouse] Failed to fetch user info");
+          logger.warn("Failed to fetch user info");
         }
 
         const userData = await userResponse.json();
@@ -392,7 +413,9 @@ export function GuardhouseProvider({
           }
         }
       } catch (error) {
-        console.error("[Guardhouse] Auth callback handling failed:", error);
+        logger.error("Auth callback handling failed", {
+          error: String(error),
+        });
         handleError(
           error instanceof Error ? error.message : "Unknown error occurred",
         );
@@ -408,6 +431,7 @@ export function GuardhouseProvider({
       handleError,
       handleSuccess,
       clearAuthState,
+      logger,
     ],
   );
 
@@ -423,7 +447,9 @@ export function GuardhouseProvider({
       try {
         handleLoading();
 
-        const { codeVerifier, codeChallenge } = await generatePKCE();
+        const { codeVerifier, codeChallenge } = await generatePKCE({
+          debug,
+        } as any);
 
         const state = await generateState(32);
         const nonce = await generateNonce(32);
@@ -447,23 +473,25 @@ export function GuardhouseProvider({
           authority,
           clientId,
           redirectUri,
+          debug,
           responseType: "code",
           scope,
           state,
           codeChallenge,
           codeChallengeMethod: "S256", // Enforce S256 (no plain text)
-        });
+        } as any);
 
         const result = await openAuthSession(authUrl);
         await handleAuthCallback(result.url);
       } catch (error) {
-        console.error("[Guardhouse] Login failed:", error);
+        logger.error("Login failed", { error: String(error) });
         handleError(error instanceof Error ? error.message : "Login failed");
       }
     },
     [
       authority,
       clientId,
+      debug,
       redirectUri,
       scopes,
       storage,
@@ -471,6 +499,7 @@ export function GuardhouseProvider({
       handleError,
       openAuthSession,
       handleAuthCallback,
+      logger,
     ],
   );
 
@@ -484,7 +513,7 @@ export function GuardhouseProvider({
   const logout = useCallback(
     async (options?: LogoutOptions) => {
       try {
-        console.log("[Guardhouse] Starting logout flow");
+        logger.info("Starting logout flow");
 
         const returnTo = options?.returnTo || redirectUri || "com.myapp://";
 
@@ -501,19 +530,19 @@ export function GuardhouseProvider({
         await clearAuthState();
 
         // Open logout URL to clear server cookies
-        console.log("[Guardhouse] Opening logout URL");
+        logger.debug("Opening logout URL");
         if (await Linking.canOpenURL(logoutUrl.toString())) {
           await Linking.openURL(logoutUrl.toString());
         } else {
-          console.warn("[Guardhouse] Cannot open logout URL");
+          logger.warn("Cannot open logout URL");
         }
       } catch (error) {
-        console.error("[Guardhouse] Logout failed:", error);
+        logger.error("Logout failed", { error: String(error) });
         // Clear local data even if logout URL fails
         await clearAuthState();
       }
     },
-    [authority, redirectUri, storage, clearAuthState],
+    [authority, redirectUri, storage, clearAuthState, logger],
   );
 
   /**
@@ -533,7 +562,7 @@ export function GuardhouseProvider({
   const getAccessToken = useCallback(async (): Promise<string | null> => {
     return refreshLock.current.run(async () => {
       try {
-        console.log("[Guardhouse] Getting access token (with lock)");
+        logger.debug("Getting access token with lock");
 
         let session: SessionData | null = null;
 
@@ -551,20 +580,20 @@ export function GuardhouseProvider({
         }
 
         if (!session) {
-          console.log("[Guardhouse] No session found");
+          logger.info("No session found");
           return null;
         }
 
         // Check if token is expired (using JWT exp claim)
-        if (!isTokenExpired(session.accessToken)) {
-          console.log("[Guardhouse] Access token is still valid");
+        if (!isTokenExpired(session.accessToken, 60, debug)) {
+          logger.debug("Access token is still valid");
           return session.accessToken;
         }
 
-        console.log("[Guardhouse] Access token expired, attempting refresh");
+        logger.info("Access token expired, attempting refresh");
 
         if (!session.refreshToken) {
-          console.log("[Guardhouse] No refresh token available");
+          logger.warn("No refresh token available");
           // Clear session and force re-login
           await clearAuthState();
           setState((prev) => ({
@@ -592,11 +621,10 @@ export function GuardhouseProvider({
 
         if (!response.ok) {
           const errorText = await response.text();
-          console.error(
-            "[Guardhouse] Token refresh failed:",
-            response.status,
-            errorText,
-          );
+          logger.error("Token refresh failed", {
+            status: response.status,
+            error: errorText,
+          });
           // Refresh failed - clear session
           await clearAuthState();
           setState((prev) => ({
@@ -624,11 +652,13 @@ export function GuardhouseProvider({
 
         setAccessToken(tokenData.access_token);
 
-        console.log("[Guardhouse] Token refreshed successfully");
+        logger.info("Token refreshed successfully");
 
         return tokenData.access_token;
       } catch (error) {
-        console.error("[Guardhouse] Get access token failed:", error);
+        logger.error("Get access token failed", {
+          error: String(error),
+        });
 
         // If biometric was cancelled, don't clear session
         if (
@@ -643,7 +673,7 @@ export function GuardhouseProvider({
         return null;
       }
     });
-  }, [authority, clientId, storage, clearAuthState]);
+  }, [authority, clientId, storage, clearAuthState, debug, logger]);
 
   const contextValue: AuthContextValue = {
     ...state,
