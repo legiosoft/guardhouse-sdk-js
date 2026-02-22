@@ -70,12 +70,20 @@ VITE_REDIRECT_URI=http://localhost:3000
 
 #### React Native Example
 
-Edit `App.tsx`:
+```bash
+cd react-native
+cp .env.example .env
+```
 
-```typescript
-const AUTHORITY = "https://your-guardhouse-domain.com";
-const CLIENT_ID = "your-mobile-client-id";
-const REDIRECT_URI = "com.example.guardhouse://callback";
+Edit `.env`:
+
+```env
+GH_AUTHORITY=https://your-guardhouse-domain.com
+GH_CLIENT_ID=your-mobile-client-id
+GH_REDIRECT_URI=com.example.guardhouse://callback
+GH_SCOPE=openid profile email offline_access
+GH_API_BASE_URL_ANDROID=http://10.0.2.2:3001
+GH_API_BASE_URL_IOS=http://localhost:3001
 ```
 
 ### 4. Install Dependencies
@@ -112,7 +120,7 @@ npm run dev
 
 App runs on `http://localhost:3000`
 
-#### Start React Native App
+#### Start React Native App (Expo SDK 54+)
 
 In a new terminal:
 
@@ -124,12 +132,14 @@ npm start
 In another terminal:
 
 ```bash
-# For iOS
-npm run ios
-
 # For Android
 npm run android
+
+# For iOS
+npm run ios
 ```
+
+Note: this Expo example uses native modules, so run with Expo development builds (not Expo Go).
 
 ## Testing the Flow
 
@@ -185,17 +195,17 @@ curl http://localhost:3001/protected \
 - Add your frontend origin to Guardhouse CORS settings
 - For React: `http://localhost:3000`
 
-### "Deep link not working" (React Native)
+### "Deep link not working" (React Native / Expo)
 
 **iOS**:
 
-- Check `Info.plist` has correct URL scheme
-- Restart Xcode after changes
+- Run `npm run ios` again after URI/scheme changes to regenerate native config
+- Check generated `Info.plist` has your URL scheme
 
 **Android**:
 
-- Verify `AndroidManifest.xml` has intent filter
-- Set `launchMode="singleTask"`
+- Run `npm run android` again after URI/scheme changes to regenerate native config
+- Verify generated `AndroidManifest.xml` intent filter contains your redirect URI
 
 ### "Port already in use"
 
@@ -245,7 +255,7 @@ cd react-native && npm start &
 # Individual examples
 cd examples/node && npm run dev
 cd examples/react && npm run dev
-cd examples/react-native && npm run ios
+cd examples/react-native && npm run android
 ```
 
 ## Summary

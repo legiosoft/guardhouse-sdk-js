@@ -262,13 +262,95 @@ export function GuardhouseProvider({
    * - enableUrlBarHiding: true (prevents URL manipulation)
    * - enableDefaultShare: false (prevents data leakage)
    */
+  const openExternalAuthSession = useCallback(
+    async (url: string): Promise<{ url: string }> => {
+      logger.warn(
+        "InAppBrowser unavailable; falling back to external browser deep link flow",
+      );
+
+      const redirectPrefix = redirectUri;
+
+      return new Promise((resolve, reject) => {
+        let settled = false;
+
+        const cleanup = (subscription?: { remove: () => void }) => {
+          if (subscription) {
+            subscription.remove();
+          }
+          clearTimeout(timeout);
+        };
+
+        const fail = (
+          error: unknown,
+          subscription?: { remove: () => void },
+        ) => {
+          if (settled) {
+            return;
+          }
+
+          settled = true;
+          cleanup(subscription);
+
+          reject(
+            error instanceof Error
+              ? error
+              : new Error(typeof error === "string" ? error : String(error)),
+          );
+        };
+
+        const success = (
+          callbackUrl: string,
+          subscription?: { remove: () => void },
+        ) => {
+          if (settled) {
+            return;
+          }
+
+          settled = true;
+          cleanup(subscription);
+          resolve({ url: callbackUrl });
+        };
+
+        const subscription = Linking.addEventListener("url", ({ url }) => {
+          if (!url.startsWith(redirectPrefix)) {
+            logger.debug(
+              "Ignoring unrelated deep link while waiting for auth",
+              {
+                redirectPrefix,
+              },
+            );
+            return;
+          }
+
+          success(url, subscription);
+        });
+
+        const timeout = setTimeout(() => {
+          fail(
+            new Error(
+              "Authentication redirect timed out. Check redirect URI scheme configuration.",
+            ),
+            subscription,
+          );
+        }, 180000);
+
+        Linking.openURL(url).catch((error) => {
+          fail(error, subscription);
+        });
+      });
+    },
+    [redirectUri, logger],
+  );
+
   const openAuthSession = useCallback(
     async (url: string): Promise<{ url: string }> => {
       logger.info("Opening auth session");
 
       try {
-        if (!(await InAppBrowser.isAvailable())) {
-          throw new Error("InAppBrowser is not available on this device");
+        const inAppBrowserAvailable = await InAppBrowser.isAvailable();
+
+        if (!inAppBrowserAvailable) {
+          return openExternalAuthSession(url);
         }
 
         const result = await InAppBrowser.openAuth(url, redirectUri, {
@@ -297,7 +379,7 @@ export function GuardhouseProvider({
         throw error;
       }
     },
-    [redirectUri, logger],
+    [redirectUri, logger, openExternalAuthSession],
   );
 
   /**

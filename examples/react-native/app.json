@@ -1,4 +1,22 @@
 {
-  "name": "GuardhouseExample",
-  "displayName": "Guardhouse Example"
+  "expo": {
+    "name": "Guardhouse Example",
+    "slug": "guardhouse-example",
+    "version": "1.0.0",
+    "scheme": "com.example.guardhouse",
+    "orientation": "portrait",
+    "platforms": [
+      "ios",
+      "android"
+    ],
+    "ios": {
+      "bundleIdentifier": "com.example.guardhouse"
+    },
+    "android": {
+      "package": "com.example.guardhouse"
+    },
+    "plugins": [
+      "expo-secure-store"
+    ]
+  }
 }

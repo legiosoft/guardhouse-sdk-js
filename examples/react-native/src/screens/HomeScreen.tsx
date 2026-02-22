@@ -6,14 +6,24 @@ import {
   TouchableOpacity,
   ScrollView,
   ActivityIndicator,
+  Alert,
 } from "react-native";
 import { useAuth } from "@guardhouse/react-native";
 
 function HomeScreen({ navigation }: any) {
-  const { user, isAuthenticated, isLoading, login, logout } = useAuth();
+  const { user, isAuthenticated, isLoading, login, logout, error } = useAuth();
 
   const handleLogin = async () => {
-    await login();
+    try {
+      await login();
+    } catch (loginError) {
+      Alert.alert(
+        "Login Failed",
+        loginError instanceof Error
+          ? loginError.message
+          : "Unknown login error",
+      );
+    }
   };
 
   const handleLogout = async () => {
@@ -33,6 +43,13 @@ function HomeScreen({ navigation }: any) {
     <ScrollView style={styles.container}>
       <View style={styles.content}>
         <Text style={styles.title}>Welcome to Guardhouse</Text>
+
+        {error ? (
+          <View style={styles.errorContainer}>
+            <Text style={styles.errorTitle}>Authentication Error</Text>
+            <Text style={styles.errorText}>{error}</Text>
+          </View>
+        ) : null}
 
         {isAuthenticated && user ? (
           <>
@@ -123,6 +140,24 @@ const styles = StyleSheet.create({
   loadingText: {
     color: "#888",
     marginTop: 10,
+  },
+  errorContainer: {
+    backgroundColor: "#2a0a0a",
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: "#a00",
+  },
+  errorTitle: {
+    color: "#faa",
+    fontSize: 14,
+    fontWeight: "bold",
+    marginBottom: 6,
+  },
+  errorText: {
+    color: "#faa",
+    fontSize: 13,
   },
   infoContainer: {
     backgroundColor: "#1a1a1a",

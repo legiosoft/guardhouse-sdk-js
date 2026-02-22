@@ -33,6 +33,56 @@
 import * as Keychain from "react-native-keychain";
 import { createReactNativeLogger } from "../debug";
 
+interface ExpoSecureStoreModule {
+  getItemAsync(
+    key: string,
+    options?: Record<string, unknown>,
+  ): Promise<string | null>;
+  setItemAsync(
+    key: string,
+    value: string,
+    options?: Record<string, unknown>,
+  ): Promise<void>;
+  deleteItemAsync(
+    key: string,
+    options?: Record<string, unknown>,
+  ): Promise<void>;
+  WHEN_UNLOCKED_THIS_DEVICE_ONLY?: string;
+}
+
+interface ExpoSecureStoreNativeModule {
+  getValueWithKeyAsync(
+    key: string,
+    options?: Record<string, unknown>,
+  ): Promise<string | null>;
+  setValueWithKeyAsync(
+    value: string,
+    key: string,
+    options?: Record<string, unknown>,
+  ): Promise<void>;
+  deleteValueWithKeyAsync(
+    key: string,
+    options?: Record<string, unknown>,
+  ): Promise<void>;
+  WHEN_UNLOCKED_THIS_DEVICE_ONLY?: string;
+}
+
+type DynamicRequire = (moduleName: string) => unknown;
+
+function tryRequire(moduleName: string): unknown {
+  const dynamicRequire = (globalThis as { require?: DynamicRequire }).require;
+
+  if (typeof dynamicRequire !== "function") {
+    return null;
+  }
+
+  try {
+    return dynamicRequire(moduleName);
+  } catch {
+    return null;
+  }
+}
+
 export interface StorageKeys {
   ACCESS_TOKEN: string;
   REFRESH_TOKEN: string;
@@ -87,10 +137,198 @@ export class BiometricAuthFailedError extends Error {
 export class SecureStorage {
   private requireBiometrics: boolean;
   private logger: ReturnType<typeof createReactNativeLogger>;
+  private expoSecureStore: ExpoSecureStoreModule | null;
+  private forceExpoSecureStore: boolean;
+  private forceInMemoryStore: boolean;
+  private inMemoryStorage: Map<string, string>;
 
   constructor(requireBiometrics: boolean = false, debug = false) {
     this.requireBiometrics = requireBiometrics;
     this.logger = createReactNativeLogger("SecureStorage", debug);
+    this.expoSecureStore = this.loadExpoSecureStore();
+    this.forceExpoSecureStore = false;
+    this.forceInMemoryStore = false;
+    this.inMemoryStorage = new Map();
+
+    if (this.expoSecureStore) {
+      this.logger.debug("Expo SecureStore adapter detected");
+    }
+  }
+
+  private loadExpoSecureStore(): ExpoSecureStoreModule | null {
+    const expoNativeModule = (
+      globalThis as {
+        expo?: {
+          modules?: Record<string, unknown>;
+        };
+      }
+    ).expo?.modules?.["ExpoSecureStore"] as
+      | ExpoSecureStoreNativeModule
+      | undefined;
+
+    if (
+      expoNativeModule &&
+      typeof expoNativeModule.getValueWithKeyAsync === "function" &&
+      typeof expoNativeModule.setValueWithKeyAsync === "function" &&
+      typeof expoNativeModule.deleteValueWithKeyAsync === "function"
+    ) {
+      return {
+        getItemAsync: (key, options) =>
+          expoNativeModule.getValueWithKeyAsync(key, options),
+        setItemAsync: (key, value, options) =>
+          expoNativeModule.setValueWithKeyAsync(value, key, options),
+        deleteItemAsync: (key, options) =>
+          expoNativeModule.deleteValueWithKeyAsync(key, options),
+        WHEN_UNLOCKED_THIS_DEVICE_ONLY:
+          expoNativeModule.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+      };
+    }
+
+    const moduleCandidate = tryRequire(
+      "expo-secure-store",
+    ) as ExpoSecureStoreModule | null;
+
+    if (
+      moduleCandidate &&
+      typeof moduleCandidate.getItemAsync === "function" &&
+      typeof moduleCandidate.setItemAsync === "function" &&
+      typeof moduleCandidate.deleteItemAsync === "function"
+    ) {
+      return moduleCandidate;
+    }
+
+    return null;
+  }
+
+  private shouldFallbackToExpoSecureStore(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+
+    return (
+      message.includes("setGenericPassswordForOptions") ||
+      message.includes("setGenericPasswordForOptions") ||
+      message.includes("getGenericPasswordForOptions") ||
+      message.includes("resetGenericPasswordForOptions") ||
+      message.includes("RNKeychainManager") ||
+      message.includes("NativeModule") ||
+      message.includes("of null")
+    );
+  }
+
+  private getExpoSecureStoreOptions(): Record<string, unknown> {
+    const options: Record<string, unknown> = {};
+
+    if (this.requireBiometrics) {
+      options.requireAuthentication = true;
+    }
+
+    if (this.expoSecureStore?.WHEN_UNLOCKED_THIS_DEVICE_ONLY) {
+      options.keychainAccessible =
+        this.expoSecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY;
+    }
+
+    return options;
+  }
+
+  private async getItemFromExpoSecureStore(
+    key: string,
+  ): Promise<string | null> {
+    if (!this.expoSecureStore) {
+      return null;
+    }
+
+    const value = await this.expoSecureStore.getItemAsync(
+      key,
+      this.getExpoSecureStoreOptions(),
+    );
+
+    this.logger.debug("Expo SecureStore read completed", {
+      key,
+      hasValue: Boolean(value),
+    });
+
+    return value;
+  }
+
+  private async setItemInExpoSecureStore(
+    key: string,
+    value: string,
+  ): Promise<void> {
+    if (!this.expoSecureStore) {
+      throw new Error("Expo SecureStore module not available");
+    }
+
+    await this.expoSecureStore.setItemAsync(
+      key,
+      value,
+      this.getExpoSecureStoreOptions(),
+    );
+
+    this.logger.debug("Expo SecureStore write completed", {
+      key,
+    });
+  }
+
+  private async removeItemFromExpoSecureStore(key: string): Promise<void> {
+    if (!this.expoSecureStore) {
+      return;
+    }
+
+    await this.expoSecureStore.deleteItemAsync(
+      key,
+      this.getExpoSecureStoreOptions(),
+    );
+
+    this.logger.debug("Expo SecureStore key removed", {
+      key,
+    });
+  }
+
+  private enableExpoSecureStoreFallback(cause: unknown): void {
+    if (this.expoSecureStore) {
+      this.forceExpoSecureStore = true;
+      this.logger.warn(
+        "Keychain native module unavailable, falling back to Expo SecureStore",
+        {
+          error: cause instanceof Error ? cause.message : String(cause),
+        },
+      );
+      return;
+    }
+
+    this.forceInMemoryStore = true;
+    this.logger.warn(
+      "Keychain native module unavailable, falling back to in-memory storage",
+      {
+        error: cause instanceof Error ? cause.message : String(cause),
+      },
+    );
+  }
+
+  private getItemFromInMemoryStore(key: string): string | null {
+    const value = this.inMemoryStorage.get(key) ?? null;
+
+    this.logger.debug("In-memory storage read completed", {
+      key,
+      hasValue: Boolean(value),
+    });
+
+    return value;
+  }
+
+  private setItemInMemoryStore(key: string, value: string): void {
+    this.inMemoryStorage.set(key, value);
+
+    this.logger.debug("In-memory storage write completed", {
+      key,
+    });
+  }
+
+  private removeItemFromInMemoryStore(key: string): void {
+    this.inMemoryStorage.delete(key);
+
+    this.logger.debug("In-memory storage key removed", {
+      key,
+    });
   }
 
   /**
@@ -103,6 +341,14 @@ export class SecureStorage {
    * User can cancel (their right), we handle gracefully
    */
   async getItem(key: string): Promise<string | null> {
+    if (this.forceInMemoryStore) {
+      return this.getItemFromInMemoryStore(key);
+    }
+
+    if (this.forceExpoSecureStore && this.expoSecureStore) {
+      return this.getItemFromExpoSecureStore(key);
+    }
+
     try {
       const result = await Keychain.getGenericPassword({
         service: key,
@@ -129,6 +375,16 @@ export class SecureStorage {
         );
       }
 
+      if (this.shouldFallbackToExpoSecureStore(error)) {
+        this.enableExpoSecureStoreFallback(error);
+
+        if (this.forceInMemoryStore) {
+          return this.getItemFromInMemoryStore(key);
+        }
+
+        return this.getItemFromExpoSecureStore(key);
+      }
+
       this.logger.error("Failed to read from secure storage", {
         key,
         error: String(error),
@@ -145,6 +401,16 @@ export class SecureStorage {
    * - Without: USER_PRESENCE (device unlocked)
    */
   async setItem(key: string, value: string): Promise<void> {
+    if (this.forceInMemoryStore) {
+      this.setItemInMemoryStore(key, value);
+      return;
+    }
+
+    if (this.forceExpoSecureStore && this.expoSecureStore) {
+      await this.setItemInExpoSecureStore(key, value);
+      return;
+    }
+
     try {
       const accessControl = this.requireBiometrics
         ? Keychain.ACCESS_CONTROL.BIOMETRY_CURRENT_SET_OR_DEVICE_PASSCODE
@@ -160,10 +426,23 @@ export class SecureStorage {
         key,
       });
     } catch (error) {
+      if (this.shouldFallbackToExpoSecureStore(error)) {
+        this.enableExpoSecureStoreFallback(error);
+
+        if (this.forceInMemoryStore) {
+          this.setItemInMemoryStore(key, value);
+          return;
+        }
+
+        await this.setItemInExpoSecureStore(key, value);
+        return;
+      }
+
       this.logger.error("Failed to write to secure storage", {
         key,
         error: String(error),
       });
+
       throw error;
     }
   }
@@ -172,6 +451,16 @@ export class SecureStorage {
    * Remove a value from secure storage
    */
   async removeItem(key: string): Promise<void> {
+    if (this.forceInMemoryStore) {
+      this.removeItemFromInMemoryStore(key);
+      return;
+    }
+
+    if (this.forceExpoSecureStore && this.expoSecureStore) {
+      await this.removeItemFromExpoSecureStore(key);
+      return;
+    }
+
     try {
       await Keychain.resetGenericPassword({ service: key });
 
@@ -179,6 +468,18 @@ export class SecureStorage {
         key,
       });
     } catch (error) {
+      if (this.shouldFallbackToExpoSecureStore(error)) {
+        this.enableExpoSecureStoreFallback(error);
+
+        if (this.forceInMemoryStore) {
+          this.removeItemFromInMemoryStore(key);
+          return;
+        }
+
+        await this.removeItemFromExpoSecureStore(key);
+        return;
+      }
+
       this.logger.warn("Failed to remove secure storage key", {
         key,
         error: String(error),
@@ -195,6 +496,23 @@ export class SecureStorage {
     try {
       this.logger.debug("Clearing all Guardhouse secure storage keys");
 
+      const guardhouseKeys = Object.values(STORAGE_KEYS);
+
+      if (this.forceInMemoryStore) {
+        this.inMemoryStorage.clear();
+        this.logger.debug("Finished clearing Guardhouse secure storage keys");
+        return;
+      }
+
+      if (this.forceExpoSecureStore && this.expoSecureStore) {
+        await Promise.all(
+          guardhouseKeys.map((key) => this.removeItemFromExpoSecureStore(key)),
+        );
+
+        this.logger.debug("Finished clearing Guardhouse secure storage keys");
+        return;
+      }
+
       const services = await Keychain.getAllGenericPasswordServices();
 
       for (const service of services) {
@@ -205,6 +523,25 @@ export class SecureStorage {
 
       this.logger.debug("Finished clearing Guardhouse secure storage keys");
     } catch (error) {
+      if (this.shouldFallbackToExpoSecureStore(error)) {
+        this.enableExpoSecureStoreFallback(error);
+
+        if (this.forceInMemoryStore) {
+          this.inMemoryStorage.clear();
+          this.logger.debug("Finished clearing Guardhouse secure storage keys");
+          return;
+        }
+
+        await Promise.all(
+          Object.values(STORAGE_KEYS).map((key) =>
+            this.removeItemFromExpoSecureStore(key),
+          ),
+        );
+
+        this.logger.debug("Finished clearing Guardhouse secure storage keys");
+        return;
+      }
+
       this.logger.error("Failed to clear secure storage", {
         error: String(error),
       });

@@ -37,12 +37,17 @@ npm install
 npm start
 ```
 
-4. Start React Native app:
+4. Start React Native app (Expo SDK 54+):
 
 ```bash
 cd examples/react-native
 npm install
 npm start
+
+# in another terminal (Expo development build)
+npm run android
+# or
+npm run ios
 ```
 
 The React, temp React OIDC, and React Native API demo screens call the Node example `/protected` endpoint.

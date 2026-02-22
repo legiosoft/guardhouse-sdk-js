@@ -119,11 +119,11 @@ npm install
 npm run dev
 ```
 
-## React Native Example
+## React Native Example (Expo)
 
 **Location**: `examples/react-native/`
 
-**Purpose**: Mobile application demonstrating OAuth 2.0 authentication on iOS and Android
+**Purpose**: Expo SDK 54+ mobile application demonstrating OAuth 2.0 authentication on iOS and Android
 
 **Features**:
 
@@ -138,7 +138,7 @@ npm run dev
 
 **Tech Stack**:
 
-- React Native with TypeScript
+- Expo + React Native with TypeScript
 - React Navigation
 - @guardhouse/react-native SDK
 - react-native-inappbrowser-reborn
@@ -158,13 +158,12 @@ npm run dev
 ```bash
 cd examples/react-native
 npm install
+npm start
 
-# iOS
-cd ios && pod install && cd ..
-npm run ios
-
-# Android
+# in another terminal
 npm run android
+# or
+npm run ios
 ```
 
 ## Common Features Across Examples
@@ -266,12 +265,12 @@ npm run dev
 
 Runs on `http://localhost:3000`
 
-4. **Start React Native App**:
+4. **Start React Native App (Expo)**:
 
 ```bash
 cd examples/react-native
 npm start
-npm run ios  # or npm run android
+npm run android  # or npm run ios
 ```
 
 ### Test Scenarios

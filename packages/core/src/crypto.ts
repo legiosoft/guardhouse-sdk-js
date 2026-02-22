@@ -43,6 +43,25 @@
  */
 
 import { createGuardhouseLogger } from "./debug";
+import { sha256 as nobleSha256 } from "@noble/hashes/sha2.js";
+
+type NodeRequireFunction = (moduleId: string) => any;
+
+function tryLoadNodeCrypto(): any | null {
+  try {
+    const dynamicRequire = Function(
+      "return typeof require !== 'undefined' ? require : null;",
+    )() as NodeRequireFunction | null;
+
+    if (typeof dynamicRequire !== "function") {
+      return null;
+    }
+
+    return dynamicRequire("crypto");
+  } catch {
+    return null;
+  }
+}
 
 export interface CryptoAdapter {
   name?: string;
@@ -98,12 +117,14 @@ class NodeCryptoAdapter implements CryptoAdapter {
   name = "NodeCrypto";
   private nodeCrypto: any;
 
-  constructor() {
-    try {
-      this.nodeCrypto = require("crypto");
-    } catch (error) {
+  constructor(nodeCrypto?: any) {
+    const resolvedNodeCrypto = nodeCrypto ?? tryLoadNodeCrypto();
+
+    if (!resolvedNodeCrypto) {
       throw new Error("Node.js crypto module not available");
     }
+
+    this.nodeCrypto = resolvedNodeCrypto;
   }
 
   async randomBytes(length: number): Promise<Uint8Array> {
@@ -151,6 +172,10 @@ class FallbackCryptoAdapter implements CryptoAdapter {
   name = "FallbackCrypto";
 
   async randomBytes(length: number): Promise<Uint8Array> {
+    if (typeof globalThis.crypto?.getRandomValues === "function") {
+      return globalThis.crypto.getRandomValues(new Uint8Array(length));
+    }
+
     if (typeof Math.random !== "function") {
       throw new Error("Math.random not available");
     }
@@ -165,10 +190,9 @@ class FallbackCryptoAdapter implements CryptoAdapter {
     });
   }
 
-  async sha256(_data: Uint8Array): Promise<Uint8Array> {
-    throw new Error(
-      "SHA-256 not available in fallback adapter. Please provide a crypto provider.",
-    );
+  async sha256(data: Uint8Array): Promise<Uint8Array> {
+    const digest = nobleSha256(data);
+    return new Uint8Array(digest);
   }
 }
 
@@ -194,13 +218,13 @@ export function detectCryptoAdapter(): CryptoAdapter {
     return new SubtleCryptoAdapter();
   }
 
-  try {
-    require("crypto");
+  const nodeCrypto = tryLoadNodeCrypto();
+  if (nodeCrypto) {
     logger.info("Using Node.js crypto adapter");
-    return new NodeCryptoAdapter();
-  } catch (error) {
-    logger.debug("Node.js crypto not available", error);
+    return new NodeCryptoAdapter(nodeCrypto);
   }
+
+  logger.debug("Node.js crypto not available");
 
   logger.warn("No native crypto available. Using fallback adapter.", {
     warning: "Fallback adapter is not suitable for production",
