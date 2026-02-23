@@ -32,7 +32,13 @@
   },
   "peerDependencies": {
     "react": ">=18.0.0",
-    "react-native": ">=0.70.0"
+    "react-native": ">=0.70.0",
+    "react-native-quick-crypto": ">=0.7.0"
+  },
+  "peerDependenciesMeta": {
+    "react-native-quick-crypto": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@testing-library/react-native": "^12.0.0",

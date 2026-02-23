@@ -141,6 +141,7 @@ npm run dev
 - Expo + React Native with TypeScript
 - React Navigation
 - @guardhouse/react-native SDK
+- Expo native crypto adapter (`src/cryptoAdapter.ts`)
 - react-native-inappbrowser-reborn
 - react-native-keychain
 

@@ -46,6 +46,18 @@ The SDK includes the following vetted dependencies:
 - `react-native-inappbrowser-reborn` - Secure browser sessions
 - `react-native-keychain` - Hardware-backed secure storage
 - `jwt-decode` - JWT decoding and validation
+- `react-native-quick-crypto` (optional) - Native SHA-256/random bytes provider when Web Crypto is unavailable
+
+### Crypto Provider Setup
+
+PKCE needs native SHA-256 and secure random bytes.
+
+- If your React Native runtime already exposes Web Crypto (`globalThis.crypto.subtle` + `getRandomValues`), no extra setup is needed.
+- Otherwise, install `react-native-quick-crypto` and follow its setup instructions.
+
+```bash
+npm install react-native-quick-crypto
+```
 
 ## iOS Setup
 
@@ -260,6 +272,7 @@ Props:
 - `clientId` (string, required): Your application's client ID
 - `redirectUri` (string, required): Deep link URI for callbacks (e.g., `com.myapp://callback`)
 - `scopes` (string[], optional): Default scopes (default: `['openid', 'profile', 'offline_access']`)
+- `cryptoAdapter` (CryptoAdapter, optional): Custom native crypto provider for PKCE
 - `debug` (boolean, optional): Enables verbose SDK logs when true
 - `children` (ReactNode, required): Your app components
 

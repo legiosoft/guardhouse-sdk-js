@@ -51,3 +51,5 @@ npm run ios
 ```
 
 The React, temp React OIDC, and React Native API demo screens call the Node example `/protected` endpoint.
+
+Note: the Expo React Native example includes a copy-ready native crypto adapter in `examples/react-native/src/cryptoAdapter.ts`.

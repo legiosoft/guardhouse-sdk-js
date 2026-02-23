@@ -2,6 +2,8 @@
 
 This example app demonstrates `@guardhouse/react-native` in an Expo SDK 54+ project with OAuth 2.0 Authorization Code + PKCE, secure storage, and API calls.
 
+`src/cryptoAdapter.ts` is copy-ready and shows how to provide Expo native crypto to `GuardhouseProvider` via `cryptoAdapter`.
+
 ## Features
 
 - Login/logout with Guardhouse
@@ -59,6 +61,15 @@ Then in another terminal:
 - `npm run ios`
 
 On first run, Expo will generate native projects via prebuild.
+
+## Copy-ready crypto setup
+
+The example passes a native crypto adapter to the SDK:
+
+- `examples/react-native/src/cryptoAdapter.ts`
+- `examples/react-native/App.tsx`
+
+This is the recommended pattern for Expo apps.
 
 ## Optional explicit prebuild
 

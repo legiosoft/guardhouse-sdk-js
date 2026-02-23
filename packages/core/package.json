@@ -24,9 +24,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext .ts"
   },
-  "dependencies": {
-    "@noble/hashes": "^2.0.1"
-  },
+  "dependencies": {},
   "peerDependencies": {
     "typescript": ">=5.0.0"
   },

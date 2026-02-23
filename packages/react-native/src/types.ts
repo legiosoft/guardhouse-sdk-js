@@ -15,12 +15,13 @@
  *    - SessionExpiredError: Session expiration errors
  */
 
-import { User as CoreUser } from "@guardhouse/core";
+import type { CryptoAdapter, User as CoreUser } from "@guardhouse/core";
 
 export interface GuardhouseConfig {
   authority: string;
   clientId: string;
   redirectUri: string;
+  cryptoAdapter?: CryptoAdapter;
   debug?: boolean;
   onRedirectCallback?: (appState?: AppState) => void;
   scope?: string;

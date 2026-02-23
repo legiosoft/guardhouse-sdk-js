@@ -43,7 +43,6 @@
  */
 
 import { createGuardhouseLogger } from "./debug";
-import { sha256 as nobleSha256 } from "@noble/hashes/sha2.js";
 
 type NodeRequireFunction = (moduleId: string) => any;
 
@@ -190,9 +189,10 @@ class FallbackCryptoAdapter implements CryptoAdapter {
     });
   }
 
-  async sha256(data: Uint8Array): Promise<Uint8Array> {
-    const digest = nobleSha256(data);
-    return new Uint8Array(digest);
+  async sha256(_data: Uint8Array): Promise<Uint8Array> {
+    throw new Error(
+      "SHA-256 not available in fallback adapter. Please provide a crypto provider.",
+    );
   }
 }
 

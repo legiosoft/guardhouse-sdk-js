@@ -16,10 +16,10 @@
   "dependencies": {
     "@guardhouse/core": "file:../../packages/core",
     "@guardhouse/react-native": "file:../../packages/react-native",
-    "@noble/hashes": "^2.0.1",
     "@react-navigation/native": "^6.1.18",
     "@react-navigation/native-stack": "^6.9.26",
     "expo": "~54.0.33",
+    "expo-crypto": "~15.0.8",
     "expo-dev-client": "~6.0.20",
     "expo-secure-store": "~15.0.8",
     "jwt-decode": "^4.0.0",

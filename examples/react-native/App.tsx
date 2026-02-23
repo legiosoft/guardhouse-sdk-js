@@ -2,6 +2,7 @@ import React from "react";
 import { GuardhouseProvider } from "@guardhouse/react-native";
 import AppNavigator from "./src/AppNavigator";
 import { appConfig } from "./src/config";
+import { expoCryptoAdapter } from "./src/cryptoAdapter";
 
 function App(): React.JSX.Element {
   return (
@@ -10,6 +11,7 @@ function App(): React.JSX.Element {
       clientId={appConfig.clientId}
       redirectUri={appConfig.redirectUri}
       scopes={appConfig.scopes}
+      cryptoAdapter={expoCryptoAdapter}
     >
       <AppNavigator />
     </GuardhouseProvider>

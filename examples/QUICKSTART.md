@@ -86,6 +86,8 @@ GH_API_BASE_URL_ANDROID=http://10.0.2.2:3001
 GH_API_BASE_URL_IOS=http://localhost:3001
 ```
 
+The Expo app already wires native crypto through `src/cryptoAdapter.ts` and passes it to `GuardhouseProvider`.
+
 ### 4. Install Dependencies
 
 ```bash

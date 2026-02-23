@@ -18,4 +18,5 @@ export {
   STORAGE_KEYS,
   isTokenExpired,
 } from "./utils/storage";
+export { resolveReactNativeCryptoAdapter } from "./crypto";
 export type { SessionData } from "./utils/storage";

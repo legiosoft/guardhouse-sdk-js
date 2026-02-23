@@ -52,7 +52,7 @@ import {
   generateState,
   validateToken,
 } from "@guardhouse/core";
-import type { User as CoreUser } from "@guardhouse/core";
+import type { CryptoAdapter, User as CoreUser } from "@guardhouse/core";
 import { AuthState, TokenData, LoginOptions, LogoutOptions } from "./types";
 import {
   SecureStorage,
@@ -62,6 +62,7 @@ import {
   STORAGE_KEYS,
 } from "./utils/storage";
 import { createReactNativeLogger } from "./debug";
+import { resolveReactNativeCryptoAdapter } from "./crypto";
 
 interface AuthContextValue extends AuthState {
   login: (options?: LoginOptions) => Promise<void>;
@@ -77,6 +78,7 @@ interface GuardhouseProviderProps {
   clientId: string;
   redirectUri: string;
   scopes?: string[];
+  cryptoAdapter?: CryptoAdapter;
   requireBiometrics?: boolean;
   debug?: boolean;
   children: ReactNode;
@@ -87,6 +89,7 @@ export function GuardhouseProvider({
   clientId,
   redirectUri,
   scopes = ["openid", "profile", "offline_access"],
+  cryptoAdapter,
   requireBiometrics = false,
   debug = false,
   children,
@@ -109,6 +112,22 @@ export function GuardhouseProvider({
     [debug],
   );
   const refreshLock = useRef(new PromiseLock(debug));
+  const cryptoAdapterRef = useRef<CryptoAdapter | null>(null);
+
+  const getCryptoAdapter = useCallback((): CryptoAdapter => {
+    if (cryptoAdapter) {
+      return cryptoAdapter;
+    }
+
+    if (!cryptoAdapterRef.current) {
+      cryptoAdapterRef.current = resolveReactNativeCryptoAdapter(
+        undefined,
+        debug,
+      );
+    }
+
+    return cryptoAdapterRef.current;
+  }, [cryptoAdapter, debug]);
 
   useEffect(() => {
     (GuardhouseCore as any).setGuardhouseDebug?.(debug);
@@ -571,12 +590,17 @@ export function GuardhouseProvider({
           scope: options?.scope || scopes.join(" "),
         });
 
-        const { codeVerifier, codeChallenge } = await generatePKCE({
-          debug,
-        } as any);
+        const resolvedCryptoAdapter = getCryptoAdapter();
 
-        const state = await generateState(32);
-        const nonce = await generateNonce(32);
+        const { codeVerifier, codeChallenge } = await generatePKCE(
+          resolvedCryptoAdapter,
+          {
+            debug,
+          },
+        );
+
+        const state = await generateState(resolvedCryptoAdapter, 32, debug);
+        const nonce = await generateNonce(resolvedCryptoAdapter, 32, debug);
 
         // Store temporary PKCE values
         await Promise.all([
@@ -625,6 +649,7 @@ export function GuardhouseProvider({
       storage,
       handleLoading,
       handleError,
+      getCryptoAdapter,
       openAuthSession,
       handleAuthCallback,
       logger,
