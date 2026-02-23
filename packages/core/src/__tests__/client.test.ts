@@ -10,6 +10,13 @@ function jsonResponse(data: unknown, status = 200): Response {
   });
 }
 
+function getCallHeaders(fetchMock: any, callIndex: number): Headers {
+  const requestInit = fetchMock.mock.calls[callIndex]?.[1] as
+    | RequestInit
+    | undefined;
+  return new Headers(requestInit?.headers);
+}
+
 describe("GuardhouseClient", () => {
   const originalFetchDescriptor = Object.getOwnPropertyDescriptor(
     globalThis,
@@ -114,6 +121,20 @@ describe("GuardhouseClient", () => {
           clientId: "client-id",
         }),
     ).not.toThrow();
+    expect(
+      () =>
+        new GuardhouseClient({
+          authority: "http://10.0.2.2:3000",
+          clientId: "client-id",
+        }),
+    ).not.toThrow();
+    expect(
+      () =>
+        new GuardhouseClient({
+          authority: "http://192.168.1.23:3000",
+          clientId: "client-id",
+        }),
+    ).not.toThrow();
   });
 
   it("blocks absolute endpoints outside configured authority", async () => {
@@ -209,26 +230,11 @@ describe("GuardhouseClient", () => {
       "https://auth.example.com/oauth/revoke",
     );
 
-    const tokenHeaders = fetchMock.mock.calls[0][1]?.headers as Record<
-      string,
-      string
-    >;
-    const refreshHeaders = fetchMock.mock.calls[1][1]?.headers as Record<
-      string,
-      string
-    >;
-    const userInfoHeaders = fetchMock.mock.calls[2][1]?.headers as Record<
-      string,
-      string
-    >;
-    const introspectionHeaders = fetchMock.mock.calls[3][1]?.headers as Record<
-      string,
-      string
-    >;
-    const revocationHeaders = fetchMock.mock.calls[4][1]?.headers as Record<
-      string,
-      string
-    >;
+    const tokenHeaders = getCallHeaders(fetchMock, 0);
+    const refreshHeaders = getCallHeaders(fetchMock, 1);
+    const userInfoHeaders = getCallHeaders(fetchMock, 2);
+    const introspectionHeaders = getCallHeaders(fetchMock, 3);
+    const revocationHeaders = getCallHeaders(fetchMock, 4);
     const expectedAuth =
       "Basic " +
       Buffer.from(
@@ -249,11 +255,11 @@ describe("GuardhouseClient", () => {
       fetchMock.mock.calls[4][1]?.body as string,
     );
 
-    expect(tokenHeaders["Authorization"]).toBe(expectedAuth);
-    expect(refreshHeaders["Authorization"]).toBe(expectedAuth);
-    expect(userInfoHeaders["Authorization"]).toBe("Bearer access-token");
-    expect(introspectionHeaders["Authorization"]).toBe(expectedAuth);
-    expect(revocationHeaders["Authorization"]).toBe(expectedAuth);
+    expect(tokenHeaders.get("Authorization")).toBe(expectedAuth);
+    expect(refreshHeaders.get("Authorization")).toBe(expectedAuth);
+    expect(userInfoHeaders.get("Authorization")).toBe("Bearer access-token");
+    expect(introspectionHeaders.get("Authorization")).toBe(expectedAuth);
+    expect(revocationHeaders.get("Authorization")).toBe(expectedAuth);
     expect(tokenBody.get("client_id")).toBeNull();
     expect(refreshBody.get("client_id")).toBeNull();
     expect(introspectionBody.get("client_id")).toBeNull();
@@ -298,6 +304,7 @@ describe("GuardhouseClient", () => {
         grant_type: "evil",
         code: "evil-code",
         client_id: "evil-client",
+        client_secret: "evil-secret",
         redirect_uri: "https://evil.example.com/callback",
         code_verifier: "evil-verifier",
         custom_exchange: "ok",
@@ -308,6 +315,7 @@ describe("GuardhouseClient", () => {
       grant_type: "evil",
       refresh_token: "evil-refresh",
       client_id: "evil-client",
+      client_secret: "evil-secret",
       code: "evil-code",
       redirect_uri: "https://evil.example.com/callback",
       custom_refresh: "ok",
@@ -322,6 +330,7 @@ describe("GuardhouseClient", () => {
       "https://app.example.com/callback",
     );
     expect(exchangeBody.get("client_id")).toBeNull();
+    expect(exchangeBody.get("client_secret")).toBeNull();
     expect(exchangeBody.get("code_verifier")).toBe("good-verifier");
     expect(exchangeBody.get("custom_exchange")).toBe("ok");
 
@@ -331,6 +340,7 @@ describe("GuardhouseClient", () => {
     expect(refreshBody.get("grant_type")).toBe("refresh_token");
     expect(refreshBody.get("refresh_token")).toBe("good-refresh");
     expect(refreshBody.get("client_id")).toBeNull();
+    expect(refreshBody.get("client_secret")).toBeNull();
     expect(refreshBody.get("custom_refresh")).toBe("ok");
   });
 
@@ -374,14 +384,8 @@ describe("GuardhouseClient", () => {
     await client.introspectToken("access-token");
     await client.revokeToken("access-token");
 
-    const tokenHeaders = fetchMock.mock.calls[0][1]?.headers as Record<
-      string,
-      string
-    >;
-    const refreshHeaders = fetchMock.mock.calls[1][1]?.headers as Record<
-      string,
-      string
-    >;
+    const tokenHeaders = getCallHeaders(fetchMock, 0);
+    const refreshHeaders = getCallHeaders(fetchMock, 1);
     const exchangeBody = new URLSearchParams(
       fetchMock.mock.calls[0][1]?.body as string,
     );
@@ -395,8 +399,8 @@ describe("GuardhouseClient", () => {
       fetchMock.mock.calls[3][1]?.body as string,
     );
 
-    expect(tokenHeaders["Authorization"]).toBeUndefined();
-    expect(refreshHeaders["Authorization"]).toBeUndefined();
+    expect(tokenHeaders.get("Authorization")).toBeNull();
+    expect(refreshHeaders.get("Authorization")).toBeNull();
     expect(exchangeBody.get("client_id")).toBe("public-client");
     expect(refreshBody.get("client_id")).toBe("public-client");
     expect(introspectionBody.get("client_id")).toBe("public-client");
@@ -452,6 +456,39 @@ describe("GuardhouseClient", () => {
     });
   });
 
+  it("supports application/problem+json error responses", async () => {
+    const fetchMock = jest.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          type: "about:blank",
+          title: "Bad Request",
+          detail: "Invalid token",
+        }),
+        {
+          status: 400,
+          headers: {
+            "Content-Type": "application/problem+json",
+          },
+        },
+      ),
+    );
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+
+    await expect(client.fetch("/connect/userinfo")).rejects.toMatchObject({
+      statusCode: 400,
+    });
+  });
+
   it("preserves original network error via cause", async () => {
     const networkError = new Error("getaddrinfo ENOTFOUND auth.example.com");
     const fetchMock = jest.fn().mockRejectedValue(networkError);
@@ -501,11 +538,8 @@ describe("GuardhouseClient", () => {
 
     await client.getUserInfo("access-token");
 
-    const headers = fetchMock.mock.calls[0][1]?.headers as Record<
-      string,
-      string
-    >;
-    expect(headers["User-Agent"]).toBeUndefined();
+    const headers = getCallHeaders(fetchMock, 0);
+    expect(headers.get("User-Agent")).toBeNull();
   });
 
   it("encodes unicode client credentials safely in basic auth", async () => {
@@ -527,10 +561,7 @@ describe("GuardhouseClient", () => {
 
     await client.introspectToken("access-token");
 
-    const headers = fetchMock.mock.calls[0][1]?.headers as Record<
-      string,
-      string
-    >;
+    const headers = getCallHeaders(fetchMock, 0);
     const expectedAuth =
       "Basic " +
       Buffer.from(
@@ -538,7 +569,109 @@ describe("GuardhouseClient", () => {
         "utf8",
       ).toString("base64");
 
-    expect(headers["Authorization"]).toBe(expectedAuth);
+    expect(headers.get("Authorization")).toBe(expectedAuth);
+  });
+
+  it("normalizes custom header casing with Headers API", async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue(jsonResponse({ sub: "user-1" }));
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+
+    await client.fetch("/connect/userinfo", {
+      headers: {
+        "content-type": "application/custom+json",
+        ACCEPT: "application/problem+json",
+      },
+    });
+
+    const headers = getCallHeaders(fetchMock, 0);
+    expect(headers.get("Content-Type")).toBe("application/custom+json");
+    expect(headers.get("Accept")).toBe("application/problem+json");
+  });
+
+  it("forwards AbortSignal to fetch", async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue(jsonResponse({ sub: "user-1" }));
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const controller = new AbortController();
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+
+    await client.fetch("/connect/userinfo", {
+      signal: controller.signal,
+    });
+
+    expect(fetchMock.mock.calls[0][1]?.signal).toBe(controller.signal);
+  });
+
+  it("throws when GET request has a body", async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue(jsonResponse({ sub: "user-1" }));
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+
+    await expect(
+      client.fetch("/connect/userinfo", {
+        method: "GET",
+        body: "token=abc",
+      }),
+    ).rejects.toMatchObject({
+      code: "INVALID_REQUEST",
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("adds token_type_hint for revocation when provided", async () => {
+    const fetchMock = jest.fn().mockResolvedValue(jsonResponse({}));
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+
+    await client.revokeToken("access-token", "refresh_token");
+
+    const body = new URLSearchParams(
+      fetchMock.mock.calls[0][1]?.body as string,
+    );
+    expect(body.get("token_type_hint")).toBe("refresh_token");
   });
 
   it("warns when global fetch is unavailable", () => {

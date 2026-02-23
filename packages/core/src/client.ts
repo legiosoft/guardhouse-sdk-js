@@ -45,16 +45,18 @@ const RESERVED_TOKEN_BODY_PARAM_KEYS = new Set([
   "code",
   "refresh_token",
   "client_id",
+  "client_secret",
   "code_verifier",
   "redirect_uri",
 ]);
 
 export interface RequestOptions {
-  method?: "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
-  headers?: Record<string, string>;
+  method?: "GET" | "HEAD" | "POST" | "PUT" | "DELETE" | "PATCH";
+  headers?: Headers | Record<string, string> | Array<[string, string]>;
   body?: string;
   token?: string;
   skipAuthHeader?: boolean;
+  signal?: AbortSignal;
 }
 
 export interface TokenResponse {
@@ -146,13 +148,20 @@ export class GuardhouseClient {
     }
 
     const isSecureAuthority = authorityUrl.protocol === "https:";
+    const localDevelopmentHosts = [
+      "localhost",
+      "127.0.0.1",
+      "::1",
+      "[::1]",
+      "10.0.2.2",
+    ];
     const isLocalDevelopmentAuthority =
-      authorityUrl.hostname === "localhost" ||
-      authorityUrl.hostname === "127.0.0.1";
+      localDevelopmentHosts.includes(authorityUrl.hostname) ||
+      authorityUrl.hostname.startsWith("192.168.");
 
     if (!isSecureAuthority && !isLocalDevelopmentAuthority) {
       throw new GuardhouseError(
-        "Authority must use HTTPS protocol (except localhost or 127.0.0.1)",
+        "Authority must use HTTPS protocol (except local development hosts)",
         "INSECURE_AUTHORITY",
       );
     }
@@ -252,19 +261,7 @@ export class GuardhouseClient {
     }
 
     if (typeof btoa === "function") {
-      if (typeof TextEncoder === "undefined") {
-        throw new GuardhouseError(
-          "TextEncoder is not available in this environment",
-          "BASE64_UNAVAILABLE",
-        );
-      }
-
-      const bytes = new TextEncoder().encode(value);
-      const binString = Array.from(bytes, (byte) =>
-        String.fromCodePoint(byte),
-      ).join("");
-
-      return btoa(binString);
+      return btoa(value);
     }
 
     throw new GuardhouseError(
@@ -322,47 +319,62 @@ export class GuardhouseClient {
     headers: Headers;
   }> {
     const url = this.buildRequestUrl(endpoint);
+    const method = (options.method || "GET").toUpperCase();
 
     this.logger.debug("HTTP request", {
-      method: options.method || "GET",
+      method,
       url,
     });
 
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      ...options.headers,
-    };
+    const headers = new Headers(options.headers);
+
+    if (!headers.has("Content-Type")) {
+      headers.set("Content-Type", "application/json");
+    }
+
+    if (!headers.has("Accept")) {
+      headers.set("Accept", "application/json");
+    }
 
     if (this.shouldSendUserAgentHeader()) {
-      headers["User-Agent"] = headers["User-Agent"] || "guardhouse-js/1.0.0";
-    } else if (headers["User-Agent"]) {
-      delete headers["User-Agent"];
+      if (!headers.has("User-Agent")) {
+        headers.set("User-Agent", "guardhouse-js/1.0.0");
+      }
+    } else {
+      headers.delete("User-Agent");
     }
 
     if (options.token && !options.skipAuthHeader) {
-      headers["Authorization"] = `Bearer ${options.token}`;
+      headers.set("Authorization", `Bearer ${options.token}`);
     }
 
     if (!options.token && !options.skipAuthHeader && this.config.clientSecret) {
-      headers["Authorization"] = this.buildBasicAuthHeader();
+      headers.set("Authorization", this.buildBasicAuthHeader());
     }
 
     this.logger.debug("Prepared request headers", {
-      hasAuthorization: Boolean(headers["Authorization"]),
-      contentType: headers["Content-Type"],
+      hasAuthorization: Boolean(headers.get("Authorization")),
+      contentType: headers.get("Content-Type"),
       bodyLength: options.body?.length ?? 0,
     });
 
+    if (options.body && (method === "GET" || method === "HEAD")) {
+      throw new GuardhouseError(
+        "Cannot send a GET or HEAD request with a body",
+        "INVALID_REQUEST",
+      );
+    }
+
     try {
       const response = await fetch(url, {
-        method: options.method || "GET",
+        method,
         headers,
         body: options.body,
+        signal: options.signal,
       });
 
       this.logger.debug("HTTP response received", {
-        method: options.method || "GET",
+        method,
         url,
         status: response.status,
       });
@@ -422,7 +434,7 @@ export class GuardhouseClient {
       }
 
       this.logger.debug("HTTP request succeeded", {
-        method: options.method || "GET",
+        method,
         url,
         status: response.status,
       });
@@ -438,7 +450,7 @@ export class GuardhouseClient {
       }
 
       this.logger.error("Network request failed", {
-        method: options.method || "GET",
+        method,
         url,
         error,
       });
@@ -473,7 +485,7 @@ export class GuardhouseClient {
         return {};
       }
 
-      if (contentType.includes("application/json")) {
+      if (contentType.includes("json")) {
         try {
           const errorData = JSON.parse(rawBody);
 
@@ -738,7 +750,10 @@ export class GuardhouseClient {
    * @param token - Access token to revoke
    * @throws {GuardhouseError} On revocation failure
    */
-  async revokeToken(token: string): Promise<void> {
+  async revokeToken(
+    token: string,
+    tokenTypeHint?: "access_token" | "refresh_token",
+  ): Promise<void> {
     this.logger.info("Revoking token", {
       hasToken: Boolean(token),
     });
@@ -747,6 +762,10 @@ export class GuardhouseClient {
 
     if (!this.config.clientSecret) {
       body.set("client_id", this.config.clientId);
+    }
+
+    if (tokenTypeHint) {
+      body.set("token_type_hint", tokenTypeHint);
     }
 
     await this.fetch(this.endpoints.revocation, {

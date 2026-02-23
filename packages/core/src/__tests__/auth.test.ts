@@ -96,6 +96,64 @@ describe("generateAuthUrl", () => {
     }
   });
 
+  it("warns when implicit flow is requested", () => {
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+    const debugSpy = jest.spyOn(console, "debug").mockImplementation(() => {});
+
+    try {
+      generateAuthUrl({
+        authority: "https://auth.example.com",
+        clientId: "client-id",
+        redirectUri: "https://app.example.com/callback",
+        responseType: "token",
+        debug: true,
+      });
+
+      expect(
+        warnSpy.mock.calls.some((call) =>
+          call.some(
+            (arg) =>
+              typeof arg === "string" &&
+              arg.includes("Implicit Flow (response_type=token) is deprecated"),
+          ),
+        ),
+      ).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+      debugSpy.mockRestore();
+    }
+  });
+
+  it("warns when openid scope is used without nonce", () => {
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+    const debugSpy = jest.spyOn(console, "debug").mockImplementation(() => {});
+
+    try {
+      generateAuthUrl({
+        authority: "https://auth.example.com",
+        clientId: "client-id",
+        redirectUri: "https://app.example.com/callback",
+        state: "state-value",
+        codeChallenge: "code-challenge",
+        scope: "openid profile",
+        debug: true,
+      });
+
+      expect(
+        warnSpy.mock.calls.some((call) =>
+          call.some(
+            (arg) =>
+              typeof arg === "string" &&
+              arg.includes("scope includes 'openid' but nonce is missing"),
+          ),
+        ),
+      ).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+      debugSpy.mockRestore();
+    }
+  });
+
   it("filters reserved extraParams keys", () => {
     const authUrl = generateAuthUrl({
       authority: "https://auth.example.com",
@@ -184,6 +242,33 @@ describe("generateAuthUrl", () => {
 
     expect(parsed.origin).toBe("https://idp.example.com");
     expect(parsed.pathname).toBe("/oauth2/v2.0/authorize");
+  });
+
+  it("merges relative authorizationEndpoint onto authority path", () => {
+    const authUrl = generateAuthUrl({
+      authority: "https://auth.example.com/tenant",
+      authorizationEndpoint: "/oauth2/authorize",
+      clientId: "client-id",
+      redirectUri: "https://app.example.com/callback",
+      codeChallenge: "code-challenge",
+      state: "state-value",
+      nonce: "nonce-value",
+    });
+
+    const parsed = new URL(authUrl);
+    expect(parsed.origin).toBe("https://auth.example.com");
+    expect(parsed.pathname).toBe("/tenant/oauth2/authorize");
+  });
+
+  it("rejects non-http protocols", () => {
+    expect(() =>
+      generateAuthUrl({
+        authority: "javascript:alert('xss')",
+        clientId: "client-id",
+        redirectUri: "https://app.example.com/callback",
+        codeChallenge: "code-challenge",
+      }),
+    ).toThrow("Authority must use an http or https protocol.");
   });
 
   it("preserves original URL error as cause", () => {

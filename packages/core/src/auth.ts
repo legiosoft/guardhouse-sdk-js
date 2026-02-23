@@ -30,6 +30,20 @@ function isAuthorizationCodeResponseType(responseType: string): boolean {
     .some((value) => value === "code");
 }
 
+function isImplicitResponseType(responseType: string): boolean {
+  return responseType
+    .trim()
+    .split(/\s+/)
+    .some((value) => value === "token");
+}
+
+function isOpenIdScope(scope: string): boolean {
+  return scope
+    .trim()
+    .split(/\s+/)
+    .some((value) => value.toLowerCase() === "openid");
+}
+
 function sanitizeExtraParams(
   extraParams: Record<string, string | number | null | undefined>,
 ): {
@@ -131,9 +145,24 @@ export function generateAuthUrl(options: AuthUrlOptions): string {
       );
     }
 
+    if (isImplicitResponseType(responseType)) {
+      logger.warn(
+        "The Implicit Flow (response_type=token) is deprecated in OAuth 2.1 due to security risks. Please use the Authorization Code flow with PKCE instead.",
+      );
+    }
+
     if (codeChallengeMethod.trim().toLowerCase() === "plain") {
       logger.warn(
         "codeChallengeMethod 'plain' is insecure. Use 'S256' to reduce interception risk.",
+      );
+    }
+
+    if (
+      isOpenIdScope(scope) &&
+      (typeof nonce !== "string" || nonce.trim() === "")
+    ) {
+      logger.warn(
+        "OIDC scope includes 'openid' but nonce is missing. Provide a nonce to reduce token replay risk.",
       );
     }
 
@@ -152,9 +181,26 @@ export function generateAuthUrl(options: AuthUrlOptions): string {
       scope,
     });
 
-    const url = authorizationEndpoint
-      ? new URL(authorizationEndpoint, authority)
-      : new URL(authority);
+    let url: URL;
+
+    if (authorizationEndpoint) {
+      if (/^https?:\/\//i.test(authorizationEndpoint)) {
+        url = new URL(authorizationEndpoint);
+      } else {
+        const baseUrl = new URL(authority);
+        const basePath = baseUrl.pathname.replace(/\/+$/, "");
+        const endpointPath = authorizationEndpoint.replace(/^\/+/, "");
+
+        baseUrl.pathname = `${basePath}/${endpointPath}`;
+        url = baseUrl;
+      }
+    } else {
+      url = new URL(authority);
+    }
+
+    if (url.protocol !== "https:" && url.protocol !== "http:") {
+      throw new Error("Authority must use an http or https protocol.");
+    }
 
     if (!authorizationEndpoint) {
       const basePath = url.pathname.replace(/\/+$/, "");
