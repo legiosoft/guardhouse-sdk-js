@@ -20,6 +20,11 @@
  */
 
 import { createGuardhouseLogger } from "./debug";
+import {
+  enforceSecureHttpUrl,
+  isLocalDevelopmentHostname,
+  sanitizeUrlForLogs,
+} from "./security";
 
 export interface GuardhouseConfig {
   authority: string;
@@ -31,6 +36,7 @@ export interface GuardhouseConfig {
   userInfoEndpoint?: string;
   introspectionEndpoint?: string;
   revocationEndpoint?: string;
+  requestTimeoutMs?: number;
   storage?: StorageAdapter;
   debug?: boolean;
 }
@@ -91,39 +97,43 @@ export function validateConfig(config: GuardhouseConfig): void {
   const logger = createGuardhouseLogger("Config", config.debug);
 
   logger.debug("Validating configuration", {
-    authority: config.authority,
-    clientId: config.clientId,
+    authority: sanitizeUrlForLogs(config.authority),
     hasClientSecret: Boolean(config.clientSecret),
   });
 
-  if (!config.authority) {
+  if (typeof config.authority !== "string" || config.authority.trim() === "") {
     throw new ConfigValidationError("Authority is required");
   }
 
-  if (!config.clientId) {
+  if (typeof config.clientId !== "string" || config.clientId.trim() === "") {
     throw new ConfigValidationError("Client ID is required");
+  }
+
+  if (
+    config.requestTimeoutMs !== undefined &&
+    (!Number.isFinite(config.requestTimeoutMs) || config.requestTimeoutMs < 0)
+  ) {
+    throw new ConfigValidationError(
+      "requestTimeoutMs must be a non-negative number",
+    );
   }
 
   try {
     const url = new URL(config.authority);
 
-    // SECURITY: Enforce HTTPS in production (can use http in dev)
-    if (url.protocol !== "https:" && !isLocalhost(url.hostname)) {
-      throw new ConfigValidationError(
-        "Authority must use HTTPS protocol (except for localhost)",
-      );
-    }
+    enforceSecureHttpUrl(url, "Authority");
 
     // SECURITY: Prevent SSRF (Server-Side Request Forgery)
-    if (config.clientSecret && !isLocalhost(url.hostname)) {
+    if (config.clientSecret && !isLocalDevelopmentHostname(url.hostname)) {
       logger.warn(
         "Using client_secret with non-localhost authority. Ensure you trust this server.",
       );
     }
 
     logger.debug("Configuration validated successfully", {
-      authority: url.origin,
+      authority: sanitizeUrlForLogs(url.toString()),
       hasClientSecret: Boolean(config.clientSecret),
+      requestTimeoutMs: config.requestTimeoutMs,
     });
   } catch (error) {
     if (error instanceof ConfigValidationError) {
@@ -136,31 +146,6 @@ export function validateConfig(config: GuardhouseConfig): void {
 
     throw new ConfigValidationError(`Invalid authority URL: ${error}`);
   }
-}
-
-/**
- * Check if hostname is localhost
- *
- * SECURITY: Allows HTTP for local development
- */
-function isLocalhost(hostname: string): boolean {
-  const localhostPatterns = [
-    "localhost",
-    "127.0.0.1",
-    "::1",
-    "0.0.0.0",
-    "10.0.0.0",
-    "172.16.0.0",
-    "192.168.0.0",
-  ];
-
-  return (
-    localhostPatterns.includes(hostname) ||
-    hostname.startsWith("127.") ||
-    hostname.startsWith("10.") ||
-    hostname.startsWith("172.16.") ||
-    hostname.startsWith("192.168.")
-  );
 }
 
 /**
@@ -181,14 +166,22 @@ export function buildUrl(
   });
 
   try {
-    const url = new URL(config.authority);
-
-    // Add path
-    if (!url.pathname.endsWith("/")) {
-      url.pathname = url.pathname + path;
-    } else {
-      url.pathname = url.pathname + path.substring(1);
+    if (typeof path !== "string" || path.trim() === "") {
+      throw new GuardhouseError("Path is required", "URL_BUILD_ERROR");
     }
+
+    if (/^https?:\/\//i.test(path)) {
+      throw new GuardhouseError(
+        "Path must be relative to the configured authority",
+        "URL_BUILD_ERROR",
+      );
+    }
+
+    const url = new URL(config.authority);
+    const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+    const basePath = url.pathname.replace(/\/+$/, "");
+
+    url.pathname = `${basePath}${normalizedPath}`;
 
     // Add query parameters
     Object.entries(params).forEach(([key, value]) => {
@@ -199,7 +192,7 @@ export function buildUrl(
     logger.debug("Built URL", {
       path,
       queryParamCount: Object.keys(params).length,
-      url: builtUrl,
+      url: sanitizeUrlForLogs(builtUrl),
     });
 
     return builtUrl;

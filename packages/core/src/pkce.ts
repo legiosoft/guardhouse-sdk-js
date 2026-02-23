@@ -40,9 +40,13 @@ export interface PKCECodePair {
 
 export interface PKCEOptions {
   length?: number;
-  method?: "S256" | "plain";
+  method?: "S256";
   debug?: boolean;
 }
+
+const MIN_CODE_VERIFIER_BYTES = 32;
+const MAX_CODE_VERIFIER_BYTES = 96;
+const MIN_STATE_OR_NONCE_BYTES = 16;
 
 function isCryptoAdapter(value: unknown): value is CryptoAdapter {
   return (
@@ -85,9 +89,23 @@ export async function generatePKCE(
 
   const {
     length = 43, // 128 bits (RFC 7636 recommended minimum)
-    method = "S256", // Force S256 (plain is insecure)
+    method = "S256",
     debug,
   } = options;
+
+  if (!Number.isInteger(length)) {
+    throw new Error("PKCE length must be an integer");
+  }
+
+  if (length < MIN_CODE_VERIFIER_BYTES || length > MAX_CODE_VERIFIER_BYTES) {
+    throw new Error(
+      `PKCE length must be between ${MIN_CODE_VERIFIER_BYTES} and ${MAX_CODE_VERIFIER_BYTES} bytes`,
+    );
+  }
+
+  if (method !== "S256") {
+    throw new Error("Only S256 PKCE method is supported");
+  }
 
   const logger = createGuardhouseLogger("PKCE", debug);
 
@@ -107,20 +125,13 @@ export async function generatePKCE(
     length: codeVerifier.length,
   });
 
-  let codeChallenge: string;
+  // SECURITY: S256 method (RFC 7636 RECOMMENDED)
+  // Challenge = BASE64URL(SHA256(ASCII(code_verifier)))
+  const data = new TextEncoder().encode(codeVerifier);
+  const hash = await cryptoAdapter.sha256(data);
+  const codeChallenge = bufferToBase64Url(hash);
 
-  if (method === "plain") {
-    logger.warn("Plain text PKCE is insecure and should be avoided");
-    codeChallenge = codeVerifier;
-  } else {
-    // SECURITY: S256 method (RFC 7636 RECOMMENDED)
-    // Challenge = BASE64URL(SHA256(ASCII(code_verifier)))
-    const data = new TextEncoder().encode(codeVerifier);
-    const hash = await cryptoAdapter.sha256(data);
-    codeChallenge = bufferToBase64Url(hash);
-
-    logger.debug("Code challenge generated with S256");
-  }
+  logger.debug("Code challenge generated with S256");
 
   return {
     codeVerifier,
@@ -175,6 +186,12 @@ export async function generateState(
     : typeof maybeLengthOrDebug === "boolean"
       ? maybeLengthOrDebug
       : maybeDebug;
+
+  if (!Number.isInteger(length) || length < MIN_STATE_OR_NONCE_BYTES) {
+    throw new Error(
+      `State length must be an integer of at least ${MIN_STATE_OR_NONCE_BYTES} bytes`,
+    );
+  }
 
   const logger = createGuardhouseLogger("PKCE", debug);
 
@@ -243,6 +260,12 @@ export async function generateNonce(
       ? maybeLengthOrDebug
       : maybeDebug;
 
+  if (!Number.isInteger(length) || length < MIN_STATE_OR_NONCE_BYTES) {
+    throw new Error(
+      `Nonce length must be an integer of at least ${MIN_STATE_OR_NONCE_BYTES} bytes`,
+    );
+  }
+
   const logger = createGuardhouseLogger("PKCE", debug);
 
   logger.debug("Generating nonce", {
@@ -275,6 +298,18 @@ export async function generateNonce(
  * @returns Base64URL encoded string
  */
 function bufferToBase64Url(buffer: Uint8Array): string {
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(buffer)
+      .toString("base64")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=/g, "");
+  }
+
+  if (typeof btoa !== "function") {
+    throw new Error("Base64 encoding is unavailable in this environment");
+  }
+
   let binary = "";
   const len = buffer.byteLength;
 

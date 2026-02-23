@@ -31,6 +31,7 @@
  *   codeChallenge,
  *   responseType: 'code',
  *   state: await generateState(),
+ *   nonce: await generateNonce(),
  * });
  *
  * // Exchange code for tokens

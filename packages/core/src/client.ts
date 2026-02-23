@@ -32,6 +32,12 @@ import type { GuardhouseConfig } from "./config";
 
 import { GuardhouseError } from "./config";
 import { createGuardhouseLogger, setGuardhouseDebug } from "./debug";
+import {
+  enforceSecureHttpUrl,
+  isLocalDevelopmentHostname,
+  sanitizeUrlForLogs,
+  validateRedirectUri,
+} from "./security";
 
 const DEFAULT_ENDPOINTS = {
   token: "/connect/token",
@@ -49,6 +55,9 @@ const RESERVED_TOKEN_BODY_PARAM_KEYS = new Set([
   "code_verifier",
   "redirect_uri",
 ]);
+
+const TOKEN_PARAM_KEY_PATTERN = /^[A-Za-z0-9._~-]+$/;
+const PKCE_CODE_VERIFIER_PATTERN = /^[A-Za-z0-9\-._~]+$/;
 
 export interface RequestOptions {
   method?: "GET" | "HEAD" | "POST" | "PUT" | "DELETE" | "PATCH";
@@ -122,6 +131,7 @@ export class GuardhouseClient {
   private config: GuardhouseConfig;
   private baseURL: string;
   private logger: ReturnType<typeof createGuardhouseLogger>;
+  private requestTimeoutMs: number | null;
   private endpoints: {
     token: string;
     userInfo: string;
@@ -147,24 +157,40 @@ export class GuardhouseClient {
       });
     }
 
-    const isSecureAuthority = authorityUrl.protocol === "https:";
-    const localDevelopmentHosts = [
-      "localhost",
-      "127.0.0.1",
-      "::1",
-      "[::1]",
-      "10.0.2.2",
-    ];
-    const isLocalDevelopmentAuthority =
-      localDevelopmentHosts.includes(authorityUrl.hostname) ||
-      authorityUrl.hostname.startsWith("192.168.");
-
-    if (!isSecureAuthority && !isLocalDevelopmentAuthority) {
+    try {
+      enforceSecureHttpUrl(authorityUrl, "Authority");
+    } catch (error) {
       throw new GuardhouseError(
-        "Authority must use HTTPS protocol (except local development hosts)",
+        error instanceof Error ? error.message : "Invalid authority URL",
         "INSECURE_AUTHORITY",
+        { cause: error },
       );
     }
+
+    const runtime = globalThis as typeof globalThis & {
+      navigator?: { product?: string };
+      window?: unknown;
+    };
+    const isReactNativeRuntime = runtime.navigator?.product === "ReactNative";
+    const isBrowserRuntime =
+      typeof runtime.window !== "undefined" && !isReactNativeRuntime;
+
+    if (config.clientSecret && (isBrowserRuntime || isReactNativeRuntime)) {
+      throw new GuardhouseError(
+        "clientSecret must not be used in browser or React Native runtimes",
+        "INSECURE_CLIENT_SECRET_USAGE",
+      );
+    }
+
+    const configuredTimeout = config.requestTimeoutMs ?? 30000;
+    if (!Number.isFinite(configuredTimeout) || configuredTimeout < 0) {
+      throw new GuardhouseError(
+        "requestTimeoutMs must be a non-negative number",
+        "INVALID_TIMEOUT",
+      );
+    }
+
+    this.requestTimeoutMs = configuredTimeout === 0 ? null : configuredTimeout;
 
     this.baseURL = config.authority.replace(/\/+$/, "");
     this.endpoints = {
@@ -182,8 +208,11 @@ export class GuardhouseClient {
     }
 
     this.logger.info("Initialized", {
-      authority: this.baseURL,
+      authority: sanitizeUrlForLogs(this.baseURL),
       hasClientSecret: Boolean(config.clientSecret),
+      requestTimeoutMs: this.requestTimeoutMs,
+      allowsHttp: authorityUrl.protocol === "http:",
+      localAuthority: isLocalDevelopmentHostname(authorityUrl.hostname),
     });
   }
 
@@ -206,20 +235,115 @@ export class GuardhouseClient {
     const safeParams: Record<string, string> = {};
     const blockedKeys: string[] = [];
 
-    for (const [key, value] of Object.entries(params)) {
-      if (RESERVED_TOKEN_BODY_PARAM_KEYS.has(key)) {
-        blockedKeys.push(key);
+    for (const [rawKey, rawValue] of Object.entries(params)) {
+      const key = rawKey.trim();
+
+      if (!key) {
         continue;
       }
 
-      if (value === undefined || value === null || value === "") {
+      const normalizedKey = key.toLowerCase();
+      if (RESERVED_TOKEN_BODY_PARAM_KEYS.has(normalizedKey)) {
+        blockedKeys.push(rawKey);
         continue;
       }
 
-      safeParams[key] = value;
+      if (!TOKEN_PARAM_KEY_PATTERN.test(key)) {
+        blockedKeys.push(rawKey);
+        continue;
+      }
+
+      if (rawValue === undefined || rawValue === null || rawValue === "") {
+        continue;
+      }
+
+      safeParams[key] = rawValue;
     }
 
     return { safeParams, blockedKeys };
+  }
+
+  private requireNonEmptyString(value: string, fieldName: string): string {
+    if (typeof value !== "string" || value.trim() === "") {
+      throw new GuardhouseError(`${fieldName} is required`, "INVALID_REQUEST");
+    }
+
+    return value.trim();
+  }
+
+  private validatePkceCodeVerifier(codeVerifier: string): string {
+    const normalizedVerifier = this.requireNonEmptyString(
+      codeVerifier,
+      "codeVerifier",
+    );
+
+    if (
+      normalizedVerifier.length < 43 ||
+      normalizedVerifier.length > 128 ||
+      !PKCE_CODE_VERIFIER_PATTERN.test(normalizedVerifier)
+    ) {
+      throw new GuardhouseError(
+        "codeVerifier must be 43-128 characters and contain only RFC7636 unreserved characters",
+        "INVALID_PKCE_VERIFIER",
+      );
+    }
+
+    return normalizedVerifier;
+  }
+
+  private createRequestAbortContext(signal?: AbortSignal): {
+    signal?: AbortSignal;
+    timedOut: () => boolean;
+    cleanup: () => void;
+  } {
+    const timeoutMs = this.requestTimeoutMs;
+
+    if (!signal && timeoutMs === null) {
+      return {
+        signal: undefined,
+        timedOut: () => false,
+        cleanup: () => undefined,
+      };
+    }
+
+    const controller = new AbortController();
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    let didTimeout = false;
+
+    const forwardAbort = () => {
+      if (!controller.signal.aborted) {
+        controller.abort();
+      }
+    };
+
+    if (signal) {
+      if (signal.aborted) {
+        forwardAbort();
+      } else {
+        signal.addEventListener("abort", forwardAbort, { once: true });
+      }
+    }
+
+    if (typeof timeoutMs === "number" && timeoutMs > 0) {
+      timeoutHandle = setTimeout(() => {
+        didTimeout = true;
+        controller.abort();
+      }, timeoutMs);
+    }
+
+    return {
+      signal: controller.signal,
+      timedOut: () => didTimeout,
+      cleanup: () => {
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+        }
+
+        if (signal) {
+          signal.removeEventListener("abort", forwardAbort);
+        }
+      },
+    };
   }
 
   private isAbsoluteEndpointWithinBase(endpoint: string): boolean {
@@ -241,6 +365,16 @@ export class GuardhouseClient {
   }
 
   private buildRequestUrl(endpoint: string): string {
+    if (
+      /^[a-z][a-z0-9+.-]*:\/\//i.test(endpoint) &&
+      !/^https?:\/\//i.test(endpoint)
+    ) {
+      throw new GuardhouseError(
+        "Endpoint URL must use http or https",
+        "UNSAFE_ENDPOINT_URL",
+      );
+    }
+
     if (/^https?:\/\//i.test(endpoint)) {
       if (!this.isAbsoluteEndpointWithinBase(endpoint)) {
         throw new GuardhouseError(
@@ -261,7 +395,19 @@ export class GuardhouseClient {
     }
 
     if (typeof btoa === "function") {
-      return btoa(value);
+      if (typeof TextEncoder !== "function") {
+        throw new GuardhouseError(
+          "TextEncoder is not available in this environment",
+          "BASE64_UNAVAILABLE",
+        );
+      }
+
+      const bytes = new TextEncoder().encode(value);
+      let binary = "";
+      for (const byte of bytes) {
+        binary += String.fromCharCode(byte);
+      }
+      return btoa(binary);
     }
 
     throw new GuardhouseError(
@@ -323,7 +469,7 @@ export class GuardhouseClient {
 
     this.logger.debug("HTTP request", {
       method,
-      url,
+      url: sanitizeUrlForLogs(url),
     });
 
     const headers = new Headers(options.headers);
@@ -365,17 +511,19 @@ export class GuardhouseClient {
       );
     }
 
+    const abortContext = this.createRequestAbortContext(options.signal);
+
     try {
       const response = await fetch(url, {
         method,
         headers,
         body: options.body,
-        signal: options.signal,
+        signal: abortContext.signal ?? options.signal,
       });
 
       this.logger.debug("HTTP response received", {
         method,
-        url,
+        url: sanitizeUrlForLogs(url),
         status: response.status,
       });
 
@@ -402,7 +550,7 @@ export class GuardhouseClient {
         this.logger.error("HTTP request failed", {
           status: response.status,
           statusText: response.statusText,
-          errorData: JSON.stringify(errorData, null, 2),
+          errorCode: errorData.error,
         });
         throw new GuardhouseError(
           errorMessage,
@@ -435,7 +583,7 @@ export class GuardhouseClient {
 
       this.logger.debug("HTTP request succeeded", {
         method,
-        url,
+        url: sanitizeUrlForLogs(url),
         status: response.status,
       });
 
@@ -449,9 +597,17 @@ export class GuardhouseClient {
         throw error;
       }
 
+      if (abortContext.timedOut()) {
+        throw new GuardhouseError(
+          `Request timed out after ${this.requestTimeoutMs}ms`,
+          "REQUEST_TIMEOUT",
+          { cause: error },
+        );
+      }
+
       this.logger.error("Network request failed", {
         method,
-        url,
+        url: sanitizeUrlForLogs(url),
         error,
       });
       throw new GuardhouseError(
@@ -459,6 +615,8 @@ export class GuardhouseClient {
         "NETWORK_ERROR",
         { cause: error },
       );
+    } finally {
+      abortContext.cleanup();
     }
   }
 
@@ -559,6 +717,10 @@ export class GuardhouseClient {
     redirectUri: string,
     params: Record<string, string> = {},
   ): Promise<TokenResponse> {
+    const normalizedCode = this.requireNonEmptyString(code, "code");
+    const normalizedCodeVerifier = this.validatePkceCodeVerifier(codeVerifier);
+    const normalizedRedirectUri = validateRedirectUri(redirectUri).toString();
+
     const { safeParams, blockedKeys } = this.sanitizeTokenBodyParams(params);
 
     if (blockedKeys.length > 0) {
@@ -569,9 +731,9 @@ export class GuardhouseClient {
 
     const body = new URLSearchParams({
       grant_type: "authorization_code",
-      code,
-      redirect_uri: redirectUri,
-      code_verifier: codeVerifier,
+      code: normalizedCode,
+      redirect_uri: normalizedRedirectUri,
+      code_verifier: normalizedCodeVerifier,
     });
 
     if (!this.config.clientSecret) {
@@ -583,9 +745,9 @@ export class GuardhouseClient {
     }
 
     this.logger.info("Exchanging authorization code for tokens", {
-      redirectUri,
-      hasCode: Boolean(code),
-      hasCodeVerifier: Boolean(codeVerifier),
+      redirectUri: sanitizeUrlForLogs(normalizedRedirectUri),
+      hasCode: true,
+      hasCodeVerifier: true,
     });
 
     const response = await this.fetch(this.endpoints.token, {
@@ -625,6 +787,11 @@ export class GuardhouseClient {
     refreshToken: string,
     params: Record<string, string> = {},
   ): Promise<TokenResponse> {
+    const normalizedRefreshToken = this.requireNonEmptyString(
+      refreshToken,
+      "refreshToken",
+    );
+
     const { safeParams, blockedKeys } = this.sanitizeTokenBodyParams(params);
 
     if (blockedKeys.length > 0) {
@@ -635,7 +802,7 @@ export class GuardhouseClient {
 
     const body = new URLSearchParams({
       grant_type: "refresh_token",
-      refresh_token: refreshToken,
+      refresh_token: normalizedRefreshToken,
     });
 
     if (!this.config.clientSecret) {
@@ -682,18 +849,20 @@ export class GuardhouseClient {
    * For client credentials tokens, use introspectToken() instead.
    */
   async getUserInfo(token: string): Promise<UserInfoResponse> {
+    const normalizedToken = this.requireNonEmptyString(token, "token");
+
     this.logger.debug("Fetching user info", {
-      hasToken: Boolean(token),
+      hasToken: true,
     });
 
     const response = await this.fetch(this.endpoints.userInfo, {
-      token,
+      token: normalizedToken,
     });
 
     const user = response.data as UserInfoResponse;
 
     this.logger.debug("User info fetched", {
-      subject: user.sub,
+      hasSubject: Boolean(user.sub),
       hasEmail: Boolean(user.email),
     });
 
@@ -715,12 +884,14 @@ export class GuardhouseClient {
    * NOTE: Use this for client credentials tokens since userinfo doesn't support them.
    */
   async introspectToken(token: string): Promise<IntrospectionResponse> {
+    const normalizedToken = this.requireNonEmptyString(token, "token");
+
     this.logger.debug("Introspecting token", {
-      hasToken: Boolean(token),
+      hasToken: true,
     });
 
     const body = new URLSearchParams({
-      token,
+      token: normalizedToken,
       token_type_hint: "access_token",
     });
 
@@ -752,21 +923,21 @@ export class GuardhouseClient {
    */
   async revokeToken(
     token: string,
-    tokenTypeHint?: "access_token" | "refresh_token",
+    tokenTypeHint: "access_token" | "refresh_token" = "access_token",
   ): Promise<void> {
+    const normalizedToken = this.requireNonEmptyString(token, "token");
+
     this.logger.info("Revoking token", {
-      hasToken: Boolean(token),
+      hasToken: true,
     });
 
-    const body = new URLSearchParams({ token });
+    const body = new URLSearchParams({ token: normalizedToken });
 
     if (!this.config.clientSecret) {
       body.set("client_id", this.config.clientId);
     }
 
-    if (tokenTypeHint) {
-      body.set("token_type_hint", tokenTypeHint);
-    }
+    body.set("token_type_hint", tokenTypeHint);
 
     await this.fetch(this.endpoints.revocation, {
       method: "POST",

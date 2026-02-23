@@ -59,6 +59,7 @@ export interface DecodedJWT {
 
 export interface TokenValidationResult {
   valid: boolean;
+  signatureVerified: boolean;
   expired: boolean;
   notBeforeValid: boolean;
   issuerValid: boolean;
@@ -176,6 +177,7 @@ export interface TokenValidationOptions {
   issuer?: string;
   audience?: string;
   nonce?: string;
+  signatureVerified?: boolean;
   clockSkewTolerance?: number;
   debug?: boolean;
 }
@@ -188,14 +190,20 @@ export function validateToken(
     issuer,
     audience,
     nonce,
+    signatureVerified = false,
     clockSkewTolerance = 30, // 30 seconds default skew tolerance
     debug,
   } = options;
+
+  if (!Number.isFinite(clockSkewTolerance) || clockSkewTolerance < 0) {
+    throw new Error("clockSkewTolerance must be a non-negative number");
+  }
 
   const logger = createGuardhouseLogger("Token", debug);
 
   const result: TokenValidationResult = {
     valid: true,
+    signatureVerified,
     expired: false,
     notBeforeValid: true,
     issuerValid: true,
@@ -206,24 +214,39 @@ export function validateToken(
 
   const now = Math.floor(Date.now() / 1000);
 
+  if (!signatureVerified) {
+    result.valid = false;
+    result.errors.push("JWT signature has not been cryptographically verified");
+    logger.warn(
+      "Token claims were checked, but signature verification was not confirmed",
+    );
+  }
+
+  const algorithm = decodedJWT.header.alg;
+
+  if (typeof algorithm !== "string" || algorithm.trim() === "") {
+    result.valid = false;
+    result.errors.push("JWT header is missing a valid alg value");
+    logger.error("JWT validation failed: missing alg header");
+    return result;
+  }
+
   // SECURITY: Check 'none' algorithm (CRITICAL)
-  if (decodedJWT.header.alg === "none") {
+  if (algorithm === "none") {
     result.valid = false;
     result.errors.push('JWT "none" algorithm is not allowed');
     logger.error('CRITICAL: JWT uses "none" algorithm');
   }
 
   // SECURITY: Check algorithm whitelist
-  if (!ALLOWED_ALGORITHMS.includes(decodedJWT.header.alg)) {
+  if (!ALLOWED_ALGORITHMS.includes(algorithm)) {
     result.valid = false;
-    result.errors.push(
-      `JWT algorithm "${decodedJWT.header.alg}" is not allowed`,
-    );
-    logger.warn(`Unknown JWT algorithm: ${decodedJWT.header.alg}`);
+    result.errors.push(`JWT algorithm "${algorithm}" is not allowed`);
+    logger.warn(`Unknown JWT algorithm: ${algorithm}`);
   }
 
   // SECURITY: Validate expiration (exp claim)
-  if (decodedJWT.payload.exp) {
+  if (typeof decodedJWT.payload.exp === "number") {
     if (decodedJWT.payload.exp < now - clockSkewTolerance) {
       result.expired = true;
       result.valid = false;
@@ -232,7 +255,7 @@ export function validateToken(
   }
 
   // SECURITY: Validate not before time (nbf claim)
-  if (decodedJWT.payload.nbf) {
+  if (typeof decodedJWT.payload.nbf === "number") {
     if (decodedJWT.payload.nbf > now + clockSkewTolerance) {
       result.notBeforeValid = false;
       result.valid = false;
@@ -241,8 +264,13 @@ export function validateToken(
   }
 
   // SECURITY: Validate issuer (iss claim)
-  if (issuer && decodedJWT.payload.iss) {
-    if (decodedJWT.payload.iss !== issuer) {
+  if (issuer) {
+    if (!decodedJWT.payload.iss) {
+      result.issuerValid = false;
+      result.valid = false;
+      result.errors.push("Token is missing required issuer (iss) claim");
+      logger.warn("Issuer claim is missing");
+    } else if (decodedJWT.payload.iss !== issuer) {
       result.issuerValid = false;
       result.valid = false;
       result.errors.push(
@@ -255,26 +283,38 @@ export function validateToken(
   }
 
   // SECURITY: Validate audience (aud claim)
-  if (audience && decodedJWT.payload.aud) {
-    const audArray = Array.isArray(decodedJWT.payload.aud)
-      ? decodedJWT.payload.aud
-      : [decodedJWT.payload.aud];
-
-    if (!audArray.includes(audience)) {
+  if (audience) {
+    if (!decodedJWT.payload.aud) {
       result.audienceValid = false;
       result.valid = false;
-      result.errors.push(
-        `Token audience does not contain expected "${audience}"`,
-      );
-      logger.warn(
-        `Audience mismatch: expected ${audience}, got ${audArray.join(", ")}`,
-      );
+      result.errors.push("Token is missing required audience (aud) claim");
+      logger.warn("Audience claim is missing");
+    } else {
+      const audArray = Array.isArray(decodedJWT.payload.aud)
+        ? decodedJWT.payload.aud
+        : [decodedJWT.payload.aud];
+
+      if (!audArray.includes(audience)) {
+        result.audienceValid = false;
+        result.valid = false;
+        result.errors.push(
+          `Token audience does not contain expected "${audience}"`,
+        );
+        logger.warn(
+          `Audience mismatch: expected ${audience}, got ${audArray.join(", ")}`,
+        );
+      }
     }
   }
 
   // SECURITY: Validate nonce (replay protection)
-  if (nonce && decodedJWT.payload.nonce) {
-    if (decodedJWT.payload.nonce !== nonce) {
+  if (nonce) {
+    if (!decodedJWT.payload.nonce) {
+      result.nonceValid = false;
+      result.valid = false;
+      result.errors.push("Token is missing required nonce claim");
+      logger.warn("Nonce claim is missing");
+    } else if (decodedJWT.payload.nonce !== nonce) {
       result.nonceValid = false;
       result.valid = false;
       result.errors.push(
@@ -308,9 +348,13 @@ export function isTokenExpired(
   clockSkewTolerance: number = 30,
   debug?: boolean,
 ): boolean {
+  if (!Number.isFinite(clockSkewTolerance) || clockSkewTolerance < 0) {
+    throw new Error("clockSkewTolerance must be a non-negative number");
+  }
+
   const logger = createGuardhouseLogger("Token", debug);
 
-  if (!decodedJWT.payload.exp) {
+  if (typeof decodedJWT.payload.exp !== "number") {
     logger.debug("Token does not contain exp claim; treating token as active");
     return false;
   }
@@ -339,6 +383,41 @@ export function isTokenExpired(
  * @param encoded - Base64URL encoded string
  * @returns Decoded string
  */
+function decodeBase64ToBytes(base64: string): Uint8Array {
+  if (typeof Buffer !== "undefined") {
+    return new Uint8Array(Buffer.from(base64, "base64"));
+  }
+
+  if (typeof atob === "function") {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+
+    return bytes;
+  }
+
+  throw new Error("Base64 decoder is unavailable in this environment");
+}
+
+function decodeUtf8(bytes: Uint8Array): string {
+  if (typeof TextDecoder === "function") {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  }
+
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(bytes).toString("utf8");
+  }
+
+  let fallback = "";
+  for (const byte of bytes) {
+    fallback += String.fromCharCode(byte);
+  }
+  return fallback;
+}
+
 function base64UrlDecode(encoded: string): string {
   let base64 = encoded.replace(/-/g, "+").replace(/_/g, "/");
 
@@ -347,7 +426,8 @@ function base64UrlDecode(encoded: string): string {
   }
 
   try {
-    return atob(base64);
+    const bytes = decodeBase64ToBytes(base64);
+    return decodeUtf8(bytes);
   } catch (error) {
     throw new Error(
       `Failed to decode Base64URL: ${error instanceof Error ? error.message : "Unknown error"}`,
@@ -367,9 +447,13 @@ export function getTokenExpiresIn(
   clockSkewTolerance: number = 30,
   debug?: boolean,
 ): number | null {
+  if (!Number.isFinite(clockSkewTolerance) || clockSkewTolerance < 0) {
+    throw new Error("clockSkewTolerance must be a non-negative number");
+  }
+
   const logger = createGuardhouseLogger("Token", debug);
 
-  if (!decodedJWT.payload.exp) {
+  if (typeof decodedJWT.payload.exp !== "number") {
     logger.debug("Token does not contain exp claim; expiresIn unavailable");
     return null;
   }

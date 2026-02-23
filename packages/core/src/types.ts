@@ -8,6 +8,7 @@ export interface GuardhouseConfig {
   userInfoEndpoint?: string;
   introspectionEndpoint?: string;
   revocationEndpoint?: string;
+  requestTimeoutMs?: number;
   debug?: boolean;
 }
 
@@ -86,7 +87,7 @@ export interface AuthUrlOptions {
   scope?: string;
   debug?: boolean;
   responseType?: string;
-  state?: string;
+  state: string;
   codeChallenge?: string;
   codeChallengeMethod?: string;
   nonce?: string;

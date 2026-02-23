@@ -1,5 +1,10 @@
 import type { AuthUrlOptions } from "./types";
 import { createGuardhouseLogger } from "./debug";
+import {
+  enforceSecureHttpUrl,
+  sanitizeUrlForLogs,
+  validateRedirectUri,
+} from "./security";
 
 type ErrorWithCauseConstructor = new (
   message?: string,
@@ -22,6 +27,12 @@ const RESERVED_AUTH_PARAM_KEYS = new Set([
   "response_mode",
   "max_age",
 ]);
+
+const AUTH_PARAM_KEY_PATTERN = /^[A-Za-z0-9._~-]+$/;
+
+function normalizeParamKey(key: string): string {
+  return key.trim().toLowerCase();
+}
 
 function isAuthorizationCodeResponseType(responseType: string): boolean {
   return responseType
@@ -54,12 +65,25 @@ function sanitizeExtraParams(
   const blockedKeys: string[] = [];
 
   for (const [key, value] of Object.entries(extraParams)) {
-    if (RESERVED_AUTH_PARAM_KEYS.has(key)) {
+    const trimmedKey = key.trim();
+
+    if (!trimmedKey) {
+      continue;
+    }
+
+    const normalizedKey = normalizeParamKey(trimmedKey);
+
+    if (RESERVED_AUTH_PARAM_KEYS.has(normalizedKey)) {
       blockedKeys.push(key);
       continue;
     }
 
-    safeParams[key] = value;
+    if (!AUTH_PARAM_KEY_PATTERN.test(trimmedKey)) {
+      blockedKeys.push(key);
+      continue;
+    }
+
+    safeParams[trimmedKey] = value;
   }
 
   return { safeParams, blockedKeys };
@@ -135,9 +159,19 @@ export function generateAuthUrl(options: AuthUrlOptions): string {
       throw new Error("clientId is required");
     }
 
-    if (typeof redirectUri !== "string" || redirectUri.trim() === "") {
-      throw new Error("redirectUri is required");
+    if (typeof state !== "string" || state.trim() === "") {
+      throw new Error(
+        "state is required to protect against CSRF during OAuth redirects",
+      );
     }
+
+    const normalizedState = state.trim();
+    const normalizedCodeChallengeMethod = codeChallengeMethod
+      .trim()
+      .toUpperCase();
+    const authorityUrl = new URL(authority);
+    enforceSecureHttpUrl(authorityUrl, "Authority");
+    const validatedRedirectUri = validateRedirectUri(redirectUri).toString();
 
     if (isAuthorizationCodeResponseType(responseType) && !codeChallenge) {
       throw new Error(
@@ -145,37 +179,37 @@ export function generateAuthUrl(options: AuthUrlOptions): string {
       );
     }
 
-    if (isImplicitResponseType(responseType)) {
-      logger.warn(
-        "The Implicit Flow (response_type=token) is deprecated in OAuth 2.1 due to security risks. Please use the Authorization Code flow with PKCE instead.",
-      );
-    }
-
-    if (codeChallengeMethod.trim().toLowerCase() === "plain") {
-      logger.warn(
-        "codeChallengeMethod 'plain' is insecure. Use 'S256' to reduce interception risk.",
-      );
+    if (
+      isAuthorizationCodeResponseType(responseType) &&
+      normalizedCodeChallengeMethod !== "S256"
+    ) {
+      throw new Error("codeChallengeMethod must be 'S256'");
     }
 
     if (
       isOpenIdScope(scope) &&
       (typeof nonce !== "string" || nonce.trim() === "")
     ) {
-      logger.warn(
-        "OIDC scope includes 'openid' but nonce is missing. Provide a nonce to reduce token replay risk.",
-      );
+      throw new Error("nonce is required when requesting the 'openid' scope");
     }
 
-    if (typeof state !== "string" || state.trim() === "") {
+    const normalizedNonce =
+      typeof nonce === "string" && nonce.trim() !== ""
+        ? nonce.trim()
+        : undefined;
+
+    if (isImplicitResponseType(responseType)) {
       logger.warn(
-        "OAuth state parameter is missing. Provide a random state value to protect against CSRF attacks.",
+        "The Implicit Flow (response_type=token) is deprecated in OAuth 2.1 due to security risks. Please use the Authorization Code flow with PKCE instead.",
       );
     }
 
     logger.debug("Generating authorization URL", {
-      authority,
-      authorizationEndpoint,
-      redirectUri,
+      authority: sanitizeUrlForLogs(authority),
+      authorizationEndpoint: authorizationEndpoint
+        ? sanitizeUrlForLogs(authorizationEndpoint)
+        : undefined,
+      redirectUri: sanitizeUrlForLogs(validatedRedirectUri),
       responseType,
       hasCodeChallenge: Boolean(codeChallenge),
       scope,
@@ -186,21 +220,19 @@ export function generateAuthUrl(options: AuthUrlOptions): string {
     if (authorizationEndpoint) {
       if (/^https?:\/\//i.test(authorizationEndpoint)) {
         url = new URL(authorizationEndpoint);
+        enforceSecureHttpUrl(url, "authorizationEndpoint");
       } else {
-        const baseUrl = new URL(authority);
-        const basePath = baseUrl.pathname.replace(/\/+$/, "");
+        const basePath = authorityUrl.pathname.replace(/\/+$/, "");
         const endpointPath = authorizationEndpoint.replace(/^\/+/, "");
 
-        baseUrl.pathname = `${basePath}/${endpointPath}`;
-        url = baseUrl;
+        authorityUrl.pathname = `${basePath}/${endpointPath}`;
+        url = authorityUrl;
       }
     } else {
-      url = new URL(authority);
+      url = authorityUrl;
     }
 
-    if (url.protocol !== "https:" && url.protocol !== "http:") {
-      throw new Error("Authority must use an http or https protocol.");
-    }
+    enforceSecureHttpUrl(url, "Authority");
 
     if (!authorizationEndpoint) {
       const basePath = url.pathname.replace(/\/+$/, "");
@@ -208,14 +240,16 @@ export function generateAuthUrl(options: AuthUrlOptions): string {
     }
 
     withNonEmptyParams(url, {
-      client_id: clientId,
-      redirect_uri: redirectUri,
+      client_id: clientId.trim(),
+      redirect_uri: validatedRedirectUri,
       response_type: responseType,
       scope,
-      state,
+      state: normalizedState,
       code_challenge: codeChallenge,
-      code_challenge_method: codeChallenge ? codeChallengeMethod : undefined,
-      nonce,
+      code_challenge_method: codeChallenge
+        ? normalizedCodeChallengeMethod
+        : undefined,
+      nonce: normalizedNonce,
       prompt,
       audience,
       response_mode: responseMode,

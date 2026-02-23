@@ -17,6 +17,8 @@ function getCallHeaders(fetchMock: any, callIndex: number): Headers {
   return new Headers(requestInit?.headers);
 }
 
+const validCodeVerifier = "a".repeat(43);
+
 describe("GuardhouseClient", () => {
   const originalFetchDescriptor = Object.getOwnPropertyDescriptor(
     globalThis,
@@ -106,7 +108,40 @@ describe("GuardhouseClient", () => {
     }
   });
 
-  it("allows localhost HTTP authorities for development", () => {
+  it("rejects client_secret usage in browser-like runtimes", () => {
+    Object.defineProperty(globalThis, "window", {
+      value: {},
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(globalThis, "navigator", {
+      value: { product: "Gecko" },
+      configurable: true,
+      writable: true,
+    });
+
+    expect(
+      () =>
+        new GuardhouseClient({
+          authority: "https://auth.example.com",
+          clientId: "client-id",
+          clientSecret: "client-secret",
+        }),
+    ).toThrow(GuardhouseError);
+
+    try {
+      new GuardhouseClient({
+        authority: "https://auth.example.com",
+        clientId: "client-id",
+        clientSecret: "client-secret",
+      });
+    } catch (error) {
+      const clientError = error as GuardhouseError;
+      expect(clientError.code).toBe("INSECURE_CLIENT_SECRET_USAGE");
+    }
+  });
+
+  it("allows loopback HTTP authorities for development", () => {
     expect(
       () =>
         new GuardhouseClient({
@@ -128,13 +163,16 @@ describe("GuardhouseClient", () => {
           clientId: "client-id",
         }),
     ).not.toThrow();
+  });
+
+  it("rejects private-network HTTP authorities that are not loopback", () => {
     expect(
       () =>
         new GuardhouseClient({
           authority: "http://192.168.1.23:3000",
           clientId: "client-id",
         }),
-    ).not.toThrow();
+    ).toThrow(GuardhouseError);
   });
 
   it("blocks absolute endpoints outside configured authority", async () => {
@@ -206,7 +244,7 @@ describe("GuardhouseClient", () => {
 
     await client.exchangeCodeForTokens(
       "code",
-      "code-verifier",
+      validCodeVerifier,
       "https://app.example.com/callback",
     );
     await client.refreshToken("refresh-token");
@@ -264,6 +302,7 @@ describe("GuardhouseClient", () => {
     expect(refreshBody.get("client_id")).toBeNull();
     expect(introspectionBody.get("client_id")).toBeNull();
     expect(revocationBody.get("client_id")).toBeNull();
+    expect(revocationBody.get("token_type_hint")).toBe("access_token");
   });
 
   it("sanitizes reserved keys in token request params", async () => {
@@ -298,7 +337,7 @@ describe("GuardhouseClient", () => {
 
     await client.exchangeCodeForTokens(
       "good-code",
-      "good-verifier",
+      validCodeVerifier,
       "https://app.example.com/callback",
       {
         grant_type: "evil",
@@ -306,7 +345,7 @@ describe("GuardhouseClient", () => {
         client_id: "evil-client",
         client_secret: "evil-secret",
         redirect_uri: "https://evil.example.com/callback",
-        code_verifier: "evil-verifier",
+        code_verifier: validCodeVerifier,
         custom_exchange: "ok",
       },
     );
@@ -331,7 +370,7 @@ describe("GuardhouseClient", () => {
     );
     expect(exchangeBody.get("client_id")).toBeNull();
     expect(exchangeBody.get("client_secret")).toBeNull();
-    expect(exchangeBody.get("code_verifier")).toBe("good-verifier");
+    expect(exchangeBody.get("code_verifier")).toBe(validCodeVerifier);
     expect(exchangeBody.get("custom_exchange")).toBe("ok");
 
     const refreshBody = new URLSearchParams(
@@ -377,7 +416,7 @@ describe("GuardhouseClient", () => {
 
     await client.exchangeCodeForTokens(
       "good-code",
-      "good-verifier",
+      validCodeVerifier,
       "https://app.example.com/callback",
     );
     await client.refreshToken("good-refresh");
@@ -405,6 +444,7 @@ describe("GuardhouseClient", () => {
     expect(refreshBody.get("client_id")).toBe("public-client");
     expect(introspectionBody.get("client_id")).toBe("public-client");
     expect(revocationBody.get("client_id")).toBe("public-client");
+    expect(revocationBody.get("token_type_hint")).toBe("access_token");
   });
 
   it("returns null data for empty successful responses", async () => {
@@ -601,9 +641,25 @@ describe("GuardhouseClient", () => {
   });
 
   it("forwards AbortSignal to fetch", async () => {
-    const fetchMock = jest
-      .fn()
-      .mockResolvedValue(jsonResponse({ sub: "user-1" }));
+    const fetchMock = jest.fn().mockImplementation(
+      (_input, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+
+          if (!signal) {
+            reject(new Error("missing signal"));
+            return;
+          }
+
+          signal.addEventListener(
+            "abort",
+            () => {
+              reject(new Error("aborted"));
+            },
+            { once: true },
+          );
+        }),
+    );
 
     Object.defineProperty(globalThis, "fetch", {
       value: fetchMock,
@@ -617,11 +673,60 @@ describe("GuardhouseClient", () => {
       clientId: "client-id",
     });
 
-    await client.fetch("/connect/userinfo", {
+    const requestPromise = client.fetch("/connect/userinfo", {
       signal: controller.signal,
     });
 
-    expect(fetchMock.mock.calls[0][1]?.signal).toBe(controller.signal);
+    const forwardedSignal = fetchMock.mock.calls[0][1]?.signal as
+      | AbortSignal
+      | undefined;
+
+    expect(forwardedSignal).toBeDefined();
+
+    controller.abort();
+    await expect(requestPromise).rejects.toMatchObject({
+      code: "NETWORK_ERROR",
+    });
+  });
+
+  it("times out requests when requestTimeoutMs is exceeded", async () => {
+    const fetchMock = jest.fn().mockImplementation(
+      (input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((resolve, reject) => {
+          void input;
+          void resolve;
+
+          const signal = init?.signal;
+
+          if (!signal) {
+            return;
+          }
+
+          signal.addEventListener(
+            "abort",
+            () => {
+              reject(new Error("aborted"));
+            },
+            { once: true },
+          );
+        }),
+    );
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      requestTimeoutMs: 10,
+    });
+
+    await expect(client.fetch("/connect/userinfo")).rejects.toMatchObject({
+      code: "REQUEST_TIMEOUT",
+    });
   });
 
   it("throws when GET request has a body", async () => {

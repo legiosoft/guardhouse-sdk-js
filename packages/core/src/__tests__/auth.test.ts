@@ -13,6 +13,7 @@ describe("generateAuthUrl", () => {
         authority: "",
         clientId: "client-id",
         redirectUri: "https://app.example.com/callback",
+        state: "state-value",
       }),
     ).toThrow("authority is required");
   });
@@ -23,6 +24,7 @@ describe("generateAuthUrl", () => {
         authority: "https://auth.example.com",
         clientId: "",
         redirectUri: "https://app.example.com/callback",
+        state: "state-value",
       }),
     ).toThrow("clientId is required");
   });
@@ -33,67 +35,35 @@ describe("generateAuthUrl", () => {
         authority: "https://auth.example.com",
         clientId: "client-id",
         redirectUri: "",
+        state: "state-value",
       }),
     ).toThrow("redirectUri is required");
   });
 
-  it("warns when state is missing", () => {
-    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
-    const debugSpy = jest.spyOn(console, "debug").mockImplementation(() => {});
-
-    try {
+  it("requires state for CSRF protection", () => {
+    expect(() =>
       generateAuthUrl({
         authority: "https://auth.example.com",
         clientId: "client-id",
         redirectUri: "https://app.example.com/callback",
         codeChallenge: "code-challenge",
-        debug: true,
-      });
-
-      expect(warnSpy).toHaveBeenCalled();
-      expect(
-        warnSpy.mock.calls.some((call) =>
-          call.some(
-            (arg) =>
-              typeof arg === "string" &&
-              arg.includes("OAuth state parameter is missing"),
-          ),
-        ),
-      ).toBe(true);
-    } finally {
-      warnSpy.mockRestore();
-      debugSpy.mockRestore();
-    }
+        nonce: "nonce-value",
+      } as any),
+    ).toThrow("state is required");
   });
 
-  it("warns when codeChallengeMethod is plain", () => {
-    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
-    const debugSpy = jest.spyOn(console, "debug").mockImplementation(() => {});
-
-    try {
+  it("rejects insecure plain codeChallengeMethod", () => {
+    expect(() =>
       generateAuthUrl({
         authority: "https://auth.example.com",
         clientId: "client-id",
         redirectUri: "https://app.example.com/callback",
         state: "state-value",
         codeChallenge: "code-challenge",
-        codeChallengeMethod: "plain",
-        debug: true,
-      });
-
-      expect(
-        warnSpy.mock.calls.some((call) =>
-          call.some(
-            (arg) =>
-              typeof arg === "string" &&
-              arg.includes("codeChallengeMethod 'plain' is insecure"),
-          ),
-        ),
-      ).toBe(true);
-    } finally {
-      warnSpy.mockRestore();
-      debugSpy.mockRestore();
-    }
+        codeChallengeMethod: "plain" as any,
+        nonce: "nonce-value",
+      }),
+    ).toThrow("codeChallengeMethod must be 'S256'");
   });
 
   it("warns when implicit flow is requested", () => {
@@ -106,6 +76,8 @@ describe("generateAuthUrl", () => {
         clientId: "client-id",
         redirectUri: "https://app.example.com/callback",
         responseType: "token",
+        scope: "profile email",
+        state: "state-value",
         debug: true,
       });
 
@@ -124,11 +96,8 @@ describe("generateAuthUrl", () => {
     }
   });
 
-  it("warns when openid scope is used without nonce", () => {
-    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
-    const debugSpy = jest.spyOn(console, "debug").mockImplementation(() => {});
-
-    try {
+  it("requires nonce when requesting openid scope", () => {
+    expect(() =>
       generateAuthUrl({
         authority: "https://auth.example.com",
         clientId: "client-id",
@@ -136,22 +105,8 @@ describe("generateAuthUrl", () => {
         state: "state-value",
         codeChallenge: "code-challenge",
         scope: "openid profile",
-        debug: true,
-      });
-
-      expect(
-        warnSpy.mock.calls.some((call) =>
-          call.some(
-            (arg) =>
-              typeof arg === "string" &&
-              arg.includes("scope includes 'openid' but nonce is missing"),
-          ),
-        ),
-      ).toBe(true);
-    } finally {
-      warnSpy.mockRestore();
-      debugSpy.mockRestore();
-    }
+      }),
+    ).toThrow("nonce is required");
   });
 
   it("filters reserved extraParams keys", () => {
@@ -161,6 +116,7 @@ describe("generateAuthUrl", () => {
       redirectUri: "https://app.example.com/callback",
       state: "good-state",
       codeChallenge: "code-challenge",
+      nonce: "nonce-value",
       extraParams: {
         client_id: "evil-client",
         state: "evil-state",
@@ -180,7 +136,9 @@ describe("generateAuthUrl", () => {
       authority: "https://auth.example.com",
       clientId: "client-id",
       redirectUri: "https://app.example.com/callback",
+      state: "state-value",
       codeChallenge: "code-challenge",
+      nonce: "nonce-value",
       extraParams: {
         nullable: null,
         valid: "yes",
@@ -198,6 +156,8 @@ describe("generateAuthUrl", () => {
         authority: "https://auth.example.com",
         clientId: "client-id",
         redirectUri: "https://app.example.com/callback",
+        state: "state-value",
+        nonce: "nonce-value",
       }),
     ).toThrow("codeChallenge is required");
   });
@@ -208,6 +168,8 @@ describe("generateAuthUrl", () => {
       clientId: "client-id",
       redirectUri: "https://app.example.com/callback",
       responseType: "token",
+      scope: "profile email",
+      state: "state-value",
     });
 
     const parsed = new URL(authUrl);
@@ -221,6 +183,8 @@ describe("generateAuthUrl", () => {
       clientId: "client-id",
       redirectUri: "https://app.example.com/callback",
       codeChallenge: "code-challenge",
+      state: "state-value",
+      nonce: "nonce-value",
     });
 
     const parsed = new URL(authUrl);
@@ -236,6 +200,8 @@ describe("generateAuthUrl", () => {
       clientId: "client-id",
       redirectUri: "https://app.example.com/callback",
       codeChallenge: "code-challenge",
+      state: "state-value",
+      nonce: "nonce-value",
     });
 
     const parsed = new URL(authUrl);
@@ -267,6 +233,8 @@ describe("generateAuthUrl", () => {
         clientId: "client-id",
         redirectUri: "https://app.example.com/callback",
         codeChallenge: "code-challenge",
+        state: "state-value",
+        nonce: "nonce-value",
       }),
     ).toThrow("Authority must use an http or https protocol.");
   });
@@ -298,6 +266,8 @@ describe("generateAuthUrl", () => {
           clientId: "client-id",
           redirectUri: "https://app.example.com/callback",
           codeChallenge: "code-challenge",
+          state: "state-value",
+          nonce: "nonce-value",
         });
       } catch (error) {
         const authError = error as Error & { cause?: unknown };

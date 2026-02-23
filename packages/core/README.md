@@ -25,6 +25,8 @@ import {
   GuardhouseClient,
   generatePKCE,
   generateAuthUrl,
+  generateState,
+  generateNonce,
 } from "@guardhouse/core";
 
 const client = new GuardhouseClient({
@@ -41,6 +43,7 @@ const authUrl = await generateAuthUrl({
   responseType: "code",
   scope: "openid profile offline_access",
   state: "random-state",
+  nonce: "random-nonce",
   codeChallenge,
   codeChallengeMethod: "S256",
 });
@@ -168,6 +171,7 @@ const result = validateToken(decodedJWT, {
   issuer: "https://auth.example.com",
   audience: "my-app-id",
   nonce: "your-nonce",
+  signatureVerified: true,
 });
 
 console.log(result.valid);
@@ -233,6 +237,7 @@ interface GuardhouseConfig {
   clientSecret?: string; // Optional: For confidential clients
   redirectUri?: string; // Optional: OAuth callback URI
   scope?: string; // Optional: Default scopes
+  requestTimeoutMs?: number; // Optional: Request timeout in milliseconds (default: 30000)
   storage?: StorageAdapter; // Optional: Custom storage
   debug?: boolean; // Optional: Enable SDK debug logs
 }
@@ -257,6 +262,7 @@ interface TokenValidationOptions {
   issuer?: string; // Expected issuer
   audience?: string; // Expected audience
   nonce?: string; // Expected nonce
+  signatureVerified?: boolean; // Must be true after cryptographic verification
   clockSkewTolerance?: number; // Clock skew tolerance (default: 30s)
 }
 ```
@@ -370,6 +376,7 @@ const authUrl = await generateAuthUrl({
   codeChallenge,
   codeChallengeMethod: "S256",
   state: await generateState(),
+  nonce: await generateNonce(),
 });
 
 console.log("Authorization URL:", authUrl);
