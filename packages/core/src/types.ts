@@ -4,6 +4,10 @@ export interface GuardhouseConfig {
   clientSecret?: string;
   redirectUri?: string;
   scope?: string;
+  tokenEndpoint?: string;
+  userInfoEndpoint?: string;
+  introspectionEndpoint?: string;
+  revocationEndpoint?: string;
   debug?: boolean;
 }
 
@@ -43,19 +47,40 @@ export interface IntrospectionResponse {
   role?: string[];
 }
 
+export interface GuardhouseErrorOptions {
+  statusCode?: number;
+  cause?: unknown;
+}
+
 export class GuardhouseError extends Error {
+  public code?: string;
+  public statusCode?: number;
+  public cause?: unknown;
+
   constructor(
     message: string,
-    public code?: string,
-    public statusCode?: number,
+    code?: string,
+    statusCodeOrOptions?: number | GuardhouseErrorOptions,
+    options?: GuardhouseErrorOptions,
   ) {
     super(message);
     this.name = "GuardhouseError";
+    this.code = code;
+
+    if (typeof statusCodeOrOptions === "number") {
+      this.statusCode = statusCodeOrOptions;
+      this.cause = options?.cause;
+      return;
+    }
+
+    this.statusCode = statusCodeOrOptions?.statusCode;
+    this.cause = statusCodeOrOptions?.cause;
   }
 }
 
 export interface AuthUrlOptions {
   authority: string;
+  authorizationEndpoint?: string;
   clientId: string;
   redirectUri: string;
   scope?: string;
@@ -69,7 +94,7 @@ export interface AuthUrlOptions {
   audience?: string;
   responseMode?: string;
   maxAge?: number;
-  extraParams?: Record<string, string | number | undefined>;
+  extraParams?: Record<string, string | number | null | undefined>;
 }
 
 export interface PKCEPair {

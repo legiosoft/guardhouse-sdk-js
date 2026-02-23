@@ -33,6 +33,22 @@ import type { GuardhouseConfig } from "./config";
 import { GuardhouseError } from "./config";
 import { createGuardhouseLogger, setGuardhouseDebug } from "./debug";
 
+const DEFAULT_ENDPOINTS = {
+  token: "/connect/token",
+  userInfo: "/connect/userinfo",
+  introspection: "/connect/introspect",
+  revocation: "/connect/revoke",
+};
+
+const RESERVED_TOKEN_BODY_PARAM_KEYS = new Set([
+  "grant_type",
+  "code",
+  "refresh_token",
+  "client_id",
+  "code_verifier",
+  "redirect_uri",
+]);
+
 export interface RequestOptions {
   method?: "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
   headers?: Record<string, string>;
@@ -47,6 +63,11 @@ export interface TokenResponse {
   expires_in: number;
   refresh_token?: string;
   scope?: string;
+  /**
+   * SECURITY WARNING:
+   * Never trust id_token claims directly for local authentication decisions.
+   * Always validate signature, issuer, audience, and expiration with a JWT/OIDC validation library first.
+   */
   id_token?: string;
 }
 
@@ -99,6 +120,12 @@ export class GuardhouseClient {
   private config: GuardhouseConfig;
   private baseURL: string;
   private logger: ReturnType<typeof createGuardhouseLogger>;
+  private endpoints: {
+    token: string;
+    userInfo: string;
+    introspection: string;
+    revocation: string;
+  };
 
   constructor(config: GuardhouseConfig) {
     this.config = config;
@@ -109,12 +136,141 @@ export class GuardhouseClient {
 
     this.logger = createGuardhouseLogger("CoreClient", config.debug);
 
+    let authorityUrl: URL;
+    try {
+      authorityUrl = new URL(config.authority);
+    } catch (error) {
+      throw new GuardhouseError("Invalid authority URL", "INVALID_AUTHORITY", {
+        cause: error,
+      });
+    }
+
+    const isSecureAuthority = authorityUrl.protocol === "https:";
+    const isLocalDevelopmentAuthority =
+      authorityUrl.hostname === "localhost" ||
+      authorityUrl.hostname === "127.0.0.1";
+
+    if (!isSecureAuthority && !isLocalDevelopmentAuthority) {
+      throw new GuardhouseError(
+        "Authority must use HTTPS protocol (except localhost or 127.0.0.1)",
+        "INSECURE_AUTHORITY",
+      );
+    }
+
     this.baseURL = config.authority.replace(/\/+$/, "");
+    this.endpoints = {
+      token: config.tokenEndpoint || DEFAULT_ENDPOINTS.token,
+      userInfo: config.userInfoEndpoint || DEFAULT_ENDPOINTS.userInfo,
+      introspection:
+        config.introspectionEndpoint || DEFAULT_ENDPOINTS.introspection,
+      revocation: config.revocationEndpoint || DEFAULT_ENDPOINTS.revocation,
+    };
+
+    if (typeof fetch !== "function") {
+      this.logger.warn(
+        "Global fetch API is unavailable. Node.js versions older than 18 need a fetch polyfill (for example, undici or node-fetch).",
+      );
+    }
 
     this.logger.info("Initialized", {
       authority: this.baseURL,
       hasClientSecret: Boolean(config.clientSecret),
     });
+  }
+
+  private shouldSendUserAgentHeader(): boolean {
+    const runtime = globalThis as typeof globalThis & {
+      navigator?: { product?: string };
+      window?: unknown;
+    };
+    const isReactNative = runtime.navigator?.product === "ReactNative";
+
+    return typeof runtime.window === "undefined" || isReactNative;
+  }
+
+  private sanitizeTokenBodyParams(
+    params: Record<string, string | null | undefined>,
+  ): {
+    safeParams: Record<string, string>;
+    blockedKeys: string[];
+  } {
+    const safeParams: Record<string, string> = {};
+    const blockedKeys: string[] = [];
+
+    for (const [key, value] of Object.entries(params)) {
+      if (RESERVED_TOKEN_BODY_PARAM_KEYS.has(key)) {
+        blockedKeys.push(key);
+        continue;
+      }
+
+      if (value === undefined || value === null || value === "") {
+        continue;
+      }
+
+      safeParams[key] = value;
+    }
+
+    return { safeParams, blockedKeys };
+  }
+
+  private isAbsoluteEndpointWithinBase(endpoint: string): boolean {
+    const baseUrl = new URL(this.baseURL);
+    const endpointUrl = new URL(endpoint);
+
+    if (endpointUrl.origin !== baseUrl.origin) {
+      return false;
+    }
+
+    const basePath = baseUrl.pathname.replace(/\/+$/, "");
+    const endpointPath = endpointUrl.pathname.replace(/\/+$/, "");
+
+    if (basePath === "") {
+      return true;
+    }
+
+    return endpointPath === basePath || endpointPath.startsWith(`${basePath}/`);
+  }
+
+  private buildRequestUrl(endpoint: string): string {
+    if (/^https?:\/\//i.test(endpoint)) {
+      if (!this.isAbsoluteEndpointWithinBase(endpoint)) {
+        throw new GuardhouseError(
+          "Absolute endpoint URL is outside the configured authority",
+          "UNSAFE_ENDPOINT_URL",
+        );
+      }
+
+      return endpoint;
+    }
+
+    return `${this.baseURL}/${endpoint.replace(/^\/+/, "")}`;
+  }
+
+  private encodeBase64(value: string): string {
+    if (typeof Buffer !== "undefined") {
+      return Buffer.from(value, "utf8").toString("base64");
+    }
+
+    if (typeof btoa === "function") {
+      if (typeof TextEncoder === "undefined") {
+        throw new GuardhouseError(
+          "TextEncoder is not available in this environment",
+          "BASE64_UNAVAILABLE",
+        );
+      }
+
+      const bytes = new TextEncoder().encode(value);
+      const binString = Array.from(bytes, (byte) =>
+        String.fromCodePoint(byte),
+      ).join("");
+
+      return btoa(binString);
+    }
+
+    throw new GuardhouseError(
+      "Base64 encoding is not available in this environment",
+      "BASE64_UNAVAILABLE",
+    );
   }
 
   /**
@@ -135,8 +291,8 @@ export class GuardhouseClient {
       return "";
     }
 
-    const credentials = `${this.config.clientId}:${this.config.clientSecret}`;
-    const encoded = btoa(credentials);
+    const credentials = `${encodeURIComponent(this.config.clientId)}:${encodeURIComponent(this.config.clientSecret)}`;
+    const encoded = this.encodeBase64(credentials);
 
     this.logger.debug("Built basic auth header for confidential client");
 
@@ -165,7 +321,7 @@ export class GuardhouseClient {
     status: number;
     headers: Headers;
   }> {
-    const url = `${this.baseURL}${endpoint}`;
+    const url = this.buildRequestUrl(endpoint);
 
     this.logger.debug("HTTP request", {
       method: options.method || "GET",
@@ -175,9 +331,14 @@ export class GuardhouseClient {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       Accept: "application/json",
-      "User-Agent": "guardhouse-js/1.0.0",
       ...options.headers,
     };
+
+    if (this.shouldSendUserAgentHeader()) {
+      headers["User-Agent"] = headers["User-Agent"] || "guardhouse-js/1.0.0";
+    } else if (headers["User-Agent"]) {
+      delete headers["User-Agent"];
+    }
 
     if (options.token && !options.skipAuthHeader) {
       headers["Authorization"] = `Bearer ${options.token}`;
@@ -238,7 +399,27 @@ export class GuardhouseClient {
         );
       }
 
-      const data = await response.json();
+      let data: unknown = null;
+
+      if (
+        response.status !== 204 &&
+        response.status !== 205 &&
+        response.headers.get("Content-Length") !== "0"
+      ) {
+        const text = await response.text();
+
+        if (text) {
+          try {
+            data = JSON.parse(text);
+          } catch (error) {
+            this.logger.warn("Response body is not valid JSON", {
+              status: response.status,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            data = text;
+          }
+        }
+      }
 
       this.logger.debug("HTTP request succeeded", {
         method: options.method || "GET",
@@ -264,6 +445,7 @@ export class GuardhouseClient {
       throw new GuardhouseError(
         error instanceof Error ? error.message : "Network error",
         "NETWORK_ERROR",
+        { cause: error },
       );
     }
   }
@@ -281,15 +463,52 @@ export class GuardhouseClient {
    * @returns Parsed error object
    */
   private async parseErrorResponse(response: Response): Promise<any> {
+    const contentType =
+      response.headers.get("Content-Type")?.toLowerCase() || "";
+
     try {
-      const errorData = await response.json();
+      const rawBody = await response.text();
 
-      this.logger.debug("Parsed HTTP error response", {
-        status: response.status,
-        hasOAuthError: Boolean(errorData?.error),
-      });
+      if (!rawBody) {
+        return {};
+      }
 
-      return errorData;
+      if (contentType.includes("application/json")) {
+        try {
+          const errorData = JSON.parse(rawBody);
+
+          this.logger.debug("Parsed HTTP error response", {
+            status: response.status,
+            hasOAuthError: Boolean(errorData?.error),
+          });
+
+          return errorData;
+        } catch {
+          return {
+            error: "server_error",
+            error_description: rawBody.slice(0, 200),
+          };
+        }
+      }
+
+      if (
+        contentType.includes("text/html") ||
+        contentType.includes("text/plain")
+      ) {
+        return {
+          error: "server_error",
+          error_description: rawBody.slice(0, 200),
+        };
+      }
+
+      try {
+        return JSON.parse(rawBody);
+      } catch {
+        return {
+          error: "server_error",
+          error_description: rawBody.slice(0, 200),
+        };
+      }
     } catch (error) {
       this.logger.warn("Failed to parse HTTP error response body", {
         status: response.status,
@@ -307,6 +526,12 @@ export class GuardhouseClient {
    * - Uses form-encoded body (OAuth 2.0 spec)
    * - Includes PKCE code_verifier (RFC 7636)
    * - Never includes secrets in URLs or query params
+   * - id_token must be cryptographically validated before trusting claims
+   *
+   * SECURITY WARNING:
+   * If the token response contains an id_token, treat it as untrusted until you
+   * validate signature, issuer (iss), audience (aud), and expiration (exp).
+   * Never start a local authenticated session from unvalidated id_token claims.
    *
    * @param code - Authorization code from callback
    * @param codeVerifier - PKCE code verifier
@@ -322,14 +547,28 @@ export class GuardhouseClient {
     redirectUri: string,
     params: Record<string, string> = {},
   ): Promise<TokenResponse> {
+    const { safeParams, blockedKeys } = this.sanitizeTokenBodyParams(params);
+
+    if (blockedKeys.length > 0) {
+      this.logger.warn("Ignoring reserved token request keys in params", {
+        blockedKeys,
+      });
+    }
+
     const body = new URLSearchParams({
       grant_type: "authorization_code",
       code,
       redirect_uri: redirectUri,
-      client_id: this.config.clientId,
       code_verifier: codeVerifier,
-      ...params,
     });
+
+    if (!this.config.clientSecret) {
+      body.set("client_id", this.config.clientId);
+    }
+
+    for (const [key, value] of Object.entries(safeParams)) {
+      body.set(key, value);
+    }
 
     this.logger.info("Exchanging authorization code for tokens", {
       redirectUri,
@@ -337,13 +576,12 @@ export class GuardhouseClient {
       hasCodeVerifier: Boolean(codeVerifier),
     });
 
-    const response = await this.fetch("/connect/token", {
+    const response = await this.fetch(this.endpoints.token, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
       },
       body: body.toString(),
-      skipAuthHeader: true, // Don't add auth header for token exchange
     });
 
     const tokenResponse = response.data as TokenResponse;
@@ -375,22 +613,35 @@ export class GuardhouseClient {
     refreshToken: string,
     params: Record<string, string> = {},
   ): Promise<TokenResponse> {
+    const { safeParams, blockedKeys } = this.sanitizeTokenBodyParams(params);
+
+    if (blockedKeys.length > 0) {
+      this.logger.warn("Ignoring reserved token request keys in params", {
+        blockedKeys,
+      });
+    }
+
     const body = new URLSearchParams({
       grant_type: "refresh_token",
       refresh_token: refreshToken,
-      client_id: this.config.clientId,
-      ...params,
     });
+
+    if (!this.config.clientSecret) {
+      body.set("client_id", this.config.clientId);
+    }
+
+    for (const [key, value] of Object.entries(safeParams)) {
+      body.set(key, value);
+    }
 
     this.logger.info("Refreshing access token");
 
-    const response = await this.fetch("/connect/token", {
+    const response = await this.fetch(this.endpoints.token, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
       },
       body: body.toString(),
-      skipAuthHeader: true,
     });
 
     const tokenResponse = response.data as TokenResponse;
@@ -423,7 +674,7 @@ export class GuardhouseClient {
       hasToken: Boolean(token),
     });
 
-    const response = await this.fetch("/connect/userinfo", {
+    const response = await this.fetch(this.endpoints.userInfo, {
       token,
     });
 
@@ -461,10 +712,13 @@ export class GuardhouseClient {
       token_type_hint: "access_token",
     });
 
+    if (!this.config.clientSecret) {
+      body.set("client_id", this.config.clientId);
+    }
+
     const response = await this.postForm<IntrospectionResponse>(
-      "/connect/introspect",
+      this.endpoints.introspection,
       body,
-      true,
     );
 
     this.logger.debug("Token introspection completed", {
@@ -489,18 +743,18 @@ export class GuardhouseClient {
       hasToken: Boolean(token),
     });
 
-    const body = new URLSearchParams({
-      token,
-      client_id: this.config.clientId,
-    });
+    const body = new URLSearchParams({ token });
 
-    await this.fetch("/connect/revoke", {
+    if (!this.config.clientSecret) {
+      body.set("client_id", this.config.clientId);
+    }
+
+    await this.fetch(this.endpoints.revocation, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
       },
       body: body.toString(),
-      skipAuthHeader: true,
     });
 
     this.logger.info("Token revoked");
