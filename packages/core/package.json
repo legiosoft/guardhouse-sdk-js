@@ -1,6 +1,6 @@
 {
   "name": "@guardhouse/core",
-  "version": "0.1.0",
+  "version": "0.1.0-beta.0",
   "description": "Universal JavaScript/TypeScript SDK for OAuth 2.0 with PKCE",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -15,6 +15,11 @@
   "files": [
     "dist"
   ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/legiosoft/guardhouse-sdk-js.git"
+  },
   "scripts": {
     "build": "tsup src/index.ts --format cjs,esm --dts --clean",
     "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
@@ -29,8 +34,8 @@
     "typescript": ">=5.0.0"
   },
   "devDependencies": {
-    "@types/jest": "29.5.14",
-    "jest": "29.7.0",
+    "@types/jest": "^30.0.0",
+    "jest": "^30.2.0",
     "ts-jest": "29.4.6",
     "tsup": "8.5.1",
     "typescript": "5.9.3"
