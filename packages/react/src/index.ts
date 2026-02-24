@@ -6,13 +6,13 @@ export type {
   TokenData,
   LoginOptions,
   LogoutOptions,
+  OidcSessionData,
   AppState,
   StorageAdapter,
   ProtectedRouteProps,
   WithAuthenticationRequiredOptions,
 } from "./types";
 export {
-  LocalStorageAdapter,
   SessionStorageAdapter,
   InMemoryStorageAdapter,
   StorageKeys,

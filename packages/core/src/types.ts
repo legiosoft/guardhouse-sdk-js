@@ -9,6 +9,9 @@ export interface GuardhouseConfig {
   introspectionEndpoint?: string;
   revocationEndpoint?: string;
   requestTimeoutMs?: number;
+  discoveryCacheTtlMs?: number;
+  allowUnsafeHttpMethods?: boolean;
+  requireDpopForAccessTokenRequests?: boolean;
   allowScopeNarrowing?: boolean;
   maxAuthorizationHeaderBytes?: number;
   maxSilentAuthAttempts?: number;
@@ -95,7 +98,10 @@ export interface AuthUrlOptions {
   authorizationEndpoint?: string;
   clientId: string;
   redirectUri: string;
+  requestUri?: string;
   scope?: string;
+  allowOfflineAccessScope?: boolean;
+  allowAuthorizationWithoutAudience?: boolean;
   debug?: boolean;
   responseType?: string;
   state: string;
@@ -103,6 +109,10 @@ export interface AuthUrlOptions {
   codeChallengeMethod?: string;
   nonce?: string;
   prompt?: string;
+  acrValues?: string | string[];
+  uiLocales?: string | string[];
+  loginHint?: string;
+  claims?: Record<string, unknown>;
   audience?: string;
   responseMode?: string;
   formPostCsrfToken?: string;

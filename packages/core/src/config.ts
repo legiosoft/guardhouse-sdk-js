@@ -21,6 +21,7 @@
 
 import { createGuardhouseLogger } from "./debug";
 import {
+  enforceNonSpoofableHostname,
   enforceSecureHttpUrl,
   isLocalDevelopmentHostname,
   sanitizeUrlForLogs,
@@ -47,6 +48,9 @@ export interface GuardhouseConfig {
   introspectionEndpoint?: string;
   revocationEndpoint?: string;
   requestTimeoutMs?: number;
+  discoveryCacheTtlMs?: number;
+  allowUnsafeHttpMethods?: boolean;
+  requireDpopForAccessTokenRequests?: boolean;
   allowScopeNarrowing?: boolean;
   maxAuthorizationHeaderBytes?: number;
   maxSilentAuthAttempts?: number;
@@ -136,6 +140,16 @@ export function validateConfig(config: GuardhouseConfig): void {
   }
 
   if (
+    config.discoveryCacheTtlMs !== undefined &&
+    (!Number.isFinite(config.discoveryCacheTtlMs) ||
+      config.discoveryCacheTtlMs < 0)
+  ) {
+    throw new ConfigValidationError(
+      "discoveryCacheTtlMs must be a non-negative number",
+    );
+  }
+
+  if (
     config.maxAuthorizationHeaderBytes !== undefined &&
     (!Number.isFinite(config.maxAuthorizationHeaderBytes) ||
       config.maxAuthorizationHeaderBytes < 512)
@@ -160,6 +174,22 @@ export function validateConfig(config: GuardhouseConfig): void {
     typeof config.dpopProofFactory !== "function"
   ) {
     throw new ConfigValidationError("dpopProofFactory must be a function");
+  }
+
+  if (
+    config.allowUnsafeHttpMethods !== undefined &&
+    typeof config.allowUnsafeHttpMethods !== "boolean"
+  ) {
+    throw new ConfigValidationError("allowUnsafeHttpMethods must be a boolean");
+  }
+
+  if (
+    config.requireDpopForAccessTokenRequests !== undefined &&
+    typeof config.requireDpopForAccessTokenRequests !== "boolean"
+  ) {
+    throw new ConfigValidationError(
+      "requireDpopForAccessTokenRequests must be a boolean",
+    );
   }
 
   if (
@@ -209,6 +239,7 @@ export function validateConfig(config: GuardhouseConfig): void {
     const url = new URL(config.authority);
 
     enforceSecureHttpUrl(url, "Authority");
+    enforceNonSpoofableHostname(url, "Authority");
 
     // SECURITY: Prevent SSRF (Server-Side Request Forgery)
     if (config.clientSecret && !isLocalDevelopmentHostname(url.hostname)) {
@@ -221,6 +252,10 @@ export function validateConfig(config: GuardhouseConfig): void {
       authority: sanitizeUrlForLogs(url.toString()),
       hasClientSecret: Boolean(config.clientSecret),
       requestTimeoutMs: config.requestTimeoutMs,
+      discoveryCacheTtlMs: config.discoveryCacheTtlMs,
+      allowUnsafeHttpMethods: config.allowUnsafeHttpMethods,
+      requireDpopForAccessTokenRequests:
+        config.requireDpopForAccessTokenRequests,
       allowScopeNarrowing: config.allowScopeNarrowing,
       maxAuthorizationHeaderBytes: config.maxAuthorizationHeaderBytes,
       maxSilentAuthAttempts: config.maxSilentAuthAttempts,

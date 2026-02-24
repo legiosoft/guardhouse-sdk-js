@@ -1,40 +1,49 @@
 import {
   createContext,
-  useContext,
-  useState,
-  useEffect,
   useCallback,
+  useContext,
+  useEffect,
   useMemo,
-  ReactNode,
+  useState,
+  type ReactNode,
 } from "react";
 import {
+  GuardhouseClient,
   generateAuthUrl,
+  generateNonce,
   generatePKCE,
+  generateState,
   setGuardhouseDebug,
 } from "@guardhouse/core";
-import type { User as CoreUser } from "@guardhouse/core";
-import {
-  GuardhouseConfig,
+import type {
+  GuardhouseConfig as CoreGuardhouseConfig,
+  User as CoreUser,
+} from "@guardhouse/core";
+import type {
+  AppState,
   AuthState,
-  TokenData,
+  GuardhouseConfig,
   LoginOptions,
   LogoutOptions,
+  OidcSessionData,
   StorageAdapter,
+  TokenData,
 } from "./types";
 import {
-  LocalStorageAdapter,
   SessionStorageAdapter,
   StorageKeys,
-  generateBase64UrlEncodedString,
   parseQueryParams,
   removeQueryParams,
   validateIdToken,
 } from "./utils";
 import { createReactLogger } from "./debug";
 
+const DEFAULT_SCOPE = "openid profile email";
+const ACCESS_TOKEN_REFRESH_LEEWAY_SECONDS = 60;
+
 interface AuthContextValue extends AuthState {
   loginWithRedirect: (options?: LoginOptions) => Promise<void>;
-  logout: (options?: LogoutOptions) => void;
+  logout: (options?: LogoutOptions) => Promise<void>;
   getAccessToken: () => Promise<string | null>;
   getAccessTokenSilently: () => Promise<string | null>;
   isAuthenticated: boolean;
@@ -50,6 +59,91 @@ interface GuardhouseProviderProps {
   children: ReactNode;
 }
 
+function scopeContains(scope: string | undefined, value: string): boolean {
+  if (!scope) {
+    return false;
+  }
+
+  return scope
+    .trim()
+    .split(/\s+/)
+    .some((entry) => entry.toLowerCase() === value.toLowerCase());
+}
+
+function parseStoredOidcSession(
+  serializedSession: string | null,
+): OidcSessionData | null {
+  if (!serializedSession) {
+    return null;
+  }
+
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(serializedSession);
+  } catch {
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+
+  const candidate = parsed as Record<string, unknown>;
+  const user = candidate["user"];
+  const oidc = candidate["oidc"];
+
+  if (
+    typeof candidate["accessToken"] !== "string" ||
+    candidate["accessToken"].trim() === "" ||
+    typeof candidate["tokenType"] !== "string" ||
+    candidate["tokenType"].trim() === "" ||
+    typeof candidate["expiresAt"] !== "number" ||
+    !Number.isFinite(candidate["expiresAt"]) ||
+    !user ||
+    typeof user !== "object" ||
+    typeof (user as Record<string, unknown>)["sub"] !== "string" ||
+    !oidc ||
+    typeof oidc !== "object" ||
+    typeof (oidc as Record<string, unknown>)["issuer"] !== "string"
+  ) {
+    return null;
+  }
+
+  const refreshToken = candidate["refreshToken"];
+  const idToken = candidate["idToken"];
+  const scope = candidate["scope"];
+  const audience = (oidc as Record<string, unknown>)["audience"];
+  const sessionState = (oidc as Record<string, unknown>)["sessionState"];
+
+  return {
+    accessToken: candidate["accessToken"],
+    tokenType: candidate["tokenType"],
+    expiresAt: candidate["expiresAt"],
+    refreshToken:
+      typeof refreshToken === "string" && refreshToken.trim() !== ""
+        ? refreshToken
+        : undefined,
+    idToken:
+      typeof idToken === "string" && idToken.trim() !== ""
+        ? idToken
+        : undefined,
+    scope: typeof scope === "string" && scope.trim() !== "" ? scope : undefined,
+    user: user as CoreUser,
+    oidc: {
+      issuer: (oidc as Record<string, unknown>)["issuer"] as string,
+      audience:
+        typeof audience === "string" && audience.trim() !== ""
+          ? audience
+          : undefined,
+      sessionState:
+        typeof sessionState === "string" && sessionState.trim() !== ""
+          ? sessionState
+          : undefined,
+    },
+  };
+}
+
 export function GuardhouseProvider({
   config,
   children,
@@ -62,13 +156,65 @@ export function GuardhouseProvider({
   });
 
   const storage: StorageAdapter = useMemo(
-    () => config.storage || new LocalStorageAdapter(),
-    [config.storage],
+    () => new SessionStorageAdapter(),
+    [],
   );
-  const sessionStorage = useMemo(() => new SessionStorageAdapter(), []);
   const logger = useMemo(
     () => createReactLogger("Provider", config.debug),
     [config.debug],
+  );
+
+  const clientConfig = useMemo<CoreGuardhouseConfig>(
+    () => ({
+      authority: config.authority,
+      clientId: config.clientId,
+      scope: config.scope,
+      tokenEndpoint: config.tokenEndpoint,
+      userInfoEndpoint: config.userInfoEndpoint,
+      introspectionEndpoint: config.introspectionEndpoint,
+      revocationEndpoint: config.revocationEndpoint,
+      requestTimeoutMs: config.requestTimeoutMs,
+      discoveryCacheTtlMs: config.discoveryCacheTtlMs,
+      allowScopeNarrowing: config.allowScopeNarrowing,
+      maxAuthorizationHeaderBytes: config.maxAuthorizationHeaderBytes,
+      maxSilentAuthAttempts: config.maxSilentAuthAttempts,
+      requireUserInteractionForSensitiveOperations:
+        config.requireUserInteractionForSensitiveOperations,
+      allowedPostLogoutRedirectUris: config.allowedPostLogoutRedirectUris,
+      allowUnsafeHttpMethods: config.allowUnsafeHttpMethods,
+      requireDpopForAccessTokenRequests:
+        config.requireDpopForAccessTokenRequests,
+      dpopProofFactory: config.dpopProofFactory,
+      sessionStorageKey: `${StorageKeys.OIDC_SESSION}:core`,
+      storage,
+      debug: config.debug,
+    }),
+    [
+      config.allowScopeNarrowing,
+      config.allowUnsafeHttpMethods,
+      config.allowedPostLogoutRedirectUris,
+      config.authority,
+      config.clientId,
+      config.debug,
+      config.discoveryCacheTtlMs,
+      config.dpopProofFactory,
+      config.introspectionEndpoint,
+      config.maxAuthorizationHeaderBytes,
+      config.maxSilentAuthAttempts,
+      config.requestTimeoutMs,
+      config.requireDpopForAccessTokenRequests,
+      config.requireUserInteractionForSensitiveOperations,
+      config.revocationEndpoint,
+      config.scope,
+      config.tokenEndpoint,
+      config.userInfoEndpoint,
+      storage,
+    ],
+  );
+
+  const client = useMemo(
+    () => new GuardhouseClient(clientConfig),
+    [clientConfig],
   );
 
   useEffect(() => {
@@ -106,16 +252,11 @@ export function GuardhouseProvider({
         user,
       }));
 
-      if (tokenData && config.onRedirectCallback) {
-        logger.debug("Running redirect callback");
-        config.onRedirectCallback();
-      }
-
       logger.info("Authentication flow completed", {
         subject: user.sub,
       });
     },
-    [config.onRedirectCallback, logger],
+    [logger],
   );
 
   const handleLoading = useCallback(() => {
@@ -123,36 +264,109 @@ export function GuardhouseProvider({
     setState((prev) => ({ ...prev, isLoading: true }));
   }, [logger]);
 
+  const clearTransientLoginState = useCallback(async () => {
+    await storage.removeItem(StorageKeys.CODE_VERIFIER);
+    await storage.removeItem(StorageKeys.STATE);
+    await storage.removeItem(StorageKeys.NONCE);
+    await storage.removeItem(StorageKeys.REQUESTED_SCOPE);
+    await storage.removeItem(StorageKeys.REQUESTED_AUDIENCE);
+    await storage.removeItem(StorageKeys.PROMPT);
+    await storage.removeItem(StorageKeys.APP_STATE);
+  }, [storage]);
+
   const clearAuthState = useCallback(async () => {
-    logger.debug("Clearing stored auth state");
+    logger.debug("Clearing stored auth state from session storage");
+
+    await storage.removeItem(StorageKeys.OIDC_SESSION);
+
     await storage.removeItem(StorageKeys.ACCESS_TOKEN);
     await storage.removeItem(StorageKeys.REFRESH_TOKEN);
     await storage.removeItem(StorageKeys.ID_TOKEN);
     await storage.removeItem(StorageKeys.EXPIRES_AT);
     await storage.removeItem(StorageKeys.USER);
-  }, [storage, logger]);
+
+    await clearTransientLoginState();
+    await client.clearSessionState();
+  }, [clearTransientLoginState, client, logger, storage]);
+
+  const readStoredOidcSession =
+    useCallback(async (): Promise<OidcSessionData | null> => {
+      const serializedSession = await storage.getItem(StorageKeys.OIDC_SESSION);
+      return parseStoredOidcSession(serializedSession);
+    }, [storage]);
+
+  const persistOidcSession = useCallback(
+    async (sessionData: OidcSessionData): Promise<void> => {
+      await storage.setItem(
+        StorageKeys.OIDC_SESSION,
+        JSON.stringify(sessionData),
+      );
+    },
+    [storage],
+  );
+
+  const refreshSession = useCallback(
+    async (sessionData: OidcSessionData): Promise<OidcSessionData | null> => {
+      if (!sessionData.refreshToken) {
+        await clearAuthState();
+        return null;
+      }
+
+      try {
+        const refreshParams: Record<string, string> = {};
+        if (sessionData.scope) {
+          refreshParams["scope"] = sessionData.scope;
+        }
+
+        const tokenResponse = await client.refreshToken(
+          sessionData.refreshToken,
+          refreshParams,
+        );
+
+        const refreshedSession: OidcSessionData = {
+          ...sessionData,
+          accessToken: tokenResponse.access_token,
+          refreshToken: tokenResponse.refresh_token || sessionData.refreshToken,
+          idToken: tokenResponse.id_token || sessionData.idToken,
+          tokenType: tokenResponse.token_type,
+          scope: tokenResponse.scope || sessionData.scope,
+          expiresAt: Math.floor(Date.now() / 1000) + tokenResponse.expires_in,
+        };
+
+        await persistOidcSession(refreshedSession);
+
+        logger.info("Silent token refresh succeeded", {
+          expiresAt: refreshedSession.expiresAt,
+        });
+
+        return refreshedSession;
+      } catch (error) {
+        logger.error("Token refresh failed", {
+          error: String(error),
+        });
+        await clearAuthState();
+        return null;
+      }
+    },
+    [clearAuthState, client, logger, persistOidcSession],
+  );
 
   const handleCallback = useCallback(async () => {
-    const params = parseQueryParams(window.location.search);
+    const searchParams = parseQueryParams(window.location.search);
+    const hashParams = parseQueryParams(
+      window.location.hash.startsWith("#")
+        ? `?${window.location.hash.slice(1)}`
+        : window.location.hash,
+    );
 
-    logger.debug("Handling OAuth callback", {
-      hasCode: Boolean(params["code"]),
-      hasState: Boolean(params["state"]),
-      hasError: Boolean(params["error"]),
-    });
+    const hasAuthResponse = Boolean(
+      searchParams["code"] ||
+      searchParams["error"] ||
+      hashParams["code"] ||
+      hashParams["error"],
+    );
 
-    const code = params["code"];
-    const state = params["state"];
-    const error = params["error"];
-
-    if (error) {
-      const errorDescription = params["error_description"] || error;
-      handleError(errorDescription);
-      removeQueryParams();
-      return;
-    }
-
-    if (!code || !state) {
+    if (!hasAuthResponse) {
       logger.debug("No authorization callback parameters found");
       setState((prev) => ({ ...prev, isLoading: false }));
       return;
@@ -161,74 +375,49 @@ export function GuardhouseProvider({
     try {
       handleLoading();
 
-      const storedState = await sessionStorage.getItem(StorageKeys.STATE);
-      if (storedState !== state) {
-        logger.warn("State mismatch detected during callback", {
-          receivedState: state,
-          hasStoredState: Boolean(storedState),
-        });
-        throw new Error("State parameter mismatch. Possible CSRF attack.");
+      const storedState = await storage.getItem(StorageKeys.STATE);
+      if (!storedState) {
+        throw new Error("State parameter missing in session storage");
       }
 
-      const codeVerifier = await sessionStorage.getItem(
-        StorageKeys.CODE_VERIFIER,
-      );
+      const codeVerifier = await storage.getItem(StorageKeys.CODE_VERIFIER);
       if (!codeVerifier) {
         throw new Error("Code verifier not found in session storage");
       }
 
-      logger.debug("State and code verifier validated");
+      const nonce = await storage.getItem(StorageKeys.NONCE);
+      const requestedScope = await storage.getItem(StorageKeys.REQUESTED_SCOPE);
+      const requestedAudience = await storage.getItem(
+        StorageKeys.REQUESTED_AUDIENCE,
+      );
+      const prompt = await storage.getItem(StorageKeys.PROMPT);
 
-      const nonce = await sessionStorage.getItem(StorageKeys.NONCE);
+      const callback = await client.validateOAuthCallback(
+        window.location.href,
+        storedState,
+        prompt || undefined,
+      );
 
-      await sessionStorage.removeItem(StorageKeys.CODE_VERIFIER);
-      await sessionStorage.removeItem(StorageKeys.STATE);
-      await sessionStorage.removeItem(StorageKeys.NONCE);
-
-      const tokenEndpoint = `${config.authority}/connect/token`;
-      logger.debug("Exchanging authorization code for tokens", {
-        tokenEndpoint,
-      });
-
-      const response = await fetch(tokenEndpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: new URLSearchParams({
-          grant_type: "authorization_code",
-          code,
-          redirect_uri: config.redirectUri,
-          client_id: config.clientId,
-          code_verifier: codeVerifier,
-        }),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Token exchange failed: ${errorText}`);
+      if (!callback.code) {
+        throw new Error("OAuth callback did not include an authorization code");
       }
 
-      const tokenData: TokenData = await response.json();
+      const tokenParams: Record<string, string> = {};
+      if (requestedScope && requestedScope.trim() !== "") {
+        tokenParams["scope"] = requestedScope;
+      }
+
+      const tokenData = await client.exchangeCodeForTokens(
+        callback.code,
+        codeVerifier,
+        config.redirectUri,
+        tokenParams,
+      );
 
       logger.debug("Token exchange succeeded", {
         expiresIn: tokenData.expires_in,
         hasRefreshToken: Boolean(tokenData.refresh_token),
         hasIdToken: Boolean(tokenData.id_token),
-      });
-
-      const expiresAt = Math.floor(Date.now() / 1000) + tokenData.expires_in;
-
-      await storage.setItem(StorageKeys.ACCESS_TOKEN, tokenData.access_token);
-      await storage.setItem(
-        StorageKeys.REFRESH_TOKEN,
-        tokenData.refresh_token || "",
-      );
-      await storage.setItem(StorageKeys.ID_TOKEN, tokenData.id_token || "");
-      await storage.setItem(StorageKeys.EXPIRES_AT, expiresAt.toString());
-
-      logger.debug("Token data stored", {
-        expiresAt,
       });
 
       let fallbackUserFromIdToken: CoreUser | null = null;
@@ -249,36 +438,18 @@ export function GuardhouseProvider({
         }
       }
 
-      const userInfoEndpoint = `${config.authority}/connect/userinfo`;
-      const userResponse = await fetch(userInfoEndpoint, {
-        headers: {
-          Authorization: `Bearer ${tokenData.access_token}`,
-        },
-      });
-
       let authenticatedUser: CoreUser | null = null;
 
-      if (!userResponse.ok) {
-        const errorText = await userResponse.text();
+      try {
+        authenticatedUser = await client.getUserInfo(tokenData.access_token);
+      } catch (userInfoError) {
         logger.warn("Failed to fetch user info", {
-          error: errorText,
+          error: String(userInfoError),
         });
 
         if (fallbackUserFromIdToken) {
           authenticatedUser = fallbackUserFromIdToken;
-          await storage.setItem(
-            StorageKeys.USER,
-            JSON.stringify(authenticatedUser),
-          );
         }
-      } else {
-        const userData = await userResponse.json();
-        authenticatedUser = userData;
-        await storage.setItem(StorageKeys.USER, JSON.stringify(userData));
-
-        logger.debug("User profile fetched", {
-          subject: userData?.sub,
-        });
       }
 
       if (!authenticatedUser) {
@@ -287,7 +458,41 @@ export function GuardhouseProvider({
         );
       }
 
+      const oidcSession: OidcSessionData = {
+        accessToken: tokenData.access_token,
+        tokenType: tokenData.token_type,
+        expiresAt: Math.floor(Date.now() / 1000) + tokenData.expires_in,
+        refreshToken: tokenData.refresh_token,
+        idToken: tokenData.id_token,
+        scope: tokenData.scope || requestedScope || config.scope,
+        user: authenticatedUser,
+        oidc: {
+          issuer: config.authority,
+          audience: requestedAudience || config.audience,
+          sessionState:
+            typeof callback.params["session_state"] === "string"
+              ? callback.params["session_state"]
+              : undefined,
+        },
+      };
+
+      await persistOidcSession(oidcSession);
       handleSuccess(authenticatedUser, tokenData);
+
+      if (config.onRedirectCallback) {
+        const appStateRaw = await storage.getItem(StorageKeys.APP_STATE);
+
+        if (appStateRaw) {
+          try {
+            const appState = JSON.parse(appStateRaw) as AppState;
+            config.onRedirectCallback(appState);
+          } catch {
+            config.onRedirectCallback();
+          }
+        } else {
+          config.onRedirectCallback();
+        }
+      }
 
       logger.info("OAuth callback handled successfully", {
         subject: authenticatedUser.sub,
@@ -298,66 +503,76 @@ export function GuardhouseProvider({
       handleError(
         error instanceof Error ? error.message : "Unknown error occurred",
       );
-      removeQueryParams();
       await clearAuthState();
+      removeQueryParams();
+    } finally {
+      await clearTransientLoginState();
     }
   }, [
+    clearAuthState,
+    clearTransientLoginState,
+    client,
+    config.audience,
     config.authority,
     config.clientId,
+    config.onRedirectCallback,
     config.redirectUri,
-    storage,
-    sessionStorage,
-    handleLoading,
+    config.scope,
     handleError,
+    handleLoading,
     handleSuccess,
-    clearAuthState,
     logger,
+    persistOidcSession,
+    storage,
   ]);
 
   const checkSession = useCallback(async () => {
     try {
       handleLoading();
-      logger.debug("Checking existing session");
+      logger.debug("Checking existing session in session storage");
 
-      const accessToken = await storage.getItem(StorageKeys.ACCESS_TOKEN);
-      const expiresAt = await storage.getItem(StorageKeys.EXPIRES_AT);
-      const userStr = await storage.getItem(StorageKeys.USER);
+      const sessionData = await readStoredOidcSession();
 
-      if (!accessToken || !userStr) {
-        logger.debug("No active session found in storage", {
-          hasAccessToken: Boolean(accessToken),
-          hasUser: Boolean(userStr),
-        });
+      if (!sessionData) {
+        logger.debug("No active OIDC session found");
         setState((prev) => ({ ...prev, isLoading: false }));
         return;
       }
 
       const now = Math.floor(Date.now() / 1000);
-      if (expiresAt && parseInt(expiresAt) < now) {
-        logger.info("Stored session has expired", {
-          expiresAt,
+
+      if (sessionData.expiresAt <= now) {
+        logger.info("Stored OIDC session has expired", {
+          expiresAt: sessionData.expiresAt,
           now,
         });
-        await clearAuthState();
-        setState((prev) => ({
-          ...prev,
-          isLoading: false,
-          isAuthenticated: false,
-          user: null,
-        }));
+
+        const refreshedSession = await refreshSession(sessionData);
+
+        if (!refreshedSession) {
+          setState((prev) => ({
+            ...prev,
+            isLoading: false,
+            isAuthenticated: false,
+            user: null,
+          }));
+          return;
+        }
+
+        handleSuccess(refreshedSession.user);
         return;
       }
 
-      const userData: CoreUser = JSON.parse(userStr);
-      handleSuccess(userData);
+      handleSuccess(sessionData.user);
 
       logger.info("Restored authenticated session", {
-        subject: userData.sub,
+        subject: sessionData.user.sub,
       });
     } catch (error) {
       logger.error("Session check failed", {
         error: String(error),
       });
+      await clearAuthState();
       setState((prev) => ({
         ...prev,
         isLoading: false,
@@ -365,75 +580,165 @@ export function GuardhouseProvider({
         user: null,
       }));
     }
-  }, [storage, clearAuthState, handleLoading, handleSuccess, logger]);
+  }, [
+    clearAuthState,
+    handleLoading,
+    handleSuccess,
+    logger,
+    readStoredOidcSession,
+    refreshSession,
+  ]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (typeof window === "undefined") {
+      return;
+    }
 
     logger.debug("Initializing Guardhouse React provider");
 
-    const params = parseQueryParams(window.location.search);
+    const searchParams = parseQueryParams(window.location.search);
+    const hashParams = parseQueryParams(
+      window.location.hash.startsWith("#")
+        ? `?${window.location.hash.slice(1)}`
+        : window.location.hash,
+    );
 
-    if (params["code"] && params["state"]) {
-      handleCallback();
-    } else {
-      checkSession();
+    const hasAuthResponse = Boolean(
+      searchParams["code"] ||
+      searchParams["error"] ||
+      hashParams["code"] ||
+      hashParams["error"],
+    );
+
+    if (hasAuthResponse) {
+      void handleCallback();
+      return;
     }
-  }, [handleCallback, checkSession, logger]);
+
+    void checkSession();
+  }, [checkSession, handleCallback, logger]);
 
   const loginWithRedirect = useCallback(
     async (options?: LoginOptions) => {
       try {
         logger.info("Starting redirect login flow");
 
-        if (options?.scope) {
-          logger.debug("Login scope override provided", {
-            scope: options.scope,
-          });
+        const requestedScope =
+          options?.scope?.trim() || config.scope || DEFAULT_SCOPE;
+        const requestedAudience =
+          options?.audience?.trim() || config.audience?.trim();
+        const responseType = (config.responseType || "code").trim();
+        const hasCodeResponseType = responseType
+          .split(/\s+/)
+          .some((entry) => entry === "code");
+
+        if (
+          hasCodeResponseType &&
+          !requestedAudience &&
+          !config.requestUri &&
+          !config.allowAuthorizationWithoutAudience
+        ) {
+          throw new Error(
+            "audience is required for authorization code flow unless requestUri is configured or allowAuthorizationWithoutAudience=true",
+          );
+        }
+
+        if (
+          scopeContains(requestedScope, "offline_access") &&
+          !config.allowOfflineAccessScope
+        ) {
+          throw new Error(
+            "offline_access scope requires allowOfflineAccessScope=true",
+          );
         }
 
         const { codeVerifier, codeChallenge } = await generatePKCE({
           debug: config.debug,
-        } as any);
-        const state = generateBase64UrlEncodedString(32);
-        const nonce = generateBase64UrlEncodedString(32);
+        });
+        const stateToken = await generateState(18, config.debug);
+        const nonce = await generateNonce(18, config.debug);
 
-        await sessionStorage.setItem(StorageKeys.CODE_VERIFIER, codeVerifier);
-        await sessionStorage.setItem(StorageKeys.STATE, state);
-        await sessionStorage.setItem(StorageKeys.NONCE, nonce);
+        await storage.setItem(StorageKeys.CODE_VERIFIER, codeVerifier);
+        await storage.setItem(StorageKeys.STATE, stateToken);
+        await storage.setItem(StorageKeys.NONCE, nonce);
+        await storage.setItem(StorageKeys.REQUESTED_SCOPE, requestedScope);
 
-        const authUrl = await generateAuthUrl({
-          authority: config.authority,
-          clientId: config.clientId,
-          redirectUri: config.redirectUri,
-          debug: config.debug,
-          responseType: config.responseType || "code",
-          scope: options?.scope || config.scope || "openid profile email",
-          state,
-          codeChallenge,
-          codeChallengeMethod: "S256",
-        } as any);
+        if (requestedAudience) {
+          await storage.setItem(
+            StorageKeys.REQUESTED_AUDIENCE,
+            requestedAudience,
+          );
+        } else {
+          await storage.removeItem(StorageKeys.REQUESTED_AUDIENCE);
+        }
 
-        if (options?.appState?.returnTo) {
-          await sessionStorage.setItem(
-            "gh_app_state",
+        if (options?.prompt) {
+          await storage.setItem(StorageKeys.PROMPT, options.prompt);
+        } else {
+          await storage.removeItem(StorageKeys.PROMPT);
+        }
+
+        if (options?.appState) {
+          await storage.setItem(
+            StorageKeys.APP_STATE,
             JSON.stringify(options.appState),
           );
 
           logger.debug("Stored app state for post-login redirect", {
             returnTo: options.appState.returnTo,
           });
+        } else {
+          await storage.removeItem(StorageKeys.APP_STATE);
         }
+
+        const authUrl = generateAuthUrl({
+          authority: config.authority,
+          authorizationEndpoint: config.authorizationEndpoint,
+          clientId: config.clientId,
+          redirectUri: config.redirectUri,
+          requestUri: config.requestUri,
+          debug: config.debug,
+          responseType,
+          scope: requestedScope,
+          allowOfflineAccessScope: Boolean(config.allowOfflineAccessScope),
+          allowAuthorizationWithoutAudience: Boolean(
+            config.allowAuthorizationWithoutAudience,
+          ),
+          state: stateToken,
+          codeChallenge,
+          codeChallengeMethod: "S256",
+          nonce,
+          prompt: options?.prompt,
+          audience: requestedAudience,
+        });
 
         logger.debug("Redirecting browser to authorization endpoint", {
           authority: config.authority,
         });
+
         window.location.href = authUrl;
       } catch (error) {
+        await clearTransientLoginState();
         handleError(error instanceof Error ? error.message : "Login failed");
       }
     },
-    [config, sessionStorage, handleError, logger],
+    [
+      clearTransientLoginState,
+      config.allowOfflineAccessScope,
+      config.allowAuthorizationWithoutAudience,
+      config.audience,
+      config.authority,
+      config.authorizationEndpoint,
+      config.clientId,
+      config.debug,
+      config.redirectUri,
+      config.requestUri,
+      config.responseType,
+      config.scope,
+      handleError,
+      logger,
+      storage,
+    ],
   );
 
   const logout = useCallback(
@@ -445,13 +750,15 @@ export function GuardhouseProvider({
         returnTo,
       });
 
-      const logoutUrl = new URL(`${config.authority}/connect/endsession`);
-      logoutUrl.searchParams.set("post_logout_redirect_uri", returnTo);
+      const currentSession = await readStoredOidcSession();
 
-      const idToken = await storage.getItem(StorageKeys.ID_TOKEN);
-      if (idToken) {
-        logoutUrl.searchParams.set("id_token_hint", idToken);
-      }
+      const logoutState = await generateState(18, config.debug);
+      const logoutUrl = client.buildLogoutUrl({
+        postLogoutRedirectUri: returnTo,
+        idTokenHint: currentSession?.idToken,
+        state: logoutState,
+        federated: options?.federated,
+      });
 
       logger.debug("Clearing local auth state before redirecting to logout");
       await clearAuthState();
@@ -459,96 +766,84 @@ export function GuardhouseProvider({
       logger.debug("Redirecting browser to logout endpoint", {
         authority: config.authority,
       });
-      window.location.href = logoutUrl.toString();
+      window.location.href = logoutUrl;
     },
-    [config, storage, clearAuthState, logger],
+    [
+      clearAuthState,
+      client,
+      config.authority,
+      config.debug,
+      config.logoutRedirectUri,
+      logger,
+      readStoredOidcSession,
+    ],
   );
-
-  const getAccessToken = useCallback(async (): Promise<string | null> => {
-    const accessToken = await storage.getItem(StorageKeys.ACCESS_TOKEN);
-
-    logger.debug("Retrieved access token from storage", {
-      hasAccessToken: Boolean(accessToken),
-    });
-
-    return accessToken;
-  }, [storage, logger]);
 
   const getAccessTokenSilently = useCallback(async (): Promise<
     string | null
   > => {
     logger.debug("Attempting silent access token retrieval");
 
-    const accessToken = await storage.getItem(StorageKeys.ACCESS_TOKEN);
-    const expiresAt = await storage.getItem(StorageKeys.EXPIRES_AT);
-    const refreshToken = await storage.getItem(StorageKeys.REFRESH_TOKEN);
+    const sessionData = await readStoredOidcSession();
 
-    if (!accessToken) {
-      logger.debug("No access token available for silent retrieval");
+    if (!sessionData) {
+      logger.debug("No OIDC session available for silent retrieval");
       return null;
     }
 
     const now = Math.floor(Date.now() / 1000);
-    if (expiresAt && parseInt(expiresAt) > now + 60) {
+
+    if (sessionData.expiresAt > now + ACCESS_TOKEN_REFRESH_LEEWAY_SECONDS) {
       logger.debug("Using existing access token for silent retrieval", {
-        expiresAt,
+        expiresAt: sessionData.expiresAt,
       });
-      return accessToken;
+      return sessionData.accessToken;
     }
 
-    if (!refreshToken) {
+    if (!sessionData.refreshToken) {
       logger.warn("Silent token retrieval failed: missing refresh token");
       await clearAuthState();
       return null;
     }
 
-    try {
-      const tokenEndpoint = `${config.authority}/connect/token`;
+    const refreshedSession = await refreshSession(sessionData);
 
-      const response = await fetch(tokenEndpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: new URLSearchParams({
-          grant_type: "refresh_token",
-          refresh_token: refreshToken,
-          client_id: config.clientId,
-        }),
-      });
-
-      if (!response.ok) {
-        logger.warn("Silent refresh returned non-success status", {
-          status: response.status,
-        });
-        await clearAuthState();
-        return null;
-      }
-
-      const tokenData: TokenData = await response.json();
-
-      const newExpiresAt = Math.floor(Date.now() / 1000) + tokenData.expires_in;
-
-      await storage.setItem(StorageKeys.ACCESS_TOKEN, tokenData.access_token);
-      await storage.setItem(
-        StorageKeys.REFRESH_TOKEN,
-        tokenData.refresh_token || "",
-      );
-      await storage.setItem(StorageKeys.EXPIRES_AT, newExpiresAt.toString());
-
-      logger.info("Silent token refresh succeeded", {
-        expiresAt: newExpiresAt,
-      });
-
-      return tokenData.access_token;
-    } catch (error) {
-      logger.error("Token refresh failed", {
-        error: String(error),
-      });
-      await clearAuthState();
+    if (!refreshedSession) {
+      setState((prev) => ({
+        ...prev,
+        isLoading: false,
+        isAuthenticated: false,
+        user: null,
+      }));
       return null;
     }
-  }, [config, storage, clearAuthState, logger]);
+
+    setState((prev) => ({
+      ...prev,
+      isLoading: false,
+      isAuthenticated: true,
+      error: null,
+      user: refreshedSession.user,
+    }));
+
+    return refreshedSession.accessToken;
+  }, [clearAuthState, logger, readStoredOidcSession, refreshSession]);
+
+  const getAccessToken = useCallback(async (): Promise<string | null> => {
+    const sessionData = await readStoredOidcSession();
+
+    if (!sessionData) {
+      logger.debug("No access token available in session storage");
+      return null;
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    if (sessionData.expiresAt > now + ACCESS_TOKEN_REFRESH_LEEWAY_SECONDS) {
+      return sessionData.accessToken;
+    }
+
+    return getAccessTokenSilently();
+  }, [getAccessTokenSilently, logger, readStoredOidcSession]);
 
   const contextValue: AuthContextValue = {
     ...state,

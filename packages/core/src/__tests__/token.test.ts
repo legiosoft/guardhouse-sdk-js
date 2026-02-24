@@ -2,6 +2,9 @@ import {
   decodeJWT,
   getTokenExpiresIn,
   isTokenExpired,
+  resetJtiReplayCache,
+  validateJwkMetadataForToken,
+  validateOidcHashClaims,
   validateToken,
 } from "../token";
 
@@ -37,7 +40,30 @@ function createJWTWithHeader(
   return `${base64UrlEncodeJson(header)}.${base64UrlEncodeJson(payload)}.${signature}`;
 }
 
+function createOidcHash(value: string, algorithm: string): string {
+  const hashBitLength = algorithm.endsWith("384")
+    ? 384
+    : algorithm.endsWith("512") || algorithm === "EdDSA"
+      ? 512
+      : 256;
+  const hash = require("crypto")
+    .createHash(`sha${hashBitLength}`)
+    .update(value, "utf8")
+    .digest();
+
+  return hash
+    .subarray(0, hash.length / 2)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=/g, "");
+}
+
 describe("token utilities", () => {
+  beforeEach(() => {
+    resetJtiReplayCache();
+  });
+
   it("decodes UTF-8 payload values", () => {
     const token = createJWT({
       sub: "user-1",
@@ -95,6 +121,7 @@ describe("token utilities", () => {
       sub: "user-1",
       iss: "https://auth.example.com",
       aud: ["client-id", "secondary"],
+      azp: "client-id",
       nonce: "expected-nonce",
       exp: Math.floor(Date.now() / 1000) + 300,
     });
@@ -250,6 +277,289 @@ describe("token utilities", () => {
     const token = `${hugePayload}.${hugePayload}.${hugePayload}`;
 
     expect(() => decodeJWT(token)).toThrow("maximum supported length");
+  });
+
+  it("enforces required ACR values", () => {
+    const token = createJWT({
+      sub: "user-1",
+      acr: "loa1",
+      iss: "https://auth.example.com",
+      aud: "client-id",
+      exp: Math.floor(Date.now() / 1000) + 300,
+    });
+
+    const decoded = decodeJWT(token);
+    const result = validateToken(decoded, {
+      issuer: "https://auth.example.com",
+      audience: "client-id",
+      signatureVerified: true,
+      requiredAcrValues: ["loa3"],
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.acrValid).toBe(false);
+  });
+
+  it("enforces max_age with auth_time claim", () => {
+    const token = createJWT({
+      sub: "user-1",
+      auth_time: Math.floor(Date.now() / 1000) - 500,
+      iss: "https://auth.example.com",
+      aud: "client-id",
+      exp: Math.floor(Date.now() / 1000) + 300,
+    });
+
+    const decoded = decodeJWT(token);
+    const result = validateToken(decoded, {
+      issuer: "https://auth.example.com",
+      audience: "client-id",
+      signatureVerified: true,
+      maxAgeSeconds: 60,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.authTimeValid).toBe(false);
+  });
+
+  it("rejects replayed jti when uniqueness is enforced", () => {
+    const token = createJWT({
+      sub: "user-1",
+      jti: "jti-123",
+      iss: "https://auth.example.com",
+      aud: "client-id",
+      exp: Math.floor(Date.now() / 1000) + 300,
+    });
+
+    const decoded = decodeJWT(token);
+    const first = validateToken(decoded, {
+      issuer: "https://auth.example.com",
+      audience: "client-id",
+      signatureVerified: true,
+      enforceUniqueJti: true,
+    });
+    expect(first.valid).toBe(true);
+
+    const second = validateToken(decoded, {
+      issuer: "https://auth.example.com",
+      audience: "client-id",
+      signatureVerified: true,
+      enforceUniqueJti: true,
+    });
+    expect(second.valid).toBe(false);
+    expect(second.jtiValid).toBe(false);
+  });
+
+  it("requires phishing-resistant MFA AMR when configured", () => {
+    const token = createJWT({
+      sub: "user-1",
+      amr: ["pwd"],
+      iss: "https://auth.example.com",
+      aud: "client-id",
+      exp: Math.floor(Date.now() / 1000) + 300,
+    });
+
+    const decoded = decodeJWT(token);
+    const result = validateToken(decoded, {
+      issuer: "https://auth.example.com",
+      audience: "client-id",
+      signatureVerified: true,
+      requirePhishingResistantMfa: true,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.amrValid).toBe(false);
+  });
+
+  it("enforces cnf.jkt token binding when required", () => {
+    const token = createJWT({
+      sub: "user-1",
+      cnf: { jkt: "thumbprint-1" },
+      iss: "https://auth.example.com",
+      aud: "client-id",
+      exp: Math.floor(Date.now() / 1000) + 300,
+    });
+
+    const decoded = decodeJWT(token);
+    const result = validateToken(decoded, {
+      issuer: "https://auth.example.com",
+      audience: "client-id",
+      signatureVerified: true,
+      requiredCnfJkt: "thumbprint-2",
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.cnfValid).toBe(false);
+  });
+
+  it("validates at_hash and c_hash claims", async () => {
+    const algorithm = "RS256";
+    const accessToken = "access-token-123";
+    const authorizationCode = "auth-code-123";
+    const token = createJWTWithHeader(
+      {
+        sub: "user-1",
+        at_hash: createOidcHash(accessToken, algorithm),
+        c_hash: createOidcHash(authorizationCode, algorithm),
+        iss: "https://auth.example.com",
+        aud: "client-id",
+        exp: Math.floor(Date.now() / 1000) + 300,
+      },
+      {
+        alg: algorithm,
+        typ: "JWT",
+      },
+    );
+
+    const decoded = decodeJWT(token);
+    await expect(
+      validateOidcHashClaims(decoded, {
+        accessToken,
+        authorizationCode,
+        requireAtHash: true,
+        requireCHash: true,
+      }),
+    ).resolves.toMatchObject({
+      valid: true,
+      atHashValid: true,
+      cHashValid: true,
+    });
+  });
+
+  it("rejects invalid at_hash values", async () => {
+    const token = createJWT({
+      sub: "user-1",
+      at_hash: "invalid",
+      iss: "https://auth.example.com",
+      aud: "client-id",
+      exp: Math.floor(Date.now() / 1000) + 300,
+    });
+
+    const decoded = decodeJWT(token);
+    await expect(
+      validateOidcHashClaims(decoded, {
+        accessToken: "access-token-123",
+        requireAtHash: true,
+      }),
+    ).resolves.toMatchObject({
+      valid: false,
+      atHashValid: false,
+    });
+  });
+
+  it("supports EdDSA through allowedAlgorithms", () => {
+    const token = createJWTWithHeader(
+      {
+        sub: "user-1",
+        iss: "https://auth.example.com",
+        aud: "client-id",
+        exp: Math.floor(Date.now() / 1000) + 300,
+      },
+      {
+        alg: "EdDSA",
+        typ: "JWT",
+      },
+    );
+
+    const decoded = decodeJWT(token);
+    const result = validateToken(decoded, {
+      issuer: "https://auth.example.com",
+      audience: "client-id",
+      signatureVerified: true,
+      allowedAlgorithms: ["EdDSA"],
+      expectedKeyType: "OKP",
+    });
+
+    expect(result.valid).toBe(true);
+  });
+
+  it("validates JWK metadata for signature use and algorithm binding", () => {
+    const result = validateJwkMetadataForToken(
+      {
+        kid: "kid-1",
+        kty: "RSA",
+        use: "enc",
+        alg: "RS512",
+        key_ops: ["encrypt"],
+      },
+      {
+        tokenAlgorithm: "RS256",
+        expectedKid: "kid-1",
+      },
+    );
+
+    expect(result.valid).toBe(false);
+    expect(result.useValid).toBe(false);
+    expect(result.algValid).toBe(false);
+    expect(result.keyOpsValid).toBe(false);
+  });
+
+  it("fails token validation when resolved JWK metadata is unsafe", () => {
+    const token = createJWTWithHeader(
+      {
+        sub: "user-1",
+        iss: "https://auth.example.com",
+        aud: "client-id",
+        exp: Math.floor(Date.now() / 1000) + 300,
+      },
+      {
+        alg: "RS256",
+        typ: "JWT",
+        kid: "kid-unsafe",
+      },
+    );
+
+    const decoded = decodeJWT(token);
+    const result = validateToken(decoded, {
+      issuer: "https://auth.example.com",
+      audience: "client-id",
+      signatureVerified: true,
+      resolvedJwk: {
+        kid: "kid-unsafe",
+        kty: "RSA",
+        use: "enc",
+        alg: "RS256",
+        key_ops: ["encrypt"],
+      },
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.jwkMetadataValid).toBe(false);
+    expect(
+      result.errors.some((error) => error.includes("JWK metadata validation")),
+    ).toBe(true);
+  });
+
+  it("accepts token when resolved JWK metadata is trusted", () => {
+    const token = createJWTWithHeader(
+      {
+        sub: "user-1",
+        iss: "https://auth.example.com",
+        aud: "client-id",
+        exp: Math.floor(Date.now() / 1000) + 300,
+      },
+      {
+        alg: "RS256",
+        typ: "JWT",
+        kid: "kid-safe",
+      },
+    );
+
+    const decoded = decodeJWT(token);
+    const result = validateToken(decoded, {
+      issuer: "https://auth.example.com",
+      audience: "client-id",
+      signatureVerified: true,
+      resolvedJwk: {
+        kid: "kid-safe",
+        kty: "RSA",
+        use: "sig",
+        alg: "RS256",
+        key_ops: ["verify"],
+      },
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.jwkMetadataValid).toBe(true);
   });
 
   it("throws for negative clock skew in isTokenExpired", () => {

@@ -1,5 +1,6 @@
 import {
   consumeStateBinding,
+  createLocationHeaderRedirect,
   generateAuthUrl,
   isSilentAuthenticationError,
   parseOAuthCallbackUrl,
@@ -204,6 +205,22 @@ describe("generateAuthUrl", () => {
     ).toThrow("audience or resource is required");
   });
 
+  it("allows code flow without audience when explicitly enabled", () => {
+    const authUrl = generateAuthUrl({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      redirectUri: "https://app.example.com/callback",
+      responseType: "code",
+      state: "state-value-123456",
+      nonce: "nonce-value",
+      codeChallenge: "code-challenge",
+      allowAuthorizationWithoutAudience: true,
+    });
+
+    const parsed = new URL(authUrl);
+    expect(parsed.searchParams.get("audience")).toBeNull();
+  });
+
   it("allows non-code response types without PKCE", () => {
     const authUrl = generateAuthUrl({
       authority: "https://auth.example.com",
@@ -283,6 +300,20 @@ describe("generateAuthUrl", () => {
         audience: "https://api.example.com",
       }),
     ).toThrow("Authority must use an http or https protocol.");
+  });
+
+  it("rejects internationalized authority hostnames to prevent homograph spoofing", () => {
+    expect(() =>
+      generateAuthUrl({
+        authority: "https://xn--pple-43d.example.com",
+        clientId: "client-id",
+        redirectUri: "https://app.example.com/callback",
+        codeChallenge: "code-challenge",
+        state: "state-value-123456",
+        nonce: "nonce-value",
+        audience: "https://api.example.com",
+      }),
+    ).toThrow("internationalized domain label");
   });
 
   it("rejects custom redirect URI schemes", () => {
@@ -525,5 +556,211 @@ describe("generateAuthUrl", () => {
         },
       ),
     ).toThrow("issuer validation failed");
+  });
+
+  it("normalizes and validates acr_values", () => {
+    const authUrl = generateAuthUrl({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      redirectUri: "https://app.example.com/callback",
+      state: "state-value-123456",
+      nonce: "nonce-value",
+      codeChallenge: "code-challenge",
+      audience: "https://api.example.com",
+      acrValues: ["urn:mace:incommon:iap:silver", "phrh"],
+    });
+
+    const parsed = new URL(authUrl);
+    expect(parsed.searchParams.get("acr_values")).toBe(
+      "urn:mace:incommon:iap:silver phrh",
+    );
+  });
+
+  it("rejects unsafe ui_locales and login_hint values", () => {
+    expect(() =>
+      generateAuthUrl({
+        authority: "https://auth.example.com",
+        clientId: "client-id",
+        redirectUri: "https://app.example.com/callback",
+        state: "state-value-123456",
+        nonce: "nonce-value",
+        codeChallenge: "code-challenge",
+        audience: "https://api.example.com",
+        uiLocales: ["en-US", "<script>"],
+      }),
+    ).toThrow("invalid locale");
+
+    expect(() =>
+      generateAuthUrl({
+        authority: "https://auth.example.com",
+        clientId: "client-id",
+        redirectUri: "https://app.example.com/callback",
+        state: "state-value-123456",
+        nonce: "nonce-value",
+        codeChallenge: "code-challenge",
+        audience: "https://api.example.com",
+        loginHint: 'bad@example.com" onfocus=alert(1)',
+      }),
+    ).toThrow("loginHint contains unsafe characters");
+  });
+
+  it("supports request_uri based authorization URLs", () => {
+    const authUrl = generateAuthUrl({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      redirectUri: "https://app.example.com/callback",
+      state: "state-value-123456",
+      responseType: "code",
+      scope: "profile email",
+      requestUri: "urn:ietf:params:oauth:request_uri:abc123",
+    });
+
+    const parsed = new URL(authUrl);
+    expect(parsed.searchParams.get("request_uri")).toBe(
+      "urn:ietf:params:oauth:request_uri:abc123",
+    );
+    expect(parsed.searchParams.get("code_challenge")).toBeNull();
+  });
+
+  it("rejects non-integer maxAge values", () => {
+    expect(() =>
+      generateAuthUrl({
+        authority: "https://auth.example.com",
+        clientId: "client-id",
+        redirectUri: "https://app.example.com/callback",
+        state: "state-value-123456",
+        nonce: "nonce-value",
+        codeChallenge: "code-challenge",
+        audience: "https://api.example.com",
+        maxAge: 1.5,
+      }),
+    ).toThrow("maxAge must be a non-negative integer");
+  });
+
+  it("creates server-side redirect responses using Location header", () => {
+    const redirect = createLocationHeaderRedirect(
+      "https://app.example.com/callback",
+    );
+
+    expect(redirect.statusCode).toBe(302);
+    expect(redirect.headers.Location).toBe("https://app.example.com/callback");
+    expect(redirect.headers["Cache-Control"]).toBe("no-store");
+  });
+
+  it("encodes extraParams values to prevent parameter injection", () => {
+    const authUrl = generateAuthUrl({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      redirectUri: "https://app.example.com/callback",
+      state: "state-value-123456",
+      nonce: "nonce-value",
+      codeChallenge: "code-challenge",
+      audience: "https://api.example.com",
+      extraParams: {
+        note: "safe&response_type=token",
+      },
+    });
+
+    const parsed = new URL(authUrl);
+    expect(parsed.searchParams.get("response_type")).toBe("code");
+    expect(parsed.searchParams.get("note")).toBe("safe&response_type=token");
+  });
+
+  it("blocks prototype-polluting keys in extraParams", () => {
+    const extraParams = Object.create(null) as Record<
+      string,
+      string | number | null | undefined
+    >;
+    extraParams["__proto__"] = "polluted";
+    extraParams["safe"] = "ok";
+
+    const authUrl = generateAuthUrl({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      redirectUri: "https://app.example.com/callback",
+      state: "state-value-123456",
+      nonce: "nonce-value",
+      codeChallenge: "code-challenge",
+      audience: "https://api.example.com",
+      extraParams,
+    });
+
+    const parsed = new URL(authUrl);
+    expect(parsed.searchParams.get("__proto__")).toBeNull();
+    expect(parsed.searchParams.get("safe")).toBe("ok");
+  });
+
+  it("rejects unsafe callback parameter keys", () => {
+    expect(() =>
+      parseOAuthCallbackUrl(
+        "https://app.example.com/callback?code=abc&state=state123&__proto__=x",
+      ),
+    ).toThrow("unsafe parameter key");
+  });
+
+  it("requires explicit consent for offline_access scope", () => {
+    expect(() =>
+      generateAuthUrl({
+        authority: "https://auth.example.com",
+        clientId: "client-id",
+        redirectUri: "https://app.example.com/callback",
+        state: "state-value-123456",
+        nonce: "nonce-value",
+        codeChallenge: "code-challenge",
+        audience: "https://api.example.com",
+        scope: "openid offline_access",
+      }),
+    ).toThrow("allowOfflineAccessScope=true");
+
+    expect(() =>
+      generateAuthUrl({
+        authority: "https://auth.example.com",
+        clientId: "client-id",
+        redirectUri: "https://app.example.com/callback",
+        state: "state-value-123456",
+        nonce: "nonce-value",
+        codeChallenge: "code-challenge",
+        audience: "https://api.example.com",
+        scope: "openid offline_access",
+        allowOfflineAccessScope: true,
+      }),
+    ).not.toThrow();
+  });
+
+  it("validates and serializes claims request parameter", () => {
+    const authUrl = generateAuthUrl({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      redirectUri: "https://app.example.com/callback",
+      state: "state-value-123456",
+      nonce: "nonce-value",
+      codeChallenge: "code-challenge",
+      audience: "https://api.example.com",
+      claims: {
+        id_token: {
+          acr: { essential: true },
+        },
+      },
+    });
+
+    const parsed = new URL(authUrl);
+    const claims = parsed.searchParams.get("claims");
+    expect(claims).toBeTruthy();
+    expect(claims?.includes('"id_token"')).toBe(true);
+
+    expect(() =>
+      generateAuthUrl({
+        authority: "https://auth.example.com",
+        clientId: "client-id",
+        redirectUri: "https://app.example.com/callback",
+        state: "state-value-123456",
+        nonce: "nonce-value",
+        codeChallenge: "code-challenge",
+        audience: "https://api.example.com",
+        claims: {
+          "<script>": true,
+        } as any,
+      }),
+    ).toThrow("claims key is invalid");
   });
 });

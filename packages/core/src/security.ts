@@ -11,6 +11,8 @@ const DANGEROUS_PROTOCOLS = new Set([
   "vbscript:",
   "file:",
 ]);
+const UNSAFE_OBJECT_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+const PUNYCODE_LABEL_PREFIX = "xn--";
 
 const MAX_SAFE_COMPARE_BYTES = 4096;
 
@@ -62,6 +64,24 @@ export function enforceSecureHttpUrl(url: URL, label: string): void {
   if (url.protocol === "http:" && !isLocalDevelopmentHostname(url.hostname)) {
     throw new Error(`${label} must use HTTPS unless it targets localhost.`);
   }
+}
+
+export function enforceNonSpoofableHostname(url: URL, label: string): void {
+  const hostname = normalizeHostname(url.hostname);
+
+  const hasPunycodeLabel = hostname
+    .split(".")
+    .some((entry) => entry.toLowerCase().startsWith(PUNYCODE_LABEL_PREFIX));
+
+  if (hasPunycodeLabel) {
+    throw new Error(
+      `${label} hostname uses an internationalized domain label that is blocked to prevent Unicode homograph spoofing`,
+    );
+  }
+}
+
+export function isUnsafeObjectKey(key: string): boolean {
+  return UNSAFE_OBJECT_KEYS.has(key.trim().toLowerCase());
 }
 
 export function validateRedirectUri(redirectUri: string): URL {

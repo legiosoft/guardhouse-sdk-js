@@ -6,9 +6,10 @@ Frontend SDK for React 18+ web applications with hooks and protected routes.
 
 - **Auth Context**: GuardhouseProvider component for managing authentication state
 - **React Hooks**: useAuth hook for accessing user profile and auth methods
-- **Token Storage**: Customizable storage adapter (defaults to localStorage)
+- **Session-Only Storage**: OIDC session + token data is persisted in `sessionStorage`
 - **Debug Mode**: Set `config.debug = true` to trace SDK activity
 - **Protected Routes**: ProtectedRoute component to secure routes
+- **Core Security Policies**: React provider uses `@guardhouse/core` client flows (strict endpoint/origin checks, callback validation, silent-auth safeguards, DPoP/security config support)
 - **React 18 Compatible**: Supports Concurrent Mode and Server Components
 
 ## Installation
@@ -29,6 +30,9 @@ function App() {
       config={{
         authority: 'https://auth.guardhouse.io',
         clientId: 'your-client-id',
+        audience: 'https://api.guardhouse.io',
+        // Set to true for providers that reject audience
+        // allowAuthorizationWithoutAudience: true,
         redirectUri: window.location.origin + '/callback',
         debug: true,
       }}
@@ -57,6 +61,13 @@ function ProtectedPage() {
   );
 }
 ```
+
+## Security Notes
+
+- The React SDK does not use `localStorage` for tokens or OIDC session persistence.
+- OIDC session data (access token, refresh token, ID token, expiry, user claims, issuer/audience context) is stored in `sessionStorage` only.
+- Callback handling and token operations are delegated to `@guardhouse/core` so the same hardened security checks are consistently applied.
+- For IdPs that reject `audience` on `/authorize`, set `allowAuthorizationWithoutAudience: true` and omit `audience`.
 
 ## License
 

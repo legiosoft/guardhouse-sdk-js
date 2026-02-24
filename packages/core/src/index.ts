@@ -57,11 +57,17 @@ export type {
   UserInfoResponse,
   IntrospectionResponse,
   AuthorizationPageProtectionResult,
+  AccountLinkingContext,
+  HomeRealmDiscoveryResult,
   LogoutRequest,
+  PushedAuthorizationRequestResult,
+  PostMessageTarget,
+  SecureCookieOptions,
   SessionState,
 } from "./client";
 export {
   consumeStateBinding,
+  createLocationHeaderRedirect,
   generateAuthUrl,
   isSilentAuthenticationError,
   parseOAuthCallbackUrl,
@@ -75,11 +81,13 @@ export {
 export type {
   FrontChannelLogoutValidationOptions,
   OAuthCallbackResult,
+  RedirectResponse,
 } from "./auth";
 
 // PKCE exports
 export {
   consumeCodeVerifier,
+  dropCodeVerifier,
   generatePKCE,
   generateState,
   generateNonce,
@@ -107,6 +115,9 @@ export type { GuardhouseLogger } from "./debug";
 // Token exports
 export {
   decodeJWT,
+  resetJtiReplayCache,
+  validateJwkMetadataForToken,
+  validateOidcHashClaims,
   validateToken,
   isTokenExpired,
   getTokenExpiresIn,
@@ -114,8 +125,13 @@ export {
 export type {
   JWTPayload,
   JWTHeader,
+  JwkMetadata,
+  JwkMetadataValidationOptions,
+  JwkMetadataValidationResult,
   DecodedJWT,
   ExpectedJwkKeyType,
+  OidcHashValidationOptions,
+  OidcHashValidationResult,
   TokenValidationResult,
   TokenValidationOptions,
 } from "./token";

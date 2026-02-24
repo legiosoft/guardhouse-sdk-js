@@ -44,6 +44,9 @@ const authUrl = await generateAuthUrl({
   scope: "openid profile offline_access",
   state: await generateState(),
   nonce: await generateNonce(),
+  acrValues: ["phrh"],
+  uiLocales: ["en-US"],
+  loginHint: "alice@example.com",
   audience: "https://api.example.com",
   codeChallenge,
   codeChallengeMethod: "S256",
@@ -92,6 +95,18 @@ Exchange authorization code for access and refresh tokens.
 const tokens = await client.exchangeCodeForTokens(
   authorizationCode,
   codeVerifier,
+  "https://myapp.com/callback",
+);
+```
+
+##### `exchangeCodeForTokensUsingHandle(code, codeVerifierHandle, redirectUri, params)`
+
+Consumes a one-time PKCE verifier handle and exchanges code without keeping verifier values in long-lived application memory.
+
+```typescript
+const tokens = await client.exchangeCodeForTokensUsingHandle(
+  authorizationCode,
+  verifierHandle,
   "https://myapp.com/callback",
 );
 ```
@@ -149,12 +164,32 @@ Fetches OIDC discovery metadata from the configured authority origin.
 const metadata = await client.discoverOpenIdConfiguration();
 ```
 
+##### `resolveHomeRealmIssuer(loginHint, trustedIssuersByDomain)`
+
+Resolves issuer for Home Realm Discovery using a strict domain allowlist.
+
+```typescript
+const hrd = client.resolveHomeRealmIssuer("alice@contoso.com", {
+  "contoso.com": "https://idp.contoso.com",
+});
+```
+
 ##### `openAuthorizationPopup(url, name?, features?)`
 
 Opens auth popup with `noopener,noreferrer` protections and resets `window.opener`.
 
 ```typescript
 client.openAuthorizationPopup(authUrl);
+```
+
+##### `prepareSharedDeviceLogout(request?)`
+
+Clears local session and returns a federated end-session URL for shared device scenarios.
+
+```typescript
+const logoutUrl = await client.prepareSharedDeviceLogout({
+  postLogoutRedirectUri: "https://app.example.com/logout",
+});
 ```
 
 ##### `validateOAuthCallback(callbackUrl, expectedState, prompt?)`
@@ -190,6 +225,46 @@ const registered = await client.registerClient(
   },
   initialAccessToken,
 );
+```
+
+##### `createPushedAuthorizationRequest(params, endpoint?)`
+
+Creates a PAR `request_uri` so sensitive auth parameters (like `code_challenge`) are sent via POST instead of front-channel query strings.
+
+```typescript
+const par = await client.createPushedAuthorizationRequest({
+  response_type: "code",
+  redirect_uri: "https://app.example.com/callback",
+  code_challenge,
+  code_challenge_method: "S256",
+  scope: "openid profile",
+  state,
+  nonce,
+});
+```
+
+##### `buildHostOnlyCookie(name, value, options?)`
+
+Builds a secure host-only cookie string and blocks `Domain` usage to reduce sub-domain leakage risk.
+
+```typescript
+const cookie = client.buildHostOnlyCookie("gh_session", token, {
+  maxAgeSeconds: 300,
+  sameSite: "Strict",
+});
+```
+
+##### `assertAccountLinkingPreconditions(context)`
+
+Verifies both sessions are active before account-linking operations.
+
+```typescript
+client.assertAccountLinkingPreconditions({
+  primarySessionActive: true,
+  secondarySessionActive: true,
+  primarySubject,
+  secondarySubject,
+});
 ```
 
 ### PKCE Functions
@@ -284,6 +359,16 @@ validateFrontChannelLogoutRequest(logoutUrl, {
 });
 ```
 
+##### `createLocationHeaderRedirect(url)`
+
+Builds a redirect response using HTTP `Location` headers instead of HTML meta refresh pages.
+
+```typescript
+const redirect = createLocationHeaderRedirect(
+  "https://app.example.com/callback",
+);
+```
+
 ### Token Functions
 
 ##### `decodeJWT(token)`
@@ -311,6 +396,19 @@ const result = validateToken(decodedJWT, {
 
 console.log(result.valid);
 console.log(result.errors);
+```
+
+##### `validateOidcHashClaims(decodedJWT, options)`
+
+Verifies OIDC `at_hash` and `c_hash` claim bindings to prevent token/code substitution.
+
+```typescript
+const hashResult = await validateOidcHashClaims(decodedIdToken, {
+  accessToken,
+  authorizationCode,
+  requireAtHash: true,
+  requireCHash: true,
+});
 ```
 
 ##### `isTokenExpired(decodedJWT, clockSkewTolerance)`
@@ -408,6 +506,12 @@ interface TokenValidationOptions {
   trustedJkuOrigins?: string[]; // Allowlist of trusted JKU origins
   supportedCriticalHeaders?: string[]; // Allowed JWT crit extensions
   expectedKeyType?: "RSA" | "EC" | "oct"; // Enforce alg/key-type compatibility
+  requiredAcrValues?: string[]; // Required ACR assurance values
+  maxAgeSeconds?: number; // Enforce auth_time freshness from max_age policy
+  enforceUniqueJti?: boolean; // Enable replay protection using jti cache
+  requiredAmrValues?: string[]; // Required authentication methods
+  requirePhishingResistantMfa?: boolean; // Require WebAuthn/FIDO-like amr values
+  requiredCnfJkt?: string; // Enforce cnf.jkt token binding thumbprint
   clockSkewTolerance?: number; // Clock skew tolerance (default: 30s)
 }
 ```
@@ -424,14 +528,19 @@ interface TokenValidationOptions {
 ### JWT Security
 
 - **Algorithm Whitelisting**: Only RS*, HS*, ES\* algorithms allowed
+- **Cryptographic Agility**: Supports EdDSA and configurable allowed algorithms
 - **'none' Algorithm**: Explicitly rejected (critical security check)
-- **Claim Validation**: exp, nbf, iss, aud, nonce
+- **Claim Validation**: exp, nbf, iss, aud, nonce, acr, auth_time, amr, cnf
+- **Replay Protection**: Optional one-time `jti` tracking cache
+- **OIDC Hash Claims**: Supports `at_hash` and `c_hash` verification helpers
 - **Clock Skew Tolerance**: Default 30 seconds (configurable)
 
 ### HTTP Security
 
 - **TLS Enforcement**: HTTPS required (except localhost)
+- **TLS Override Guard**: Blocks `NODE_TLS_REJECT_UNAUTHORIZED=0`
 - **Basic Auth**: RFC 7617 compliant (Base64 encoded)
+- **PAR Support**: Optional pushed authorization requests to reduce front-channel parameter exposure
 - **DPoP Support**: Optional proof-of-possession via `dpopProofFactory`
 - **Header Size Guardrails**: Configurable max authorization header size
 - **Secret Protection**: Never sent in URLs or query params

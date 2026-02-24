@@ -49,8 +49,44 @@ const MAX_CODE_VERIFIER_BYTES = 96;
 const MIN_STATE_OR_NONCE_BYTES = 16;
 const PKCE_CODE_VERIFIER_PATTERN = /^[A-Za-z0-9\-._~]{43,128}$/;
 const MAX_STORED_CODE_VERIFIERS = 512;
-const codeVerifierVault = new Map<string, string>();
+const codeVerifierVault = new Map<string, Uint8Array>();
 const codeVerifierVaultOrder: string[] = [];
+
+function utf8Encode(value: string): Uint8Array {
+  if (typeof TextEncoder === "function") {
+    return new TextEncoder().encode(value);
+  }
+
+  if (typeof Buffer !== "undefined") {
+    return new Uint8Array(Buffer.from(value, "utf8"));
+  }
+
+  const bytes = new Uint8Array(value.length);
+  for (let index = 0; index < value.length; index += 1) {
+    bytes[index] = value.charCodeAt(index) & 0xff;
+  }
+  return bytes;
+}
+
+function utf8Decode(value: Uint8Array): string {
+  if (typeof TextDecoder === "function") {
+    return new TextDecoder("utf-8", { fatal: true }).decode(value);
+  }
+
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(value).toString("utf8");
+  }
+
+  let output = "";
+  for (const byte of value) {
+    output += String.fromCharCode(byte);
+  }
+  return output;
+}
+
+function wipeBytes(value: Uint8Array): void {
+  value.fill(0);
+}
 
 function isCryptoAdapter(value: unknown): value is CryptoAdapter {
   return (
@@ -300,8 +336,9 @@ export async function stashCodeVerifier(codeVerifier: string): Promise<string> {
 
   const cryptoAdapter = await getCryptoAdapter();
   const handle = bufferToBase64Url(await cryptoAdapter.randomBytes(24));
+  const verifierBytes = utf8Encode(normalizedVerifier);
 
-  codeVerifierVault.set(handle, normalizedVerifier);
+  codeVerifierVault.set(handle, verifierBytes);
   codeVerifierVaultOrder.push(handle);
 
   if (codeVerifierVaultOrder.length > MAX_STORED_CODE_VERIFIERS) {
@@ -316,11 +353,14 @@ export async function stashCodeVerifier(codeVerifier: string): Promise<string> {
 
 export function consumeCodeVerifier(handle: string): string {
   const normalizedHandle = handle.trim();
-  const codeVerifier = codeVerifierVault.get(normalizedHandle);
+  const codeVerifierBytes = codeVerifierVault.get(normalizedHandle);
 
-  if (!codeVerifier) {
+  if (!codeVerifierBytes) {
     throw new Error("PKCE verifier handle is invalid or already consumed");
   }
+
+  const codeVerifier = utf8Decode(codeVerifierBytes);
+  wipeBytes(codeVerifierBytes);
 
   codeVerifierVault.delete(normalizedHandle);
 
@@ -330,6 +370,23 @@ export function consumeCodeVerifier(handle: string): string {
   }
 
   return codeVerifier;
+}
+
+export function dropCodeVerifier(handle: string): void {
+  const normalizedHandle = handle.trim();
+  const codeVerifierBytes = codeVerifierVault.get(normalizedHandle);
+
+  if (!codeVerifierBytes) {
+    return;
+  }
+
+  wipeBytes(codeVerifierBytes);
+  codeVerifierVault.delete(normalizedHandle);
+
+  const index = codeVerifierVaultOrder.indexOf(normalizedHandle);
+  if (index >= 0) {
+    codeVerifierVaultOrder.splice(index, 1);
+  }
 }
 
 /**

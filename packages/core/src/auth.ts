@@ -1,7 +1,9 @@
 import type { AuthUrlOptions } from "./types";
 import { createGuardhouseLogger } from "./debug";
 import {
+  enforceNonSpoofableHostname,
   enforceSecureHttpUrl,
+  isUnsafeObjectKey,
   sanitizeUrlForLogs,
   timingSafeEqual,
   validateRedirectUri,
@@ -17,6 +19,7 @@ const ErrorWithCause = Error as unknown as ErrorWithCauseConstructor;
 const RESERVED_AUTH_PARAM_KEYS = new Set([
   "client_id",
   "redirect_uri",
+  "request_uri",
   "response_type",
   "scope",
   "state",
@@ -24,9 +27,14 @@ const RESERVED_AUTH_PARAM_KEYS = new Set([
   "code_challenge_method",
   "nonce",
   "prompt",
+  "acr_values",
+  "ui_locales",
+  "login_hint",
+  "claims",
   "audience",
   "response_mode",
   "max_age",
+  "guardhouse_form_post_csrf",
 ]);
 
 const REDIRECT_LIKE_PARAM_KEYS = new Set([
@@ -46,10 +54,19 @@ const REDIRECT_LIKE_PARAM_KEYS = new Set([
 
 const AUTH_PARAM_KEY_PATTERN = /^[A-Za-z0-9._~-]+$/;
 const STATE_TOKEN_PATTERN = /^[A-Za-z0-9._~-]{16,512}$/;
+const REQUEST_URI_PATTERN = /^[A-Za-z][A-Za-z0-9+.-]*:[^\s]{1,2048}$/;
+const ACR_VALUE_PATTERN = /^[A-Za-z0-9._:/-]{1,128}$/;
+const UI_LOCALE_PATTERN = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/;
+const LOGIN_HINT_PATTERN = /^[^\s<>"'`]{1,256}$/;
+const CLAIMS_KEY_PATTERN = /^[A-Za-z0-9_:.\-]{1,64}$/;
 const MAX_TRACKED_STATE_TOKENS = 1024;
 const MAX_AUTH_EXTRA_PARAM_KEY_LENGTH = 128;
 const MAX_AUTH_EXTRA_PARAM_VALUE_LENGTH = 4096;
 const MAX_STATE_BINDINGS = 1024;
+const MAX_UI_LOCALE_COUNT = 10;
+const MAX_ACR_VALUE_COUNT = 10;
+const MAX_CLAIMS_DEPTH = 5;
+const MAX_CLAIMS_KEYS = 128;
 const SILENT_AUTH_ERROR_CODES = new Set([
   "interaction_required",
   "login_required",
@@ -106,8 +123,192 @@ export interface FrontChannelLogoutValidationOptions {
   expectedSessionId?: string;
 }
 
+export interface RedirectResponse {
+  statusCode: 302;
+  headers: {
+    Location: string;
+    "Cache-Control": string;
+  };
+}
+
 function normalizeParamKey(key: string): string {
   return key.trim().toLowerCase();
+}
+
+function normalizeSpaceDelimitedValues(
+  input: string | string[] | undefined,
+): string[] {
+  if (input === undefined) {
+    return [];
+  }
+
+  if (Array.isArray(input)) {
+    return input
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+  }
+
+  return input
+    .trim()
+    .split(/\s+/)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+function normalizeRequestUri(
+  requestUri: string | undefined,
+): string | undefined {
+  if (requestUri === undefined) {
+    return undefined;
+  }
+
+  const normalizedRequestUri = requestUri.trim();
+  if (!normalizedRequestUri) {
+    return undefined;
+  }
+
+  if (!REQUEST_URI_PATTERN.test(normalizedRequestUri)) {
+    throw new Error("requestUri must be an absolute URI without spaces");
+  }
+
+  return normalizedRequestUri;
+}
+
+function normalizeAcrValues(
+  acrValues: string | string[] | undefined,
+): string | undefined {
+  const values = normalizeSpaceDelimitedValues(acrValues);
+  if (values.length === 0) {
+    return undefined;
+  }
+
+  if (values.length > MAX_ACR_VALUE_COUNT) {
+    throw new Error(
+      `acrValues must contain no more than ${MAX_ACR_VALUE_COUNT} values`,
+    );
+  }
+
+  for (const value of values) {
+    if (!ACR_VALUE_PATTERN.test(value)) {
+      throw new Error(`acrValues contains invalid value: "${value}"`);
+    }
+  }
+
+  return values.join(" ");
+}
+
+function normalizeUiLocales(
+  uiLocales: string | string[] | undefined,
+): string | undefined {
+  const values = normalizeSpaceDelimitedValues(uiLocales);
+  if (values.length === 0) {
+    return undefined;
+  }
+
+  if (values.length > MAX_UI_LOCALE_COUNT) {
+    throw new Error(
+      `uiLocales must contain no more than ${MAX_UI_LOCALE_COUNT} values`,
+    );
+  }
+
+  for (const locale of values) {
+    if (!UI_LOCALE_PATTERN.test(locale)) {
+      throw new Error(`uiLocales contains invalid locale: "${locale}"`);
+    }
+  }
+
+  return values.join(" ");
+}
+
+function normalizeLoginHint(loginHint: string | undefined): string | undefined {
+  if (typeof loginHint !== "string") {
+    return undefined;
+  }
+
+  const normalizedLoginHint = loginHint.trim();
+  if (!normalizedLoginHint) {
+    return undefined;
+  }
+
+  if (!LOGIN_HINT_PATTERN.test(normalizedLoginHint)) {
+    throw new Error("loginHint contains unsafe characters");
+  }
+
+  return normalizedLoginHint;
+}
+
+function scopeContains(scope: string, value: string): boolean {
+  return scope
+    .trim()
+    .split(/\s+/)
+    .some((entry) => entry.toLowerCase() === value.toLowerCase());
+}
+
+function validateClaimsValue(
+  value: unknown,
+  depth: number,
+  state: { keyCount: number },
+): void {
+  if (depth > MAX_CLAIMS_DEPTH) {
+    throw new Error("claims object exceeds maximum depth");
+  }
+
+  if (
+    value === null ||
+    typeof value === "boolean" ||
+    typeof value === "number" ||
+    typeof value === "string"
+  ) {
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    if (value.length > 32) {
+      throw new Error("claims array exceeds maximum size");
+    }
+
+    for (const entry of value) {
+      validateClaimsValue(entry, depth + 1, state);
+    }
+    return;
+  }
+
+  if (typeof value !== "object") {
+    throw new Error("claims contains unsupported value type");
+  }
+
+  for (const [key, entryValue] of Object.entries(value)) {
+    if (!CLAIMS_KEY_PATTERN.test(key)) {
+      throw new Error(`claims key is invalid: "${key}"`);
+    }
+
+    state.keyCount += 1;
+    if (state.keyCount > MAX_CLAIMS_KEYS) {
+      throw new Error("claims object contains too many keys");
+    }
+
+    validateClaimsValue(entryValue, depth + 1, state);
+  }
+}
+
+function normalizeClaimsParameter(claims: unknown): string | undefined {
+  if (claims === undefined) {
+    return undefined;
+  }
+
+  if (claims === null || typeof claims !== "object" || Array.isArray(claims)) {
+    throw new Error("claims must be a JSON object");
+  }
+
+  const state = { keyCount: 0 };
+  validateClaimsValue(claims, 0, state);
+
+  const serialized = JSON.stringify(claims);
+  if (!serialized || serialized.length > 4096) {
+    throw new Error("claims payload exceeds maximum size");
+  }
+
+  return serialized;
 }
 
 function bytesToBase64Url(bytes: Uint8Array): string {
@@ -171,7 +372,10 @@ function sanitizeExtraParams(
   safeParams: Record<string, string | number | null | undefined>;
   blockedKeys: string[];
 } {
-  const safeParams: Record<string, string | number | null | undefined> = {};
+  const safeParams = Object.create(null) as Record<
+    string,
+    string | number | null | undefined
+  >;
   const blockedKeys: string[] = [];
 
   for (const [key, value] of Object.entries(extraParams)) {
@@ -187,6 +391,11 @@ function sanitizeExtraParams(
     }
 
     const normalizedKey = normalizeParamKey(trimmedKey);
+
+    if (isUnsafeObjectKey(trimmedKey)) {
+      blockedKeys.push(key);
+      continue;
+    }
 
     if (RESERVED_AUTH_PARAM_KEYS.has(normalizedKey)) {
       blockedKeys.push(key);
@@ -434,6 +643,20 @@ export function sanitizeAuthorizationUrlForHistory(authUrl: string): string {
   return parsed.toString();
 }
 
+export function createLocationHeaderRedirect(
+  redirectUrl: string,
+): RedirectResponse {
+  const validatedRedirect = validateRedirectUri(redirectUrl).toString();
+
+  return {
+    statusCode: 302,
+    headers: {
+      Location: validatedRedirect,
+      "Cache-Control": "no-store",
+    },
+  };
+}
+
 export function parseOAuthCallbackUrl(
   callbackUrl: string,
 ): OAuthCallbackResult {
@@ -448,8 +671,12 @@ export function parseOAuthCallbackUrl(
   const parsedUrl = new URL(callbackUrl);
   const mergedParams = mergeCallbackParams(parsedUrl);
 
-  const params: Record<string, string> = {};
+  const params = Object.create(null) as Record<string, string>;
   mergedParams.forEach((value, key) => {
+    if (isUnsafeObjectKey(key)) {
+      throw new Error(`OAuth callback contains unsafe parameter key "${key}"`);
+    }
+
     params[key] = value;
   });
 
@@ -525,14 +752,21 @@ export function generateAuthUrl(options: AuthUrlOptions): string {
     authorizationEndpoint,
     clientId,
     redirectUri,
+    requestUri,
     responseType = "code",
     scope = "openid profile email",
+    allowOfflineAccessScope = false,
+    allowAuthorizationWithoutAudience = false,
     debug,
     state,
     codeChallenge,
     codeChallengeMethod = "S256",
     nonce,
     prompt,
+    acrValues,
+    uiLocales,
+    loginHint,
+    claims,
     audience,
     responseMode,
     formPostCsrfToken,
@@ -569,11 +803,17 @@ export function generateAuthUrl(options: AuthUrlOptions): string {
       .toUpperCase();
     const authorityUrl = new URL(authority);
     enforceSecureHttpUrl(authorityUrl, "Authority");
+    enforceNonSpoofableHostname(authorityUrl, "Authority");
     const validatedRedirectUri = validateRedirectUri(redirectUri).toString();
+    const normalizedRequestUri = normalizeRequestUri(requestUri);
 
-    if (isAuthorizationCodeResponseType(responseType) && !codeChallenge) {
+    if (
+      isAuthorizationCodeResponseType(responseType) &&
+      !codeChallenge &&
+      !normalizedRequestUri
+    ) {
       throw new Error(
-        "codeChallenge is required when responseType includes 'code'",
+        "codeChallenge is required when responseType includes 'code' unless requestUri is used",
       );
     }
 
@@ -607,6 +847,18 @@ export function generateAuthUrl(options: AuthUrlOptions): string {
       typeof responseMode === "string" && responseMode.trim() !== ""
         ? responseMode.trim().toLowerCase()
         : undefined;
+    const normalizedAcrValues = normalizeAcrValues(acrValues);
+    const normalizedUiLocales = normalizeUiLocales(uiLocales);
+    const normalizedLoginHint = normalizeLoginHint(loginHint);
+    const normalizedClaims = normalizeClaimsParameter(claims);
+    const normalizedMaxAge =
+      maxAge === undefined
+        ? undefined
+        : Number.isInteger(maxAge) && maxAge >= 0
+          ? maxAge
+          : (() => {
+              throw new Error("maxAge must be a non-negative integer");
+            })();
 
     if (normalizedPrompt) {
       const promptValues = normalizedPrompt.split(/\s+/);
@@ -628,6 +880,12 @@ export function generateAuthUrl(options: AuthUrlOptions): string {
       }
     }
 
+    if (scopeContains(scope, "offline_access") && !allowOfflineAccessScope) {
+      throw new Error(
+        "offline_access scope requires explicit allowOfflineAccessScope=true",
+      );
+    }
+
     const requestedAudience =
       typeof audience === "string" && audience.trim() !== ""
         ? audience.trim()
@@ -636,9 +894,14 @@ export function generateAuthUrl(options: AuthUrlOptions): string {
           ? extraParams.resource.trim()
           : undefined;
 
-    if (isAuthorizationCodeResponseType(responseType) && !requestedAudience) {
+    if (
+      isAuthorizationCodeResponseType(responseType) &&
+      !requestedAudience &&
+      !normalizedRequestUri &&
+      !allowAuthorizationWithoutAudience
+    ) {
       throw new Error(
-        "audience or resource is required to request resource-specific access tokens",
+        "audience or resource is required to request resource-specific access tokens unless requestUri is used or allowAuthorizationWithoutAudience=true",
       );
     }
 
@@ -655,6 +918,7 @@ export function generateAuthUrl(options: AuthUrlOptions): string {
         : undefined,
       redirectUri: sanitizeUrlForLogs(validatedRedirectUri),
       responseType,
+      hasRequestUri: Boolean(normalizedRequestUri),
       hasCodeChallenge: Boolean(codeChallenge),
       scope,
     });
@@ -665,6 +929,7 @@ export function generateAuthUrl(options: AuthUrlOptions): string {
       if (/^https?:\/\//i.test(authorizationEndpoint)) {
         url = new URL(authorizationEndpoint);
         enforceSecureHttpUrl(url, "authorizationEndpoint");
+        enforceNonSpoofableHostname(url, "authorizationEndpoint");
       } else {
         const basePath = authorityUrl.pathname.replace(/\/+$/, "");
         const endpointPath = authorizationEndpoint.replace(/^\/+/, "");
@@ -677,32 +942,48 @@ export function generateAuthUrl(options: AuthUrlOptions): string {
     }
 
     enforceSecureHttpUrl(url, "Authority");
+    enforceNonSpoofableHostname(url, "Authority");
 
     if (!authorizationEndpoint) {
       const basePath = url.pathname.replace(/\/+$/, "");
       url.pathname = `${basePath}/connect/authorize`;
     }
 
-    withNonEmptyParams(url, {
-      client_id: clientId.trim(),
-      redirect_uri: validatedRedirectUri,
-      response_type: responseType,
-      scope,
-      state: normalizedState,
-      code_challenge: codeChallenge,
-      code_challenge_method: codeChallenge
-        ? normalizedCodeChallengeMethod
-        : undefined,
-      nonce: normalizedNonce,
-      prompt: normalizedPrompt,
-      audience: requestedAudience,
-      response_mode: normalizedResponseMode,
-      max_age: maxAge,
-      guardhouse_form_post_csrf:
-        normalizedResponseMode === "form_post"
-          ? formPostCsrfToken?.trim()
+    if (normalizedRequestUri) {
+      withNonEmptyParams(url, {
+        client_id: clientId.trim(),
+        response_type: responseType,
+        state: normalizedState,
+        request_uri: normalizedRequestUri,
+        prompt: normalizedPrompt,
+        response_mode: normalizedResponseMode,
+      });
+    } else {
+      withNonEmptyParams(url, {
+        client_id: clientId.trim(),
+        redirect_uri: validatedRedirectUri,
+        response_type: responseType,
+        scope,
+        state: normalizedState,
+        code_challenge: codeChallenge,
+        code_challenge_method: codeChallenge
+          ? normalizedCodeChallengeMethod
           : undefined,
-    });
+        nonce: normalizedNonce,
+        prompt: normalizedPrompt,
+        acr_values: normalizedAcrValues,
+        ui_locales: normalizedUiLocales,
+        login_hint: normalizedLoginHint,
+        claims: normalizedClaims,
+        audience: requestedAudience,
+        response_mode: normalizedResponseMode,
+        max_age: normalizedMaxAge,
+        guardhouse_form_post_csrf:
+          normalizedResponseMode === "form_post"
+            ? formPostCsrfToken?.trim()
+            : undefined,
+      });
+    }
 
     if (extraParams) {
       const { safeParams, blockedKeys } = sanitizeExtraParams(extraParams);

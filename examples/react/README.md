@@ -23,8 +23,11 @@ cp .env.example .env
 ```env
 VITE_AUTHORITY=https://your-test-identity-server
 VITE_CLIENT_ID=your-client-id
-VITE_REDIRECT_URI=http://localhost:5173
+VITE_REDIRECT_URI=http://localhost:3000
 VITE_SCOPE=openid profile email offline_access
+VITE_AUDIENCE=
+VITE_ALLOW_AUTH_WITHOUT_AUDIENCE=true
+VITE_ALLOW_OFFLINE_ACCESS_SCOPE=true
 VITE_API_BASE_URL=http://localhost:3001
 ```
 
@@ -39,7 +42,7 @@ npm install
 - `npm start` (alias of `vite`)
 - `npm run dev`
 
-App URL: `http://localhost:5173`
+App URL: `http://localhost:3000`
 
 ## Build
 
@@ -52,3 +55,11 @@ npm run preview
 
 The API demo calls `${VITE_API_BASE_URL}/protected` with the access token.
 Run `examples/node` server to test end-to-end.
+
+## Security defaults in this example
+
+- Uses `@guardhouse/react` session storage only; tokens are not stored in `localStorage`.
+- Uses `allowAuthorizationWithoutAudience=true` by default for providers (like OpenIddict defaults) that reject `audience` in authorization requests.
+- If your provider supports resource indicators, set `VITE_AUDIENCE` and optionally set `VITE_ALLOW_AUTH_WITHOUT_AUDIENCE=false`.
+- Keeps `allowOfflineAccessScope=true` when requesting `offline_access`.
+- `VITE_REDIRECT_URI` must exactly match an allowed redirect URI on the client in Guardhouse/OpenIddict.

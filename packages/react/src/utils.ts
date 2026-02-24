@@ -1,20 +1,13 @@
 import { StorageAdapter } from "./types";
 
-export class LocalStorageAdapter implements StorageAdapter {
-  async getItem(key: string): Promise<string | null> {
-    if (typeof window === "undefined") return null;
-    return localStorage.getItem(key);
-  }
+const UNSAFE_QUERY_PARAM_KEYS = new Set([
+  "__proto__",
+  "prototype",
+  "constructor",
+]);
 
-  async setItem(key: string, value: string): Promise<void> {
-    if (typeof window === "undefined") return;
-    localStorage.setItem(key, value);
-  }
-
-  async removeItem(key: string): Promise<void> {
-    if (typeof window === "undefined") return;
-    localStorage.removeItem(key);
-  }
+function isUnsafeQueryParamKey(key: string): boolean {
+  return UNSAFE_QUERY_PARAM_KEYS.has(key.trim().toLowerCase());
 }
 
 export class SessionStorageAdapter implements StorageAdapter {
@@ -51,6 +44,7 @@ export class InMemoryStorageAdapter implements StorageAdapter {
 }
 
 export const StorageKeys = {
+  OIDC_SESSION: "gh_oidc_session",
   ACCESS_TOKEN: "gh_access_token",
   REFRESH_TOKEN: "gh_refresh_token",
   ID_TOKEN: "gh_id_token",
@@ -59,6 +53,10 @@ export const StorageKeys = {
   CODE_VERIFIER: "gh_code_verifier",
   STATE: "gh_state",
   NONCE: "gh_nonce",
+  REQUESTED_SCOPE: "gh_requested_scope",
+  REQUESTED_AUDIENCE: "gh_requested_audience",
+  PROMPT: "gh_prompt",
+  APP_STATE: "gh_app_state",
 };
 
 export function generateRandomString(length: number): string {
@@ -77,14 +75,23 @@ export function generateBase64UrlEncodedString(length: number): string {
 }
 
 export function parseQueryParams(queryString: string): Record<string, string> {
-  const params: Record<string, string> = {};
-  const pairs = queryString.substring(1).split("&");
+  const params = Object.create(null) as Record<string, string>;
 
-  for (const pair of pairs) {
-    const [key, value] = pair.split("=");
-    if (key) {
-      params[decodeURIComponent(key)] = value ? decodeURIComponent(value) : "";
+  if (!queryString) {
+    return params;
+  }
+
+  const search = queryString.startsWith("?")
+    ? queryString.slice(1)
+    : queryString;
+  const searchParams = new URLSearchParams(search);
+
+  for (const [key, value] of searchParams.entries()) {
+    if (isUnsafeQueryParamKey(key)) {
+      continue;
     }
+
+    params[key] = value;
   }
 
   return params;
@@ -99,8 +106,34 @@ export function removeQueryParams(): void {
   searchParams.delete("code");
   searchParams.delete("state");
   searchParams.delete("session_state");
+  searchParams.delete("id_token");
+  searchParams.delete("access_token");
+  searchParams.delete("refresh_token");
+  searchParams.delete("token_type");
+  searchParams.delete("expires_in");
+  searchParams.delete("scope");
   searchParams.delete("error");
   searchParams.delete("error_description");
+
+  const rawHash = url.hash.startsWith("#") ? url.hash.slice(1) : url.hash;
+  if (rawHash.includes("=") || rawHash.includes("&")) {
+    const hashParams = new URLSearchParams(rawHash);
+
+    hashParams.delete("code");
+    hashParams.delete("state");
+    hashParams.delete("session_state");
+    hashParams.delete("id_token");
+    hashParams.delete("access_token");
+    hashParams.delete("refresh_token");
+    hashParams.delete("token_type");
+    hashParams.delete("expires_in");
+    hashParams.delete("scope");
+    hashParams.delete("error");
+    hashParams.delete("error_description");
+
+    const sanitizedHash = hashParams.toString();
+    url.hash = sanitizedHash ? `#${sanitizedHash}` : "";
+  }
 
   window.history.replaceState(window.history.state, "", url.toString());
 }

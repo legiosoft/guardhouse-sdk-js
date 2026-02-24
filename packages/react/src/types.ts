@@ -1,14 +1,32 @@
-import { User as CoreUser } from "@guardhouse/core";
+import type { DPoPProofFactory, User as CoreUser } from "@guardhouse/core";
 
 export interface GuardhouseConfig {
   authority: string;
   clientId: string;
   redirectUri: string;
+  authorizationEndpoint?: string;
+  tokenEndpoint?: string;
+  userInfoEndpoint?: string;
+  introspectionEndpoint?: string;
+  revocationEndpoint?: string;
+  audience?: string;
+  allowAuthorizationWithoutAudience?: boolean;
+  requestUri?: string;
   debug?: boolean;
   onRedirectCallback?: (appState?: AppState) => void;
-  storage?: StorageAdapter;
   scope?: string;
   responseType?: string;
+  allowOfflineAccessScope?: boolean;
+  requestTimeoutMs?: number;
+  discoveryCacheTtlMs?: number;
+  allowScopeNarrowing?: boolean;
+  maxAuthorizationHeaderBytes?: number;
+  maxSilentAuthAttempts?: number;
+  requireUserInteractionForSensitiveOperations?: boolean;
+  allowedPostLogoutRedirectUris?: string[];
+  allowUnsafeHttpMethods?: boolean;
+  requireDpopForAccessTokenRequests?: boolean;
+  dpopProofFactory?: DPoPProofFactory;
   logoutRedirectUri?: string;
 }
 
@@ -31,6 +49,21 @@ export interface TokenData {
   expires_in: number;
   token_type: string;
   scope?: string;
+}
+
+export interface OidcSessionData {
+  accessToken: string;
+  tokenType: string;
+  expiresAt: number;
+  refreshToken?: string;
+  idToken?: string;
+  scope?: string;
+  user: CoreUser;
+  oidc: {
+    issuer: string;
+    audience?: string;
+    sessionState?: string;
+  };
 }
 
 export interface LoginOptions {

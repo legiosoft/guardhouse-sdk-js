@@ -37,8 +37,12 @@ import {
 } from "./auth";
 import { GuardhouseError } from "./config";
 import { createGuardhouseLogger, setGuardhouseDebug } from "./debug";
+import { consumeCodeVerifier, dropCodeVerifier } from "./pkce";
+import { decodeJWT, validateOidcHashClaims } from "./token";
 import {
+  enforceNonSpoofableHostname,
   enforceSecureHttpUrl,
+  isUnsafeObjectKey,
   isLocalDevelopmentHostname,
   sanitizeUrlForLogs,
   timingSafeEqual,
@@ -63,6 +67,33 @@ const RESERVED_TOKEN_BODY_PARAM_KEYS = new Set([
 ]);
 
 const TOKEN_PARAM_KEY_PATTERN = /^[A-Za-z0-9._~-]+$/;
+const REGISTRATION_METADATA_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+const BLOCKED_REGISTRATION_METADATA_KEYS = new Set([
+  "registration_properties",
+  "sdk_version",
+  "environment",
+  "internal_capabilities",
+]);
+const DISCOVERY_ENDPOINT_KEYS = [
+  "authorization_endpoint",
+  "token_endpoint",
+  "userinfo_endpoint",
+  "jwks_uri",
+  "revocation_endpoint",
+  "introspection_endpoint",
+  "registration_endpoint",
+  "end_session_endpoint",
+  "pushed_authorization_request_endpoint",
+] as const;
+const SAFE_HTTP_METHODS = new Set(["GET", "HEAD", "POST"]);
+const ALLOWED_HTTP_METHODS = new Set([
+  "GET",
+  "HEAD",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+]);
 const PKCE_CODE_VERIFIER_PATTERN = /^[A-Za-z0-9\-._~]+$/;
 const DEFAULT_MAX_AUTH_HEADER_BYTES = 8192;
 const DEFAULT_SESSION_STORAGE_KEY = "guardhouse:session:v1";
@@ -70,6 +101,9 @@ const MAX_DPOP_PROOF_LENGTH = 8192;
 const MAX_TOKEN_PARAM_KEY_LENGTH = 128;
 const MAX_TOKEN_PARAM_VALUE_LENGTH = 4096;
 const DEFAULT_MAX_SILENT_AUTH_ATTEMPTS = 3;
+const DEFAULT_DISCOVERY_CACHE_TTL_MS = 5 * 60 * 1000;
+const MAX_DISCOVERY_CACHE_TTL_MS = 60 * 60 * 1000;
+const SAFE_COOKIE_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/;
 const SILENT_AUTH_ERROR_CODES = new Set([
   "interaction_required",
   "login_required",
@@ -84,6 +118,13 @@ export interface RequestOptions {
   token?: string;
   skipAuthHeader?: boolean;
   skipDpopProof?: boolean;
+  cacheMode?:
+    | "default"
+    | "no-store"
+    | "reload"
+    | "no-cache"
+    | "force-cache"
+    | "only-if-cached";
   signal?: AbortSignal;
 }
 
@@ -148,6 +189,36 @@ export interface LogoutRequest {
   idTokenHint?: string;
   state?: string;
   logoutEndpoint?: string;
+  federated?: boolean;
+}
+
+export interface SecureCookieOptions {
+  maxAgeSeconds?: number;
+  path?: string;
+  sameSite?: "Strict" | "Lax" | "None";
+  secure?: boolean;
+  domain?: string;
+}
+
+export interface AccountLinkingContext {
+  primarySessionActive: boolean;
+  secondarySessionActive: boolean;
+  primarySubject: string;
+  secondarySubject: string;
+}
+
+export interface PushedAuthorizationRequestResult {
+  requestUri: string;
+  expiresIn?: number;
+}
+
+export interface HomeRealmDiscoveryResult {
+  emailDomain: string;
+  issuer: string;
+}
+
+export interface PostMessageTarget {
+  postMessage: (message: unknown, targetOrigin: string) => void;
 }
 
 /**
@@ -174,11 +245,16 @@ export class GuardhouseClient {
   private baseURL: string;
   private logger: ReturnType<typeof createGuardhouseLogger>;
   private requestTimeoutMs: number | null;
+  private discoveryCacheTtlMs: number;
   private maxAuthorizationHeaderBytes: number;
   private maxSilentAuthAttempts: number;
   private sessionStorageKey: string;
   private sessionState: SessionState | null;
   private silentAuthAttemptCount: number;
+  private discoveryCache: Map<
+    string,
+    { expiresAt: number; data: Record<string, unknown> }
+  >;
   private endpoints: {
     token: string;
     userInfo: string;
@@ -206,11 +282,26 @@ export class GuardhouseClient {
 
     try {
       enforceSecureHttpUrl(authorityUrl, "Authority");
+      enforceNonSpoofableHostname(authorityUrl, "Authority");
     } catch (error) {
       throw new GuardhouseError(
         error instanceof Error ? error.message : "Invalid authority URL",
         "INSECURE_AUTHORITY",
         { cause: error },
+      );
+    }
+
+    const runtimeWithProcess = globalThis as typeof globalThis & {
+      process?: {
+        env?: {
+          NODE_TLS_REJECT_UNAUTHORIZED?: string;
+        };
+      };
+    };
+    if (runtimeWithProcess.process?.env?.NODE_TLS_REJECT_UNAUTHORIZED === "0") {
+      throw new GuardhouseError(
+        "NODE_TLS_REJECT_UNAUTHORIZED=0 is blocked for security reasons",
+        "INSECURE_TLS_OVERRIDE",
       );
     }
 
@@ -229,6 +320,13 @@ export class GuardhouseClient {
       );
     }
 
+    if (config.requireDpopForAccessTokenRequests && !config.dpopProofFactory) {
+      throw new GuardhouseError(
+        "requireDpopForAccessTokenRequests=true requires dpopProofFactory",
+        "DPOP_REQUIRED",
+      );
+    }
+
     const configuredTimeout = config.requestTimeoutMs ?? 30000;
     if (!Number.isFinite(configuredTimeout) || configuredTimeout < 0) {
       throw new GuardhouseError(
@@ -238,6 +336,21 @@ export class GuardhouseClient {
     }
 
     this.requestTimeoutMs = configuredTimeout === 0 ? null : configuredTimeout;
+    const configuredDiscoveryCacheTtlMs =
+      config.discoveryCacheTtlMs ?? DEFAULT_DISCOVERY_CACHE_TTL_MS;
+
+    if (
+      !Number.isFinite(configuredDiscoveryCacheTtlMs) ||
+      configuredDiscoveryCacheTtlMs < 0 ||
+      configuredDiscoveryCacheTtlMs > MAX_DISCOVERY_CACHE_TTL_MS
+    ) {
+      throw new GuardhouseError(
+        `discoveryCacheTtlMs must be between 0 and ${MAX_DISCOVERY_CACHE_TTL_MS}`,
+        "INVALID_DISCOVERY_CACHE_TTL",
+      );
+    }
+
+    this.discoveryCacheTtlMs = configuredDiscoveryCacheTtlMs;
     this.maxAuthorizationHeaderBytes =
       config.maxAuthorizationHeaderBytes ?? DEFAULT_MAX_AUTH_HEADER_BYTES;
     this.maxSilentAuthAttempts =
@@ -246,6 +359,7 @@ export class GuardhouseClient {
       config.sessionStorageKey ?? DEFAULT_SESSION_STORAGE_KEY;
     this.sessionState = null;
     this.silentAuthAttemptCount = 0;
+    this.discoveryCache = new Map();
 
     this.baseURL = config.authority.replace(/\/+$/, "");
     this.endpoints = {
@@ -266,8 +380,13 @@ export class GuardhouseClient {
       authority: sanitizeUrlForLogs(this.baseURL),
       hasClientSecret: Boolean(config.clientSecret),
       requestTimeoutMs: this.requestTimeoutMs,
+      discoveryCacheTtlMs: this.discoveryCacheTtlMs,
       maxAuthorizationHeaderBytes: this.maxAuthorizationHeaderBytes,
       maxSilentAuthAttempts: this.maxSilentAuthAttempts,
+      allowUnsafeHttpMethods: Boolean(config.allowUnsafeHttpMethods),
+      requireDpopForAccessTokenRequests: Boolean(
+        config.requireDpopForAccessTokenRequests,
+      ),
       allowsHttp: authorityUrl.protocol === "http:",
       localAuthority: isLocalDevelopmentHostname(authorityUrl.hostname),
       hasStorageAdapter: Boolean(config.storage),
@@ -291,7 +410,7 @@ export class GuardhouseClient {
     safeParams: Record<string, string>;
     blockedKeys: string[];
   } {
-    const safeParams: Record<string, string> = {};
+    const safeParams = Object.create(null) as Record<string, string>;
     const blockedKeys: string[] = [];
 
     for (const [rawKey, rawValue] of Object.entries(params)) {
@@ -302,6 +421,11 @@ export class GuardhouseClient {
       }
 
       if (key.length > MAX_TOKEN_PARAM_KEY_LENGTH) {
+        blockedKeys.push(rawKey);
+        continue;
+      }
+
+      if (isUnsafeObjectKey(key)) {
         blockedKeys.push(rawKey);
         continue;
       }
@@ -358,6 +482,160 @@ export class GuardhouseClient {
     }
 
     return normalizedVerifier;
+  }
+
+  private assertAllowedHttpMethod(method: string): void {
+    if (!ALLOWED_HTTP_METHODS.has(method)) {
+      throw new GuardhouseError(
+        `HTTP method "${method}" is not supported`,
+        "INVALID_HTTP_METHOD",
+      );
+    }
+
+    if (!this.config.allowUnsafeHttpMethods && !SAFE_HTTP_METHODS.has(method)) {
+      throw new GuardhouseError(
+        `HTTP method "${method}" is blocked by default to prevent verb tampering; set allowUnsafeHttpMethods=true only if you explicitly require it`,
+        "HTTP_METHOD_NOT_ALLOWED",
+      );
+    }
+  }
+
+  private sanitizeClientRegistrationMetadata(
+    metadata: Record<string, unknown>,
+  ): {
+    safeMetadata: Record<string, unknown>;
+    blockedKeys: string[];
+  } {
+    const safeMetadata = Object.create(null) as Record<string, unknown>;
+    const blockedKeys: string[] = [];
+
+    for (const [rawKey, value] of Object.entries(metadata)) {
+      const key = rawKey.trim();
+
+      if (!key) {
+        continue;
+      }
+
+      const normalizedKey = key.toLowerCase();
+
+      if (
+        isUnsafeObjectKey(key) ||
+        !REGISTRATION_METADATA_KEY_PATTERN.test(key) ||
+        BLOCKED_REGISTRATION_METADATA_KEYS.has(normalizedKey) ||
+        normalizedKey.startsWith("guardhouse_") ||
+        normalizedKey.startsWith("_")
+      ) {
+        blockedKeys.push(rawKey);
+        continue;
+      }
+
+      safeMetadata[key] = value;
+    }
+
+    return {
+      safeMetadata,
+      blockedKeys,
+    };
+  }
+
+  private normalizePostMessageTargetOrigin(targetOrigin: string): string {
+    const normalizedTargetOrigin = this.requireNonEmptyString(
+      targetOrigin,
+      "targetOrigin",
+    );
+
+    if (normalizedTargetOrigin === "*") {
+      throw new GuardhouseError(
+        "postMessage targetOrigin must be an explicit trusted origin",
+        "UNSAFE_POSTMESSAGE_TARGET_ORIGIN",
+      );
+    }
+
+    let parsedTargetOrigin: URL;
+
+    try {
+      parsedTargetOrigin = new URL(normalizedTargetOrigin);
+      enforceSecureHttpUrl(parsedTargetOrigin, "postMessage targetOrigin");
+      enforceNonSpoofableHostname(
+        parsedTargetOrigin,
+        "postMessage targetOrigin",
+      );
+    } catch (error) {
+      throw new GuardhouseError(
+        "postMessage targetOrigin must be a valid http/https origin",
+        "UNSAFE_POSTMESSAGE_TARGET_ORIGIN",
+        { cause: error },
+      );
+    }
+
+    return parsedTargetOrigin.origin;
+  }
+
+  private assertTrustedDiscoveryMetadata(
+    discoveryData: Record<string, unknown>,
+    authorityUrl: URL,
+  ): void {
+    const issuer = discoveryData["issuer"];
+
+    if (typeof issuer === "string" && issuer.trim() !== "") {
+      try {
+        const issuerUrl = new URL(issuer);
+        enforceSecureHttpUrl(issuerUrl, "Discovery issuer");
+        enforceNonSpoofableHostname(issuerUrl, "Discovery issuer");
+
+        if (issuerUrl.origin !== authorityUrl.origin) {
+          throw new GuardhouseError(
+            "Discovery issuer origin does not match configured authority",
+            "DISCOVERY_ISSUER_MISMATCH",
+          );
+        }
+      } catch (error) {
+        if (error instanceof GuardhouseError) {
+          throw error;
+        }
+
+        throw new GuardhouseError(
+          "Discovery issuer is invalid",
+          "DISCOVERY_ERROR",
+          { cause: error },
+        );
+      }
+    }
+
+    for (const key of DISCOVERY_ENDPOINT_KEYS) {
+      const endpointValue = discoveryData[key];
+
+      if (endpointValue === undefined || endpointValue === null) {
+        continue;
+      }
+
+      if (typeof endpointValue !== "string" || endpointValue.trim() === "") {
+        throw new GuardhouseError(
+          `Discovery metadata field "${key}" must be a non-empty string when present`,
+          "DISCOVERY_ERROR",
+        );
+      }
+
+      let endpointUrl: URL;
+      try {
+        endpointUrl = new URL(endpointValue);
+        enforceSecureHttpUrl(endpointUrl, `Discovery ${key}`);
+        enforceNonSpoofableHostname(endpointUrl, `Discovery ${key}`);
+      } catch (error) {
+        throw new GuardhouseError(
+          `Discovery metadata field "${key}" is invalid`,
+          "DISCOVERY_ERROR",
+          { cause: error },
+        );
+      }
+
+      if (endpointUrl.origin !== authorityUrl.origin) {
+        throw new GuardhouseError(
+          `Discovery metadata field "${key}" must remain on the configured authority origin`,
+          "DISCOVERY_ENDPOINT_ORIGIN_MISMATCH",
+        );
+      }
+    }
   }
 
   private createRequestAbortContext(signal?: AbortSignal): {
@@ -492,6 +770,34 @@ export class GuardhouseClient {
     this.silentAuthAttemptCount = 0;
   }
 
+  private maybeClearSensitiveCallbackUrl(
+    callbackUrl: string,
+    sanitizedUrl: string,
+  ): void {
+    const hasFragment = callbackUrl.includes("#");
+
+    if (!hasFragment || sanitizedUrl === callbackUrl) {
+      return;
+    }
+
+    const runtime = globalThis as typeof globalThis & {
+      history?: {
+        replaceState?: (data: unknown, unused: string, url?: string) => void;
+      };
+    };
+
+    const replaceState = runtime.history?.replaceState;
+    if (typeof replaceState !== "function") {
+      return;
+    }
+
+    try {
+      replaceState.call(runtime.history, null, "", sanitizedUrl);
+    } catch {
+      // noop
+    }
+  }
+
   private async cacheSessionState(tokenResponse: TokenResponse): Promise<void> {
     const sessionState = this.buildSessionStateFromTokenResponse(tokenResponse);
     this.sessionState = sessionState;
@@ -618,6 +924,27 @@ export class GuardhouseClient {
     prompt?: string,
   ): Promise<ReturnType<typeof parseOAuthCallbackUrl>> {
     const callback = parseOAuthCallbackUrl(callbackUrl);
+    this.maybeClearSensitiveCallbackUrl(callbackUrl, callback.sanitizedUrl);
+
+    if (callback.idToken) {
+      const decodedIdToken = decodeJWT(callback.idToken, {
+        debug: this.config.debug,
+      });
+      const hashValidation = await validateOidcHashClaims(decodedIdToken, {
+        accessToken: callback.accessToken,
+        authorizationCode: callback.code,
+        requireAtHash: Boolean(callback.accessToken),
+        requireCHash: Boolean(callback.code),
+        debug: this.config.debug,
+      });
+
+      if (!hashValidation.valid) {
+        throw new GuardhouseError(
+          "OIDC hash claim validation failed for callback tokens",
+          "OIDC_HASH_VALIDATION_FAILED",
+        );
+      }
+    }
 
     if (callback.error) {
       const normalizedPrompt = prompt?.trim().toLowerCase();
@@ -905,6 +1232,7 @@ export class GuardhouseClient {
   }> {
     const url = this.buildRequestUrl(endpoint);
     const method = (options.method || "GET").toUpperCase();
+    this.assertAllowedHttpMethod(method);
 
     this.logger.debug("HTTP request", {
       method,
@@ -918,6 +1246,17 @@ export class GuardhouseClient {
       options.token,
       Boolean(options.skipDpopProof),
     );
+
+    if (
+      options.token &&
+      this.config.requireDpopForAccessTokenRequests &&
+      !dpopProof
+    ) {
+      throw new GuardhouseError(
+        "DPoP proof is required for access-token authenticated requests",
+        "DPOP_REQUIRED",
+      );
+    }
 
     if (!headers.has("Content-Type")) {
       headers.set("Content-Type", "application/json");
@@ -972,6 +1311,7 @@ export class GuardhouseClient {
         method,
         headers,
         body: options.body,
+        cache: options.cacheMode,
         signal: abortContext.signal ?? options.signal,
       });
 
@@ -983,34 +1323,21 @@ export class GuardhouseClient {
 
       if (!response.ok) {
         const errorData = await this.parseErrorResponse(response);
-        let errorMessage =
-          errorData.error_description ||
-          errorData.error ||
-          `Request failed with status ${response.status}`;
-
-        if (
-          errorData.errors &&
-          Array.isArray(errorData.errors) &&
-          errorData.errors.length > 0
-        ) {
-          const error = errorData.errors[0];
-          if (error.message) {
-            errorMessage = error.message;
-          } else if (typeof error === "string") {
-            errorMessage = error;
-          }
-        }
+        const errorCode =
+          typeof errorData.error === "string"
+            ? errorData.error
+            : "server_error";
+        const errorMessage =
+          typeof errorData.error === "string"
+            ? `Request failed (${errorCode})`
+            : `Request failed with status ${response.status}`;
 
         this.logger.error("HTTP request failed", {
           status: response.status,
           statusText: response.statusText,
-          errorCode: errorData.error,
+          errorCode,
         });
-        throw new GuardhouseError(
-          errorMessage,
-          errorData.error,
-          response.status,
-        );
+        throw new GuardhouseError(errorMessage, errorCode, response.status);
       }
 
       let data: unknown = null;
@@ -1064,11 +1391,9 @@ export class GuardhouseClient {
         url: sanitizeUrlForLogs(url),
         error,
       });
-      throw new GuardhouseError(
-        error instanceof Error ? error.message : "Network error",
-        "NETWORK_ERROR",
-        { cause: error },
-      );
+      throw new GuardhouseError("Network request failed", "NETWORK_ERROR", {
+        cause: error,
+      });
     } finally {
       abortContext.cleanup();
     }
@@ -1215,6 +1540,27 @@ export class GuardhouseClient {
     const tokenResponse = response.data as TokenResponse;
     const requestedScope = params.scope ?? this.config.scope;
     this.assertNoScopeEscalation(requestedScope, tokenResponse.scope);
+
+    if (tokenResponse.id_token) {
+      const decodedIdToken = decodeJWT(tokenResponse.id_token, {
+        debug: this.config.debug,
+      });
+      const hashValidation = await validateOidcHashClaims(decodedIdToken, {
+        accessToken: tokenResponse.access_token,
+        authorizationCode: normalizedCode,
+        requireAtHash: true,
+        requireCHash: false,
+        debug: this.config.debug,
+      });
+
+      if (!hashValidation.valid) {
+        throw new GuardhouseError(
+          "OIDC hash claim validation failed for token response",
+          "OIDC_HASH_VALIDATION_FAILED",
+        );
+      }
+    }
+
     await this.cacheSessionState(tokenResponse);
     this.resetSilentAuthAttemptCounter();
 
@@ -1225,6 +1571,33 @@ export class GuardhouseClient {
     });
 
     return tokenResponse;
+  }
+
+  async exchangeCodeForTokensUsingHandle(
+    code: string,
+    codeVerifierHandle: string,
+    redirectUri: string,
+    params: Record<string, string> = {},
+  ): Promise<TokenResponse> {
+    const normalizedHandle = this.requireNonEmptyString(
+      codeVerifierHandle,
+      "codeVerifierHandle",
+    );
+
+    let verifier = "";
+
+    try {
+      verifier = consumeCodeVerifier(normalizedHandle);
+      return await this.exchangeCodeForTokens(
+        code,
+        verifier,
+        redirectUri,
+        params,
+      );
+    } finally {
+      verifier = "";
+      dropCodeVerifier(normalizedHandle);
+    }
   }
 
   /**
@@ -1285,6 +1658,26 @@ export class GuardhouseClient {
       const tokenResponse = response.data as TokenResponse;
       const requestedScope = params.scope ?? this.config.scope;
       this.assertNoScopeEscalation(requestedScope, tokenResponse.scope);
+
+      if (tokenResponse.id_token) {
+        const decodedIdToken = decodeJWT(tokenResponse.id_token, {
+          debug: this.config.debug,
+        });
+        const hashValidation = await validateOidcHashClaims(decodedIdToken, {
+          accessToken: tokenResponse.access_token,
+          requireAtHash: true,
+          requireCHash: false,
+          debug: this.config.debug,
+        });
+
+        if (!hashValidation.valid) {
+          throw new GuardhouseError(
+            "OIDC hash claim validation failed for refreshed token response",
+            "OIDC_HASH_VALIDATION_FAILED",
+          );
+        }
+      }
+
       await this.cacheSessionState(tokenResponse);
       this.resetSilentAuthAttemptCounter();
 
@@ -1471,6 +1864,207 @@ export class GuardhouseClient {
     return attributes;
   }
 
+  buildHostOnlyCookie(
+    name: string,
+    value: string,
+    options: SecureCookieOptions = {},
+  ): string {
+    const normalizedName = this.requireNonEmptyString(name, "cookie name");
+    const normalizedValue = this.requireNonEmptyString(value, "cookie value");
+
+    if (!SAFE_COOKIE_NAME_PATTERN.test(normalizedName)) {
+      throw new GuardhouseError(
+        "cookie name contains invalid characters",
+        "INVALID_COOKIE_NAME",
+      );
+    }
+
+    if (typeof options.domain === "string" && options.domain.trim() !== "") {
+      throw new GuardhouseError(
+        "Domain attribute is not allowed for SDK-managed cookies; use host-only cookies",
+        "UNSAFE_COOKIE_DOMAIN",
+      );
+    }
+
+    const secure = options.secure ?? true;
+    const sameSite = options.sameSite ?? "Strict";
+    const path = options.path?.trim() || "/";
+
+    const attributes = [
+      `${normalizedName}=${encodeURIComponent(normalizedValue)}`,
+      `Path=${path}`,
+      `SameSite=${sameSite}`,
+    ];
+
+    if (secure) {
+      attributes.push("Secure");
+    }
+
+    if (
+      options.maxAgeSeconds !== undefined &&
+      Number.isInteger(options.maxAgeSeconds) &&
+      options.maxAgeSeconds >= 0
+    ) {
+      attributes.push(`Max-Age=${options.maxAgeSeconds}`);
+    }
+
+    return attributes.join("; ");
+  }
+
+  assertAccountLinkingPreconditions(context: AccountLinkingContext): void {
+    this.assertRecentUserInteraction("Account linking");
+
+    if (!context.primarySessionActive || !context.secondarySessionActive) {
+      throw new GuardhouseError(
+        "Both accounts must have active authenticated sessions before linking",
+        "ACCOUNT_LINKING_REQUIRES_TWO_ACTIVE_SESSIONS",
+      );
+    }
+
+    const primarySubject = this.requireNonEmptyString(
+      context.primarySubject,
+      "primarySubject",
+    );
+    const secondarySubject = this.requireNonEmptyString(
+      context.secondarySubject,
+      "secondarySubject",
+    );
+
+    if (timingSafeEqual(primarySubject, secondarySubject)) {
+      throw new GuardhouseError(
+        "Account linking subjects must be distinct identities",
+        "INVALID_ACCOUNT_LINKING_SUBJECTS",
+      );
+    }
+  }
+
+  resolveHomeRealmIssuer(
+    loginHint: string,
+    trustedIssuersByDomain: Record<string, string>,
+  ): HomeRealmDiscoveryResult {
+    const normalizedLoginHint = this.requireNonEmptyString(
+      loginHint,
+      "loginHint",
+    );
+    const atIndex = normalizedLoginHint.lastIndexOf("@");
+
+    if (atIndex <= 0 || atIndex === normalizedLoginHint.length - 1) {
+      throw new GuardhouseError(
+        "loginHint must be a valid email address",
+        "INVALID_LOGIN_HINT",
+      );
+    }
+
+    const domain = normalizedLoginHint.slice(atIndex + 1).toLowerCase();
+    const trustedIssuer = trustedIssuersByDomain[domain];
+
+    if (!trustedIssuer) {
+      throw new GuardhouseError(
+        `No trusted issuer is configured for domain ${domain}`,
+        "UNTRUSTED_HOME_REALM_DOMAIN",
+      );
+    }
+
+    let issuerUrl: URL;
+    try {
+      issuerUrl = new URL(trustedIssuer);
+      enforceSecureHttpUrl(issuerUrl, "Home realm issuer");
+      enforceNonSpoofableHostname(issuerUrl, "Home realm issuer");
+    } catch (error) {
+      throw new GuardhouseError(
+        "Configured home realm issuer URL is invalid",
+        "INVALID_HOME_REALM_ISSUER",
+        { cause: error },
+      );
+    }
+
+    return {
+      emailDomain: domain,
+      issuer: issuerUrl.toString(),
+    };
+  }
+
+  async createPushedAuthorizationRequest(
+    params: Record<string, string>,
+    parEndpoint = "/connect/par",
+  ): Promise<PushedAuthorizationRequestResult> {
+    if (!params || typeof params !== "object" || Array.isArray(params)) {
+      throw new GuardhouseError("params must be an object", "INVALID_REQUEST");
+    }
+
+    const body = new URLSearchParams();
+
+    for (const [key, value] of Object.entries(params)) {
+      const normalizedKey = key.trim();
+      const normalizedValue = value.trim();
+
+      if (!normalizedKey || !normalizedValue) {
+        continue;
+      }
+
+      if (isUnsafeObjectKey(normalizedKey)) {
+        throw new GuardhouseError(
+          `Invalid PAR parameter: ${normalizedKey}`,
+          "INVALID_REQUEST",
+        );
+      }
+
+      if (
+        normalizedKey.length > MAX_TOKEN_PARAM_KEY_LENGTH ||
+        normalizedValue.length > MAX_TOKEN_PARAM_VALUE_LENGTH ||
+        !TOKEN_PARAM_KEY_PATTERN.test(normalizedKey)
+      ) {
+        throw new GuardhouseError(
+          `Invalid PAR parameter: ${normalizedKey}`,
+          "INVALID_REQUEST",
+        );
+      }
+
+      body.set(normalizedKey, normalizedValue);
+    }
+
+    if (!this.config.clientSecret && !body.has("client_id")) {
+      body.set("client_id", this.config.clientId);
+    }
+
+    const response = await this.fetch(parEndpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: body.toString(),
+      skipDpopProof: true,
+    });
+
+    const data = response.data as {
+      request_uri?: string;
+      expires_in?: number;
+    };
+
+    if (
+      typeof data?.request_uri !== "string" ||
+      data.request_uri.trim() === ""
+    ) {
+      throw new GuardhouseError(
+        "PAR response does not include request_uri",
+        "PAR_ERROR",
+      );
+    }
+
+    if (/\s/.test(data.request_uri)) {
+      throw new GuardhouseError(
+        "PAR response contains invalid request_uri",
+        "PAR_ERROR",
+      );
+    }
+
+    return {
+      requestUri: data.request_uri,
+      expiresIn:
+        typeof data.expires_in === "number" ? data.expires_in : undefined,
+    };
+  }
+
   buildLogoutUrl(request: LogoutRequest = {}): string {
     const logoutEndpoint = request.logoutEndpoint || "/connect/endsession";
     const logoutUrl = new URL(this.buildRequestUrl(logoutEndpoint));
@@ -1501,7 +2095,22 @@ export class GuardhouseClient {
       logoutUrl.searchParams.set("state", request.state);
     }
 
+    if (request.federated) {
+      logoutUrl.searchParams.set("federated", "true");
+    }
+
     return logoutUrl.toString();
+  }
+
+  async prepareSharedDeviceLogout(
+    request: LogoutRequest = {},
+  ): Promise<string> {
+    await this.clearSessionState();
+
+    return this.buildLogoutUrl({
+      ...request,
+      federated: request.federated ?? true,
+    });
   }
 
   async discoverOpenIdConfiguration(
@@ -1509,6 +2118,7 @@ export class GuardhouseClient {
   ): Promise<Record<string, unknown>> {
     const discoveryUrl = new URL(this.buildRequestUrl(discoveryEndpoint));
     const authorityUrl = new URL(this.baseURL);
+    const cacheKey = discoveryUrl.toString();
 
     if (discoveryUrl.origin !== authorityUrl.origin) {
       throw new GuardhouseError(
@@ -1517,10 +2127,26 @@ export class GuardhouseClient {
       );
     }
 
+    if (this.discoveryCacheTtlMs > 0) {
+      const cachedEntry = this.discoveryCache.get(cacheKey);
+      if (cachedEntry) {
+        if (cachedEntry.expiresAt > Date.now()) {
+          return { ...cachedEntry.data };
+        }
+
+        this.discoveryCache.delete(cacheKey);
+      }
+    }
+
     const response = await this.fetch(discoveryUrl.toString(), {
       method: "GET",
       skipAuthHeader: true,
       skipDpopProof: true,
+      cacheMode: "no-store",
+      headers: {
+        "Cache-Control": "no-store",
+        Pragma: "no-cache",
+      },
     });
 
     if (!response.data || typeof response.data !== "object") {
@@ -1530,7 +2156,20 @@ export class GuardhouseClient {
       );
     }
 
-    return response.data as Record<string, unknown>;
+    const discoveryData = {
+      ...(response.data as Record<string, unknown>),
+    };
+
+    this.assertTrustedDiscoveryMetadata(discoveryData, authorityUrl);
+
+    if (this.discoveryCacheTtlMs > 0) {
+      this.discoveryCache.set(cacheKey, {
+        expiresAt: Date.now() + this.discoveryCacheTtlMs,
+        data: discoveryData,
+      });
+    }
+
+    return { ...discoveryData };
   }
 
   openAuthorizationPopup(
@@ -1566,6 +2205,24 @@ export class GuardhouseClient {
     return popup;
   }
 
+  postMessageToPopup(
+    targetWindow: PostMessageTarget | null | undefined,
+    message: unknown,
+    targetOrigin: string,
+  ): void {
+    if (!targetWindow || typeof targetWindow.postMessage !== "function") {
+      throw new GuardhouseError(
+        "targetWindow must expose a postMessage function",
+        "POPUP_UNAVAILABLE",
+      );
+    }
+
+    const normalizedTargetOrigin =
+      this.normalizePostMessageTargetOrigin(targetOrigin);
+
+    targetWindow.postMessage(message, normalizedTargetOrigin);
+  }
+
   async registerClient(
     metadata: Record<string, unknown>,
     initialAccessToken: string,
@@ -1585,7 +2242,16 @@ export class GuardhouseClient {
       "initialAccessToken",
     );
 
-    const redirectUris = metadata["redirect_uris"];
+    const { safeMetadata, blockedKeys } =
+      this.sanitizeClientRegistrationMetadata(metadata);
+
+    if (blockedKeys.length > 0) {
+      this.logger.warn("Ignoring unsafe client metadata keys", {
+        blockedKeys,
+      });
+    }
+
+    const redirectUris = safeMetadata["redirect_uris"];
     if (Array.isArray(redirectUris)) {
       for (const redirectUri of redirectUris) {
         if (typeof redirectUri !== "string") {
@@ -1603,7 +2269,7 @@ export class GuardhouseClient {
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(metadata),
+      body: JSON.stringify(safeMetadata),
       token: normalizedInitialAccessToken,
     });
 

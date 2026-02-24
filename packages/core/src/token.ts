@@ -37,11 +37,24 @@ export interface JWTPayload {
   picture?: string;
   iss?: string;
   aud?: string | string[];
+  azp?: string;
+  acr?: string;
+  amr?: string[];
+  auth_time?: number;
+  at_hash?: string;
+  c_hash?: string;
   exp?: number;
   nbf?: number;
   iat?: number;
   jti?: string;
   nonce?: string;
+  sid?: string;
+  cnf?: {
+    jkt?: string;
+    [key: string]: unknown;
+  };
+  profile?: Record<string, unknown>;
+  address?: Record<string, unknown>;
   roles?: string[];
   scopes?: string[];
   [key: string]: any;
@@ -68,7 +81,16 @@ export interface TokenValidationResult {
   notBeforeValid: boolean;
   issuerValid: boolean;
   audienceValid: boolean;
+  azpValid: boolean;
+  kidValid: boolean;
+  jwkMetadataValid: boolean;
   nonceValid: boolean;
+  acrValid: boolean;
+  authTimeValid: boolean;
+  amrValid: boolean;
+  jtiValid: boolean;
+  cnfValid: boolean;
+  nestedClaimsTrusted: boolean;
   errors: string[];
 }
 
@@ -101,14 +123,239 @@ const ALLOWED_ALGORITHMS: string[] = [
   "ES256",
   "ES384",
   "ES512",
+  "EdDSA",
 ];
 
 const BASE64_URL_SEGMENT_PATTERN = /^[A-Za-z0-9_-]+$/;
 const MAX_JWT_LENGTH = 8192;
 const MAX_JWT_SEGMENT_LENGTH = 4096;
 const MAX_JWT_DEPTH = 16;
+const MAX_TRACKED_JTI = 4096;
+const PHISHING_RESISTANT_AMR_VALUES = new Set([
+  "hwk",
+  "fido",
+  "fido2",
+  "webauthn",
+]);
+const consumedJtiSet = new Set<string>();
+const consumedJtiQueue: string[] = [];
 
-export type ExpectedJwkKeyType = "RSA" | "EC" | "oct";
+export type ExpectedJwkKeyType = "RSA" | "EC" | "oct" | "OKP";
+
+export interface JwkMetadata {
+  kid?: string;
+  kty?: string;
+  use?: string;
+  alg?: string;
+  key_ops?: string[];
+  [key: string]: unknown;
+}
+
+export interface JwkMetadataValidationOptions {
+  tokenAlgorithm: string;
+  expectedKid?: string;
+  expectedKeyType?: ExpectedJwkKeyType;
+  requireUseSig?: boolean;
+  requireAlgMatch?: boolean;
+}
+
+export interface JwkMetadataValidationResult {
+  valid: boolean;
+  kidValid: boolean;
+  keyTypeValid: boolean;
+  useValid: boolean;
+  algValid: boolean;
+  keyOpsValid: boolean;
+  errors: string[];
+}
+
+function normalizeJwkKeyType(rawKeyType: unknown): ExpectedJwkKeyType | null {
+  if (typeof rawKeyType !== "string") {
+    return null;
+  }
+
+  const normalized = rawKeyType.trim();
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized === "oct") {
+    return "oct";
+  }
+
+  const upper = normalized.toUpperCase();
+  if (upper === "RSA" || upper === "EC" || upper === "OKP") {
+    return upper;
+  }
+
+  return null;
+}
+
+export function validateJwkMetadataForToken(
+  jwk: JwkMetadata,
+  options: JwkMetadataValidationOptions,
+): JwkMetadataValidationResult {
+  const {
+    tokenAlgorithm,
+    expectedKid,
+    expectedKeyType,
+    requireUseSig = true,
+    requireAlgMatch = true,
+  } = options;
+
+  const normalizedTokenAlgorithm = tokenAlgorithm.trim();
+  if (!normalizedTokenAlgorithm) {
+    throw new Error("tokenAlgorithm is required for JWK metadata validation");
+  }
+
+  const result: JwkMetadataValidationResult = {
+    valid: true,
+    kidValid: true,
+    keyTypeValid: true,
+    useValid: true,
+    algValid: true,
+    keyOpsValid: true,
+    errors: [],
+  };
+
+  if (!jwk || typeof jwk !== "object" || Array.isArray(jwk)) {
+    return {
+      ...result,
+      valid: false,
+      kidValid: false,
+      keyTypeValid: false,
+      useValid: false,
+      algValid: false,
+      keyOpsValid: false,
+      errors: ["JWK metadata must be a JSON object"],
+    };
+  }
+
+  const normalizedExpectedKid =
+    typeof expectedKid === "string" && expectedKid.trim() !== ""
+      ? expectedKid.trim()
+      : undefined;
+  const normalizedJwkKid =
+    typeof jwk.kid === "string" && jwk.kid.trim() !== ""
+      ? jwk.kid.trim()
+      : undefined;
+
+  if (normalizedExpectedKid) {
+    if (
+      !normalizedJwkKid ||
+      !timingSafeEqual(normalizedJwkKid, normalizedExpectedKid)
+    ) {
+      result.valid = false;
+      result.kidValid = false;
+      result.errors.push("JWK kid does not match JWT kid");
+    }
+  }
+
+  const normalizedJwkKeyType = normalizeJwkKeyType(jwk.kty);
+  if (!normalizedJwkKeyType) {
+    result.valid = false;
+    result.keyTypeValid = false;
+    result.errors.push("JWK kty is missing or unsupported");
+  } else {
+    if (expectedKeyType && normalizedJwkKeyType !== expectedKeyType) {
+      result.valid = false;
+      result.keyTypeValid = false;
+      result.errors.push(
+        `JWK kty "${normalizedJwkKeyType}" does not match expected "${expectedKeyType}"`,
+      );
+    }
+
+    if (
+      !isAlgorithmCompatibleWithKeyType(
+        normalizedTokenAlgorithm,
+        normalizedJwkKeyType,
+      )
+    ) {
+      result.valid = false;
+      result.keyTypeValid = false;
+      result.errors.push(
+        `JWK key type "${normalizedJwkKeyType}" is not compatible with JWT algorithm "${normalizedTokenAlgorithm}"`,
+      );
+    }
+  }
+
+  const normalizedUse =
+    typeof jwk.use === "string" ? jwk.use.trim().toLowerCase() : "";
+
+  if (requireUseSig) {
+    if (normalizedUse !== "sig") {
+      result.valid = false;
+      result.useValid = false;
+      result.errors.push('JWK use must be "sig" for signature validation');
+    }
+  } else if (normalizedUse && normalizedUse !== "sig") {
+    result.valid = false;
+    result.useValid = false;
+    result.errors.push('JWK use must be "sig" when provided');
+  }
+
+  const normalizedJwkAlg = typeof jwk.alg === "string" ? jwk.alg.trim() : "";
+
+  if (requireAlgMatch) {
+    if (
+      !normalizedJwkAlg ||
+      !timingSafeEqual(normalizedJwkAlg, normalizedTokenAlgorithm)
+    ) {
+      result.valid = false;
+      result.algValid = false;
+      result.errors.push(
+        `JWK alg must exactly match JWT algorithm "${normalizedTokenAlgorithm}"`,
+      );
+    }
+  } else if (
+    normalizedJwkAlg &&
+    !timingSafeEqual(normalizedJwkAlg, normalizedTokenAlgorithm)
+  ) {
+    result.valid = false;
+    result.algValid = false;
+    result.errors.push(
+      `JWK alg "${normalizedJwkAlg}" does not match JWT algorithm "${normalizedTokenAlgorithm}"`,
+    );
+  }
+
+  if (jwk.key_ops !== undefined) {
+    if (
+      !Array.isArray(jwk.key_ops) ||
+      jwk.key_ops.some((operation) => typeof operation !== "string")
+    ) {
+      result.valid = false;
+      result.keyOpsValid = false;
+      result.errors.push("JWK key_ops must be an array of strings");
+    } else {
+      const operations = jwk.key_ops.map((operation) =>
+        operation.trim().toLowerCase(),
+      );
+
+      if (!operations.includes("verify")) {
+        result.valid = false;
+        result.keyOpsValid = false;
+        result.errors.push(
+          'JWK key_ops must include "verify" for signature validation',
+        );
+      }
+
+      if (
+        operations.includes("encrypt") ||
+        operations.includes("decrypt") ||
+        operations.includes("wrapkey") ||
+        operations.includes("unwrapkey")
+      ) {
+        result.valid = false;
+        result.keyOpsValid = false;
+        result.errors.push(
+          "JWK key_ops contains encryption operations and is unsafe for signature validation",
+        );
+      }
+    }
+  }
+
+  return result;
+}
 
 function isAlgorithmCompatibleWithKeyType(
   algorithm: string,
@@ -120,6 +367,10 @@ function isAlgorithmCompatibleWithKeyType(
 
   if (keyType === "EC") {
     return algorithm.startsWith("ES");
+  }
+
+  if (keyType === "OKP") {
+    return algorithm === "EdDSA";
   }
 
   return algorithm.startsWith("HS");
@@ -148,6 +399,266 @@ function assertJsonDepthWithinLimit(
   for (const item of Object.values(value)) {
     assertJsonDepthWithinLimit(item, maxDepth, currentDepth + 1);
   }
+}
+
+function consumeJti(jti: string): boolean {
+  if (consumedJtiSet.has(jti)) {
+    return false;
+  }
+
+  consumedJtiSet.add(jti);
+  consumedJtiQueue.push(jti);
+
+  if (consumedJtiQueue.length > MAX_TRACKED_JTI) {
+    const evicted = consumedJtiQueue.shift();
+    if (evicted) {
+      consumedJtiSet.delete(evicted);
+    }
+  }
+
+  return true;
+}
+
+type NodeRequireFunction = (moduleId: string) => any;
+
+function tryLoadNodeCrypto(): any | null {
+  try {
+    const dynamicRequire = Function(
+      "return typeof require !== 'undefined' ? require : null;",
+    )() as NodeRequireFunction | null;
+
+    if (typeof dynamicRequire !== "function") {
+      return null;
+    }
+
+    return dynamicRequire("crypto");
+  } catch {
+    return null;
+  }
+}
+
+function base64UrlEncodeBytes(bytes: Uint8Array): string {
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(bytes)
+      .toString("base64")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=/g, "");
+  }
+
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+
+  if (typeof btoa !== "function") {
+    throw new Error("Base64 encoder is unavailable in this environment");
+  }
+
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+}
+
+function resolveHashBitLength(algorithm: string): 256 | 384 | 512 | null {
+  if (algorithm === "EdDSA") {
+    return 512;
+  }
+
+  if (algorithm.endsWith("256")) {
+    return 256;
+  }
+
+  if (algorithm.endsWith("384")) {
+    return 384;
+  }
+
+  if (algorithm.endsWith("512")) {
+    return 512;
+  }
+
+  return null;
+}
+
+async function digestBytes(
+  input: string,
+  hashBitLength: 256 | 384 | 512,
+): Promise<Uint8Array> {
+  const subtle = globalThis.crypto?.subtle;
+  const data =
+    typeof TextEncoder === "function"
+      ? new TextEncoder().encode(input)
+      : typeof Buffer !== "undefined"
+        ? new Uint8Array(Buffer.from(input, "utf8"))
+        : (() => {
+            throw new Error("UTF-8 encoder is unavailable in this environment");
+          })();
+
+  if (subtle) {
+    const digest = await subtle.digest(`SHA-${hashBitLength}`, data);
+    return new Uint8Array(digest);
+  }
+
+  const nodeCrypto = tryLoadNodeCrypto();
+  if (nodeCrypto) {
+    const hash = nodeCrypto.createHash(`sha${hashBitLength}`);
+    hash.update(Buffer.from(data));
+    return new Uint8Array(hash.digest());
+  }
+
+  throw new Error("Cryptographic hash function is unavailable");
+}
+
+async function computeOidcHashClaim(
+  value: string,
+  algorithm: string,
+): Promise<string> {
+  const hashBitLength = resolveHashBitLength(algorithm);
+
+  if (!hashBitLength) {
+    throw new Error(
+      `Unsupported signing algorithm for hash validation: ${algorithm}`,
+    );
+  }
+
+  const digest = await digestBytes(value, hashBitLength);
+  const leftHalf = digest.slice(0, digest.length / 2);
+
+  return base64UrlEncodeBytes(leftHalf);
+}
+
+export function resetJtiReplayCache(): void {
+  consumedJtiSet.clear();
+  consumedJtiQueue.length = 0;
+}
+
+function timingSafeIncludes(candidates: string[], expected: string): boolean {
+  let match = false;
+
+  for (const candidate of candidates) {
+    if (timingSafeEqual(candidate, expected)) {
+      match = true;
+    }
+  }
+
+  return match;
+}
+
+function collectNestedClaimPaths(
+  value: Record<string, unknown>,
+  basePath: string,
+  depth = 0,
+): string[] {
+  if (depth > 4) {
+    return [basePath];
+  }
+
+  const paths: string[] = [];
+
+  for (const [key, entryValue] of Object.entries(value)) {
+    const path = `${basePath}.${key}`;
+
+    if (
+      entryValue &&
+      typeof entryValue === "object" &&
+      !Array.isArray(entryValue)
+    ) {
+      paths.push(
+        ...collectNestedClaimPaths(
+          entryValue as Record<string, unknown>,
+          path,
+          depth + 1,
+        ),
+      );
+      continue;
+    }
+
+    paths.push(path);
+  }
+
+  return paths;
+}
+
+export async function validateOidcHashClaims(
+  decodedJWT: DecodedJWT,
+  options: OidcHashValidationOptions = {},
+): Promise<OidcHashValidationResult> {
+  const {
+    accessToken,
+    authorizationCode,
+    requireAtHash = false,
+    requireCHash = false,
+    debug,
+  } = options;
+
+  const logger = createGuardhouseLogger("Token", debug);
+  const result: OidcHashValidationResult = {
+    valid: true,
+    atHashValid: true,
+    cHashValid: true,
+    errors: [],
+  };
+
+  const algorithm = decodedJWT.header.alg;
+
+  if (typeof decodedJWT.payload.at_hash === "string") {
+    if (!accessToken) {
+      result.valid = false;
+      result.atHashValid = false;
+      result.errors.push("at_hash is present but access token is missing");
+    } else {
+      const expectedAtHash = await computeOidcHashClaim(accessToken, algorithm);
+
+      if (!timingSafeEqual(expectedAtHash, decodedJWT.payload.at_hash)) {
+        result.valid = false;
+        result.atHashValid = false;
+        result.errors.push("at_hash validation failed");
+      }
+    }
+  } else if (decodedJWT.payload.at_hash !== undefined) {
+    result.valid = false;
+    result.atHashValid = false;
+    result.errors.push("id_token at_hash claim must be a string");
+  } else if (requireAtHash) {
+    result.valid = false;
+    result.atHashValid = false;
+    result.errors.push("id_token is missing required at_hash claim");
+  }
+
+  if (typeof decodedJWT.payload.c_hash === "string") {
+    if (!authorizationCode) {
+      result.valid = false;
+      result.cHashValid = false;
+      result.errors.push("c_hash is present but authorization code is missing");
+    } else {
+      const expectedCHash = await computeOidcHashClaim(
+        authorizationCode,
+        algorithm,
+      );
+
+      if (!timingSafeEqual(expectedCHash, decodedJWT.payload.c_hash)) {
+        result.valid = false;
+        result.cHashValid = false;
+        result.errors.push("c_hash validation failed");
+      }
+    }
+  } else if (decodedJWT.payload.c_hash !== undefined) {
+    result.valid = false;
+    result.cHashValid = false;
+    result.errors.push("id_token c_hash claim must be a string");
+  } else if (requireCHash) {
+    result.valid = false;
+    result.cHashValid = false;
+    result.errors.push("id_token is missing required c_hash claim");
+  }
+
+  if (!result.valid) {
+    logger.warn("OIDC hash claim validation failed", {
+      atHashValid: result.atHashValid,
+      cHashValid: result.cHashValid,
+      errorCount: result.errors.length,
+    });
+  }
+
+  return result;
 }
 
 /**
@@ -185,6 +696,13 @@ export function decodeJWT(
   }
 
   const parts = token.split(".");
+
+  if (parts.length === 5) {
+    logger.error("Token decode failed: encrypted JWT (JWE) is not supported");
+    throw new Error(
+      "Encrypted JWT (JWE) is not supported by decodeJWT; decrypt before validation",
+    );
+  }
 
   if (parts.length !== 3) {
     logger.error("Token decode failed: invalid JWT structure", {
@@ -266,13 +784,41 @@ export function decodeJWT(
 export interface TokenValidationOptions {
   issuer?: string;
   audience?: string;
+  clientId?: string;
   nonce?: string;
   signatureVerified?: boolean;
   trustedJkuOrigins?: string[];
   supportedCriticalHeaders?: string[];
+  allowedAlgorithms?: string[];
+  expectedKid?: string;
+  allowedKids?: string[];
+  resolvedJwk?: JwkMetadata;
   expectedKeyType?: ExpectedJwkKeyType;
+  requiredAcrValues?: string[];
+  maxAgeSeconds?: number;
+  requiredAmrValues?: string[];
+  requirePhishingResistantMfa?: boolean;
+  requiredCnfJkt?: string;
+  enforceUniqueJti?: boolean;
+  trustedNestedClaimPaths?: string[];
+  allowUntrustedNestedClaims?: boolean;
   clockSkewTolerance?: number;
   debug?: boolean;
+}
+
+export interface OidcHashValidationOptions {
+  accessToken?: string;
+  authorizationCode?: string;
+  requireAtHash?: boolean;
+  requireCHash?: boolean;
+  debug?: boolean;
+}
+
+export interface OidcHashValidationResult {
+  valid: boolean;
+  atHashValid: boolean;
+  cHashValid: boolean;
+  errors: string[];
 }
 
 export function validateToken(
@@ -282,11 +828,24 @@ export function validateToken(
   const {
     issuer,
     audience,
+    clientId,
     nonce,
     signatureVerified = false,
     trustedJkuOrigins = [],
     supportedCriticalHeaders = [],
+    allowedAlgorithms,
+    expectedKid,
+    allowedKids = [],
+    resolvedJwk,
     expectedKeyType,
+    requiredAcrValues = [],
+    maxAgeSeconds,
+    requiredAmrValues = [],
+    requirePhishingResistantMfa = false,
+    requiredCnfJkt,
+    enforceUniqueJti = false,
+    trustedNestedClaimPaths = [],
+    allowUntrustedNestedClaims = false,
     clockSkewTolerance = 30, // 30 seconds default skew tolerance
     debug,
   } = options;
@@ -295,7 +854,20 @@ export function validateToken(
     throw new Error("clockSkewTolerance must be a non-negative number");
   }
 
+  if (
+    maxAgeSeconds !== undefined &&
+    (!Number.isFinite(maxAgeSeconds) || maxAgeSeconds < 0)
+  ) {
+    throw new Error("maxAgeSeconds must be a non-negative number");
+  }
+
   const logger = createGuardhouseLogger("Token", debug);
+  const allowedAlgorithmSet = new Set(
+    (allowedAlgorithms && allowedAlgorithms.length > 0
+      ? allowedAlgorithms
+      : ALLOWED_ALGORITHMS
+    ).map((value) => value.trim()),
+  );
 
   const result: TokenValidationResult = {
     valid: true,
@@ -304,7 +876,16 @@ export function validateToken(
     notBeforeValid: true,
     issuerValid: true,
     audienceValid: true,
+    azpValid: true,
+    kidValid: true,
+    jwkMetadataValid: true,
     nonceValid: true,
+    acrValid: true,
+    authTimeValid: true,
+    amrValid: true,
+    jtiValid: true,
+    cnfValid: true,
+    nestedClaimsTrusted: true,
     errors: [],
   };
 
@@ -320,6 +901,7 @@ export function validateToken(
 
   const algorithm = decodedJWT.header.alg;
   const jkuHeader = decodedJWT.header.jku;
+  const kidHeader = decodedJWT.header.kid;
 
   if (typeof algorithm !== "string" || algorithm.trim() === "") {
     result.valid = false;
@@ -336,7 +918,7 @@ export function validateToken(
   }
 
   // SECURITY: Check algorithm whitelist
-  if (!ALLOWED_ALGORITHMS.includes(algorithm)) {
+  if (!allowedAlgorithmSet.has(algorithm)) {
     result.valid = false;
     result.errors.push(`JWT algorithm "${algorithm}" is not allowed`);
     logger.warn(`Unknown JWT algorithm: ${algorithm}`);
@@ -354,6 +936,48 @@ export function validateToken(
       algorithm,
       expectedKeyType,
     });
+  }
+
+  if (resolvedJwk) {
+    const jwkMetadataValidation = validateJwkMetadataForToken(resolvedJwk, {
+      tokenAlgorithm: algorithm,
+      expectedKid: typeof kidHeader === "string" ? kidHeader.trim() : undefined,
+      expectedKeyType,
+    });
+
+    if (!jwkMetadataValidation.valid) {
+      result.jwkMetadataValid = false;
+      result.valid = false;
+      result.errors.push(
+        ...jwkMetadataValidation.errors.map(
+          (error) => `JWK metadata validation failed: ${error}`,
+        ),
+      );
+    }
+  }
+
+  if (expectedKid !== undefined || allowedKids.length > 0) {
+    const normalizedKid =
+      typeof kidHeader === "string" ? kidHeader.trim() : undefined;
+
+    if (!normalizedKid) {
+      result.kidValid = false;
+      result.valid = false;
+      result.errors.push("JWT kid validation failed");
+    } else {
+      const normalizedAllowedKids =
+        allowedKids.length > 0
+          ? allowedKids.map((value) => value.trim()).filter((value) => value)
+          : expectedKid
+            ? [expectedKid.trim()]
+            : [];
+
+      if (!timingSafeIncludes(normalizedAllowedKids, normalizedKid)) {
+        result.kidValid = false;
+        result.valid = false;
+        result.errors.push("JWT kid validation failed");
+      }
+    }
   }
 
   if (typeof jkuHeader === "string" && jkuHeader.trim() !== "") {
@@ -413,6 +1037,126 @@ export function validateToken(
           `JWT crit header contains unsupported parameter "${criticalHeader}"`,
         );
       }
+    }
+  }
+
+  if (requiredAcrValues.length > 0) {
+    const normalizedRequiredAcrValues = requiredAcrValues
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0);
+    const tokenAcr =
+      typeof decodedJWT.payload.acr === "string"
+        ? decodedJWT.payload.acr.trim()
+        : undefined;
+
+    if (!tokenAcr) {
+      result.acrValid = false;
+      result.valid = false;
+      result.errors.push("Token is missing required acr claim");
+    } else if (!normalizedRequiredAcrValues.includes(tokenAcr)) {
+      result.acrValid = false;
+      result.valid = false;
+      result.errors.push(
+        `Token acr "${tokenAcr}" does not satisfy required ACR values`,
+      );
+    }
+  }
+
+  if (enforceUniqueJti) {
+    const tokenJti =
+      typeof decodedJWT.payload.jti === "string"
+        ? decodedJWT.payload.jti.trim()
+        : undefined;
+
+    if (!tokenJti) {
+      result.jtiValid = false;
+      result.valid = false;
+      result.errors.push("Token is missing required jti claim");
+    } else if (!consumeJti(tokenJti)) {
+      result.jtiValid = false;
+      result.valid = false;
+      result.errors.push("Token jti has already been used");
+    }
+  }
+
+  if (maxAgeSeconds !== undefined) {
+    if (typeof decodedJWT.payload.auth_time !== "number") {
+      result.authTimeValid = false;
+      result.valid = false;
+      result.errors.push(
+        "Token is missing auth_time claim required for max_age validation",
+      );
+    } else if (
+      now - decodedJWT.payload.auth_time >
+      maxAgeSeconds + clockSkewTolerance
+    ) {
+      result.authTimeValid = false;
+      result.valid = false;
+      result.errors.push("Token auth_time exceeds allowed max_age");
+    }
+  }
+
+  const hasAmrRequirement =
+    requiredAmrValues.length > 0 || requirePhishingResistantMfa;
+  if (hasAmrRequirement) {
+    const amrValues = decodedJWT.payload.amr;
+
+    if (
+      !Array.isArray(amrValues) ||
+      amrValues.some((value) => typeof value !== "string")
+    ) {
+      result.amrValid = false;
+      result.valid = false;
+      result.errors.push("Token amr claim must be an array of strings");
+    } else {
+      const normalizedAmrValues = amrValues.map((value) => value.trim());
+
+      for (const requiredValue of requiredAmrValues) {
+        const normalizedRequiredValue = requiredValue.trim();
+
+        if (
+          normalizedRequiredValue &&
+          !normalizedAmrValues.includes(normalizedRequiredValue)
+        ) {
+          result.amrValid = false;
+          result.valid = false;
+          result.errors.push(
+            `Token amr claim does not include required value "${normalizedRequiredValue}"`,
+          );
+        }
+      }
+
+      if (requirePhishingResistantMfa) {
+        const hasPhishingResistantAmr = normalizedAmrValues.some((value) =>
+          PHISHING_RESISTANT_AMR_VALUES.has(value.toLowerCase()),
+        );
+
+        if (!hasPhishingResistantAmr) {
+          result.amrValid = false;
+          result.valid = false;
+          result.errors.push(
+            "Token amr claim does not indicate phishing-resistant MFA",
+          );
+        }
+      }
+    }
+  }
+
+  if (requiredCnfJkt) {
+    const expectedJkt = requiredCnfJkt.trim();
+    const actualJkt =
+      typeof decodedJWT.payload.cnf?.jkt === "string"
+        ? decodedJWT.payload.cnf.jkt.trim()
+        : "";
+
+    if (!actualJkt) {
+      result.cnfValid = false;
+      result.valid = false;
+      result.errors.push("Token is missing cnf.jkt claim");
+    } else if (!timingSafeEqual(actualJkt, expectedJkt)) {
+      result.cnfValid = false;
+      result.valid = false;
+      result.errors.push("Token cnf.jkt does not match expected binding");
     }
   }
 
@@ -491,6 +1235,40 @@ export function validateToken(
     }
   }
 
+  const expectedAuthorizedParty =
+    typeof clientId === "string" && clientId.trim() !== ""
+      ? clientId.trim()
+      : audience;
+
+  const tokenAudience = decodedJWT.payload.aud;
+  const tokenAudienceArray = Array.isArray(tokenAudience)
+    ? tokenAudience
+    : tokenAudience
+      ? [tokenAudience]
+      : [];
+  const tokenAzp =
+    typeof decodedJWT.payload.azp === "string"
+      ? decodedJWT.payload.azp.trim()
+      : undefined;
+
+  if (tokenAudienceArray.length > 1 && !tokenAzp) {
+    result.azpValid = false;
+    result.valid = false;
+    result.errors.push(
+      "Token with multiple audiences must include an azp claim",
+    );
+  }
+
+  if (tokenAzp && expectedAuthorizedParty) {
+    if (!timingSafeEqual(tokenAzp, expectedAuthorizedParty)) {
+      result.azpValid = false;
+      result.valid = false;
+      result.errors.push(
+        `Token azp "${tokenAzp}" does not match expected client identifier`,
+      );
+    }
+  }
+
   // SECURITY: Validate nonce (replay protection)
   if (nonce) {
     if (!decodedJWT.payload.nonce) {
@@ -507,6 +1285,55 @@ export function validateToken(
       logger.warn(
         `Nonce mismatch: expected ${nonce}, got ${decodedJWT.payload.nonce}`,
       );
+    }
+  }
+
+  const nestedClaimPaths: string[] = [];
+
+  if (
+    decodedJWT.payload.profile &&
+    typeof decodedJWT.payload.profile === "object" &&
+    !Array.isArray(decodedJWT.payload.profile)
+  ) {
+    nestedClaimPaths.push(
+      ...collectNestedClaimPaths(
+        decodedJWT.payload.profile as Record<string, unknown>,
+        "profile",
+      ),
+    );
+  }
+
+  if (
+    decodedJWT.payload.address &&
+    typeof decodedJWT.payload.address === "object" &&
+    !Array.isArray(decodedJWT.payload.address)
+  ) {
+    nestedClaimPaths.push(
+      ...collectNestedClaimPaths(
+        decodedJWT.payload.address as Record<string, unknown>,
+        "address",
+      ),
+    );
+  }
+
+  if (nestedClaimPaths.length > 0) {
+    const normalizedTrustedPaths = trustedNestedClaimPaths
+      .map((path) => path.trim())
+      .filter((path) => path.length > 0);
+
+    if (allowUntrustedNestedClaims) {
+      result.nestedClaimsTrusted = false;
+      logger.warn(
+        "Nested profile/address claims present and explicitly allowed without trust mapping",
+      );
+    } else {
+      for (const claimPath of nestedClaimPaths) {
+        if (!timingSafeIncludes(normalizedTrustedPaths, claimPath)) {
+          result.nestedClaimsTrusted = false;
+          result.valid = false;
+          result.errors.push(`Nested claim path is not trusted: ${claimPath}`);
+        }
+      }
     }
   }
 

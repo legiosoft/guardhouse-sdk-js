@@ -11,17 +11,19 @@ import { useEffect, useMemo, useState } from "react";
 import { appConfig } from "./config";
 
 function Home() {
-  const { user, isAuthenticated, isLoading, loginWithRedirect, logout } =
+  const { user, isAuthenticated, isLoading, error, loginWithRedirect, logout } =
     useAuth();
 
   const handleLogin = () => {
-    loginWithRedirect({
+    void loginWithRedirect({
       appState: { returnTo: "/" },
+      scope: appConfig.scope,
+      audience: appConfig.audience,
     });
   };
 
   const handleLogout = () => {
-    logout({ returnTo: window.location.origin });
+    void logout({ returnTo: window.location.origin });
   };
 
   if (isLoading) {
@@ -36,6 +38,12 @@ function Home() {
   return (
     <div className="card">
       <h1>Welcome to Guardhouse React Example</h1>
+
+      {error && (
+        <div className="error">
+          <strong>Error:</strong> {error}
+        </div>
+      )}
 
       {isAuthenticated && user ? (
         <>
@@ -271,6 +279,11 @@ function App() {
       clientId: appConfig.clientId,
       redirectUri: appConfig.redirectUri,
       scope: appConfig.scope,
+      audience: appConfig.audience,
+      allowAuthorizationWithoutAudience:
+        appConfig.allowAuthorizationWithoutAudience,
+      allowOfflineAccessScope: appConfig.allowOfflineAccessScope,
+      logoutRedirectUri: window.location.origin,
       onRedirectCallback: (appState?: AppState) => {
         console.log("Redirect callback:", appState);
       },
