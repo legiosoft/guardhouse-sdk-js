@@ -23,7 +23,7 @@ function Home() {
   };
 
   const handleLogout = () => {
-    void logout({ returnTo: window.location.origin });
+    void logout();
   };
 
   if (isLoading) {
@@ -283,7 +283,7 @@ function App() {
       allowAuthorizationWithoutAudience:
         appConfig.allowAuthorizationWithoutAudience,
       allowOfflineAccessScope: appConfig.allowOfflineAccessScope,
-      logoutRedirectUri: window.location.origin,
+      logoutRedirectUri: appConfig.postLogoutRedirectUri,
       onRedirectCallback: (appState?: AppState) => {
         console.log("Redirect callback:", appState);
       },

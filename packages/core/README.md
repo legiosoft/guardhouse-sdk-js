@@ -42,6 +42,10 @@ const authUrl = await generateAuthUrl({
   redirectUri: "https://myapp.com/callback",
   responseType: "code",
   scope: "openid profile offline_access",
+  allowOfflineAccessScope: true,
+  // For providers that reject audience on /authorize (for example some
+  // OpenIddict configurations), omit audience and set:
+  // allowAuthorizationWithoutAudience: true,
   state: await generateState(),
   nonce: await generateNonce(),
   acrValues: ["phrh"],
@@ -146,7 +150,7 @@ await client.assertAuthorizationPageClickjackingProtection();
 
 ##### `buildLogoutUrl(request)`
 
-Builds a validated logout URL and enforces safe `post_logout_redirect_uri` handling.
+Builds a validated logout URL (defaults to `/connect/logout`) and enforces safe `post_logout_redirect_uri` handling.
 
 ```typescript
 const logoutUrl = client.buildLogoutUrl({
@@ -158,7 +162,7 @@ const logoutUrl = client.buildLogoutUrl({
 
 ##### `discoverOpenIdConfiguration(endpoint?)`
 
-Fetches OIDC discovery metadata from the configured authority origin.
+Fetches OIDC discovery metadata from the configured authority origin using `Cache-Control: no-store` and validates critical endpoint origins.
 
 ```typescript
 const metadata = await client.discoverOpenIdConfiguration();
@@ -182,9 +186,21 @@ Opens auth popup with `noopener,noreferrer` protections and resets `window.opene
 client.openAuthorizationPopup(authUrl);
 ```
 
+##### `postMessageToPopup(targetWindow, message, targetOrigin)`
+
+Posts messages to popup windows only when `targetOrigin` is an explicit trusted origin (wildcard `*` is rejected).
+
+```typescript
+client.postMessageToPopup(
+  popupRef,
+  { type: "guardhouse_auth_result" },
+  "https://app.example.com",
+);
+```
+
 ##### `prepareSharedDeviceLogout(request?)`
 
-Clears local session and returns a federated end-session URL for shared device scenarios.
+Clears local session and returns a federated logout URL for shared device scenarios.
 
 ```typescript
 const logoutUrl = await client.prepareSharedDeviceLogout({
@@ -471,6 +487,9 @@ interface GuardhouseConfig {
   redirectUri?: string; // Optional: OAuth callback URI
   scope?: string; // Optional: Default scopes
   requestTimeoutMs?: number; // Optional: Request timeout in milliseconds (default: 30000)
+  discoveryCacheTtlMs?: number; // Optional: Discovery cache TTL in milliseconds
+  allowUnsafeHttpMethods?: boolean; // Optional: Allow PUT/PATCH/DELETE in fetch (default: false)
+  requireDpopForAccessTokenRequests?: boolean; // Optional: Require DPoP when access token is used
   allowScopeNarrowing?: boolean; // Optional: Allow missing granted scopes (default: false)
   maxAuthorizationHeaderBytes?: number; // Optional: Authorization/DPoP header size limit (default: 8192)
   maxSilentAuthAttempts?: number; // Optional: Silent auth retry ceiling (default: 3)
@@ -501,17 +520,23 @@ const client = new GuardhouseClient({
 interface TokenValidationOptions {
   issuer?: string; // Expected issuer
   audience?: string; // Expected audience
+  clientId?: string; // Expected OAuth client_id for azp checks
   nonce?: string; // Expected nonce
   signatureVerified?: boolean; // Must be true after cryptographic verification
   trustedJkuOrigins?: string[]; // Allowlist of trusted JKU origins
   supportedCriticalHeaders?: string[]; // Allowed JWT crit extensions
-  expectedKeyType?: "RSA" | "EC" | "oct"; // Enforce alg/key-type compatibility
+  expectedKid?: string; // Expected JWT kid header
+  allowedKids?: string[]; // Optional allowlist of kid values
+  resolvedJwk?: JwkMetadata; // Optional resolved JWK metadata for use/alg/key_ops checks
+  expectedKeyType?: "RSA" | "EC" | "oct" | "OKP"; // Enforce alg/key-type compatibility
   requiredAcrValues?: string[]; // Required ACR assurance values
   maxAgeSeconds?: number; // Enforce auth_time freshness from max_age policy
   enforceUniqueJti?: boolean; // Enable replay protection using jti cache
   requiredAmrValues?: string[]; // Required authentication methods
   requirePhishingResistantMfa?: boolean; // Require WebAuthn/FIDO-like amr values
   requiredCnfJkt?: string; // Enforce cnf.jkt token binding thumbprint
+  trustedNestedClaimPaths?: string[]; // Allowlist of nested claim paths
+  allowUntrustedNestedClaims?: boolean; // Disable strict nested-claim trust policy
   clockSkewTolerance?: number; // Clock skew tolerance (default: 30s)
 }
 ```
@@ -539,10 +564,13 @@ interface TokenValidationOptions {
 
 - **TLS Enforcement**: HTTPS required (except localhost)
 - **TLS Override Guard**: Blocks `NODE_TLS_REJECT_UNAUTHORIZED=0`
+- **Unicode Hostname Hardening**: Blocks IDN/punycode hostnames to reduce homograph spoofing risk
 - **Basic Auth**: RFC 7617 compliant (Base64 encoded)
 - **PAR Support**: Optional pushed authorization requests to reduce front-channel parameter exposure
 - **DPoP Support**: Optional proof-of-possession via `dpopProofFactory`
+- **Discovery Hardening**: Fetches discovery with no-store cache controls and validates endpoint origin consistency
 - **Header Size Guardrails**: Configurable max authorization header size
+- **Method Tampering Guardrails**: PUT/PATCH/DELETE blocked unless `allowUnsafeHttpMethods=true`
 - **Secret Protection**: Never sent in URLs or query params
 - **SSL Verification**: Can't be disabled (enforced by fetch API)
 

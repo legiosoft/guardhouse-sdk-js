@@ -4,26 +4,12 @@ const runtimeOrigin =
     ? window.location.origin
     : defaultOrigin;
 
-function normalizeRedirectUri(rawValue: string): string {
-  const value = rawValue.trim();
-
-  try {
-    const parsed = new URL(value);
-    const normalizedPath =
-      parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/+$/, "");
-
-    return `${parsed.origin}${normalizedPath}${parsed.search}${parsed.hash}`;
-  } catch {
-    return value.replace(/\/+$/, "");
-  }
-}
-
 const authority =
   import.meta.env.VITE_AUTHORITY?.trim() || "https://auth.example.com";
 const clientId = import.meta.env.VITE_CLIENT_ID?.trim() || "your-client-id";
-const redirectUri = normalizeRedirectUri(
-  import.meta.env.VITE_REDIRECT_URI?.trim() || runtimeOrigin,
-);
+const redirectUri = import.meta.env.VITE_REDIRECT_URI?.trim() || runtimeOrigin;
+const postLogoutRedirectUri =
+  import.meta.env.VITE_POST_LOGOUT_REDIRECT_URI?.trim() || redirectUri;
 const apiBaseUrl =
   import.meta.env.VITE_API_BASE_URL?.trim().replace(/\/+$/, "") ||
   "http://localhost:3001";
@@ -45,6 +31,7 @@ export const appConfig = {
   authority,
   clientId,
   redirectUri,
+  postLogoutRedirectUri,
   scope,
   audience,
   allowAuthorizationWithoutAudience,

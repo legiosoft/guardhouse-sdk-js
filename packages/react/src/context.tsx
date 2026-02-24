@@ -729,7 +729,10 @@ export function GuardhouseProvider({
   const logout = useCallback(
     async (options?: LogoutOptions) => {
       const returnTo =
-        options?.returnTo || config.logoutRedirectUri || window.location.origin;
+        options?.returnTo ||
+        config.logoutRedirectUri ||
+        config.redirectUri ||
+        window.location.origin;
 
       logger.info("Starting logout flow", {
         returnTo,
