@@ -27,11 +27,12 @@
  * const authUrl = await generateAuthUrl({
  *   authority: client.config.authority,
  *   clientId: client.config.clientId,
- *   redirectUri: 'myapp://callback',
+ *   redirectUri: 'https://app.example.com/callback',
  *   codeChallenge,
  *   responseType: 'code',
  *   state: await generateState(),
  *   nonce: await generateNonce(),
+ *   audience: 'https://api.example.com',
  * });
  *
  * // Exchange code for tokens
@@ -44,17 +45,46 @@
 
 // Public API exports
 export { GuardhouseClient } from "./client";
-export type { GuardhouseConfig, GuardhouseError } from "./config";
+export type {
+  GuardhouseConfig,
+  GuardhouseError,
+  DPoPProofContext,
+  DPoPProofFactory,
+} from "./config";
 export type { User, AuthUrlOptions } from "./types";
 export type {
   TokenResponse,
   UserInfoResponse,
   IntrospectionResponse,
+  AuthorizationPageProtectionResult,
+  LogoutRequest,
+  SessionState,
 } from "./client";
-export { generateAuthUrl } from "./auth";
+export {
+  consumeStateBinding,
+  generateAuthUrl,
+  isSilentAuthenticationError,
+  parseOAuthCallbackUrl,
+  sanitizeAuthorizationUrlForHistory,
+  sanitizeOAuthCallbackUrl,
+  stashExpectedState,
+  validateFormPostCsrfToken,
+  validateFrontChannelLogoutRequest,
+  validateAndConsumeState,
+} from "./auth";
+export type {
+  FrontChannelLogoutValidationOptions,
+  OAuthCallbackResult,
+} from "./auth";
 
 // PKCE exports
-export { generatePKCE, generateState, generateNonce } from "./pkce";
+export {
+  consumeCodeVerifier,
+  generatePKCE,
+  generateState,
+  generateNonce,
+  stashCodeVerifier,
+} from "./pkce";
 export type { PKCECodePair, PKCEOptions } from "./pkce";
 
 // Crypto exports
@@ -85,6 +115,7 @@ export type {
   JWTPayload,
   JWTHeader,
   DecodedJWT,
+  ExpectedJwkKeyType,
   TokenValidationResult,
   TokenValidationOptions,
 } from "./token";

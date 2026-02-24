@@ -28,6 +28,7 @@
  */
 
 import { createGuardhouseLogger } from "./debug";
+import { timingSafeEqual } from "./security";
 
 export interface JWTPayload {
   sub?: string;
@@ -50,6 +51,9 @@ export interface JWTHeader {
   alg: string;
   typ?: string;
   kid?: string;
+  jku?: string;
+  crit?: string[];
+  [key: string]: unknown;
 }
 
 export interface DecodedJWT {
@@ -99,6 +103,53 @@ const ALLOWED_ALGORITHMS: string[] = [
   "ES512",
 ];
 
+const BASE64_URL_SEGMENT_PATTERN = /^[A-Za-z0-9_-]+$/;
+const MAX_JWT_LENGTH = 8192;
+const MAX_JWT_SEGMENT_LENGTH = 4096;
+const MAX_JWT_DEPTH = 16;
+
+export type ExpectedJwkKeyType = "RSA" | "EC" | "oct";
+
+function isAlgorithmCompatibleWithKeyType(
+  algorithm: string,
+  keyType: ExpectedJwkKeyType,
+): boolean {
+  if (keyType === "RSA") {
+    return algorithm.startsWith("RS");
+  }
+
+  if (keyType === "EC") {
+    return algorithm.startsWith("ES");
+  }
+
+  return algorithm.startsWith("HS");
+}
+
+function assertJsonDepthWithinLimit(
+  value: unknown,
+  maxDepth: number,
+  currentDepth = 0,
+): void {
+  if (currentDepth > maxDepth) {
+    throw new Error("JWT JSON structure exceeds maximum nesting depth");
+  }
+
+  if (value === null || typeof value !== "object") {
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      assertJsonDepthWithinLimit(item, maxDepth, currentDepth + 1);
+    }
+    return;
+  }
+
+  for (const item of Object.values(value)) {
+    assertJsonDepthWithinLimit(item, maxDepth, currentDepth + 1);
+  }
+}
+
 /**
  * Decode JWT token (header + payload)
  *
@@ -125,6 +176,14 @@ export function decodeJWT(
     throw new Error("Token must be a non-empty string");
   }
 
+  if (token.length > MAX_JWT_LENGTH) {
+    logger.error("Token decode failed: token exceeds maximum length", {
+      tokenLength: token.length,
+      maxLength: MAX_JWT_LENGTH,
+    });
+    throw new Error("JWT exceeds maximum supported length");
+  }
+
   const parts = token.split(".");
 
   if (parts.length !== 3) {
@@ -134,9 +193,40 @@ export function decodeJWT(
     throw new Error("Invalid JWT format. Expected 3 parts separated by dots");
   }
 
+  const [headerPart, payloadPart, signaturePart] = parts;
+
+  if (!signaturePart) {
+    logger.error("Token decode failed: missing JWS signature part");
+    throw new Error("Invalid JWT format. Token must contain a signature part");
+  }
+
+  if (
+    headerPart.length > MAX_JWT_SEGMENT_LENGTH ||
+    payloadPart.length > MAX_JWT_SEGMENT_LENGTH ||
+    signaturePart.length > MAX_JWT_SEGMENT_LENGTH
+  ) {
+    logger.error("Token decode failed: JWT segment too large", {
+      headerLength: headerPart.length,
+      payloadLength: payloadPart.length,
+      signatureLength: signaturePart.length,
+    });
+    throw new Error("JWT segment exceeds maximum supported length");
+  }
+
+  if (
+    !BASE64_URL_SEGMENT_PATTERN.test(headerPart) ||
+    !BASE64_URL_SEGMENT_PATTERN.test(payloadPart) ||
+    !BASE64_URL_SEGMENT_PATTERN.test(signaturePart)
+  ) {
+    logger.error("Token decode failed: invalid Base64URL segment detected");
+    throw new Error("JWT contains invalid Base64URL encoding");
+  }
+
   try {
-    const header = JSON.parse(base64UrlDecode(parts[0]));
-    const payload = JSON.parse(base64UrlDecode(parts[1]));
+    const header = JSON.parse(base64UrlDecode(headerPart));
+    const payload = JSON.parse(base64UrlDecode(payloadPart));
+    assertJsonDepthWithinLimit(header, MAX_JWT_DEPTH);
+    assertJsonDepthWithinLimit(payload, MAX_JWT_DEPTH);
 
     logger.debug("JWT decoded", {
       algorithm: header?.alg,
@@ -178,6 +268,9 @@ export interface TokenValidationOptions {
   audience?: string;
   nonce?: string;
   signatureVerified?: boolean;
+  trustedJkuOrigins?: string[];
+  supportedCriticalHeaders?: string[];
+  expectedKeyType?: ExpectedJwkKeyType;
   clockSkewTolerance?: number;
   debug?: boolean;
 }
@@ -191,6 +284,9 @@ export function validateToken(
     audience,
     nonce,
     signatureVerified = false,
+    trustedJkuOrigins = [],
+    supportedCriticalHeaders = [],
+    expectedKeyType,
     clockSkewTolerance = 30, // 30 seconds default skew tolerance
     debug,
   } = options;
@@ -223,6 +319,7 @@ export function validateToken(
   }
 
   const algorithm = decodedJWT.header.alg;
+  const jkuHeader = decodedJWT.header.jku;
 
   if (typeof algorithm !== "string" || algorithm.trim() === "") {
     result.valid = false;
@@ -245,8 +342,88 @@ export function validateToken(
     logger.warn(`Unknown JWT algorithm: ${algorithm}`);
   }
 
+  if (
+    expectedKeyType &&
+    !isAlgorithmCompatibleWithKeyType(algorithm, expectedKeyType)
+  ) {
+    result.valid = false;
+    result.errors.push(
+      `JWT algorithm "${algorithm}" is not compatible with expected key type "${expectedKeyType}"`,
+    );
+    logger.error("JWT algorithm/key-type mismatch detected", {
+      algorithm,
+      expectedKeyType,
+    });
+  }
+
+  if (typeof jkuHeader === "string" && jkuHeader.trim() !== "") {
+    let jkuUrl: URL;
+    try {
+      jkuUrl = new URL(jkuHeader);
+    } catch {
+      result.valid = false;
+      result.errors.push("JWT header contains an invalid jku URL");
+      logger.error("Invalid jku value in JWT header");
+      return result;
+    }
+
+    const normalizedTrustedOrigins = trustedJkuOrigins.map((origin) =>
+      origin.trim(),
+    );
+
+    if (!normalizedTrustedOrigins.includes(jkuUrl.origin)) {
+      result.valid = false;
+      result.errors.push(
+        `JWT jku origin "${jkuUrl.origin}" is not in trustedJkuOrigins`,
+      );
+      logger.error("Untrusted jku origin detected", {
+        jkuOrigin: jkuUrl.origin,
+      });
+    }
+  }
+
+  const criticalHeaders = decodedJWT.header.crit;
+  if (criticalHeaders !== undefined) {
+    if (
+      !Array.isArray(criticalHeaders) ||
+      criticalHeaders.some((entry) => typeof entry !== "string")
+    ) {
+      result.valid = false;
+      result.errors.push("JWT crit header must be an array of strings");
+      logger.error("Invalid JWT crit header format");
+      return result;
+    }
+
+    const supportedCriticalHeaderSet = new Set<string>([
+      "b64",
+      ...supportedCriticalHeaders.map((entry) => entry.trim()),
+    ]);
+
+    for (const criticalHeader of criticalHeaders) {
+      if (!(criticalHeader in decodedJWT.header)) {
+        result.valid = false;
+        result.errors.push(
+          `JWT crit header references missing parameter "${criticalHeader}"`,
+        );
+      }
+
+      if (!supportedCriticalHeaderSet.has(criticalHeader)) {
+        result.valid = false;
+        result.errors.push(
+          `JWT crit header contains unsupported parameter "${criticalHeader}"`,
+        );
+      }
+    }
+  }
+
   // SECURITY: Validate expiration (exp claim)
-  if (typeof decodedJWT.payload.exp === "number") {
+  if (
+    decodedJWT.payload.exp !== undefined &&
+    typeof decodedJWT.payload.exp !== "number"
+  ) {
+    result.valid = false;
+    result.errors.push("Token exp claim must be a number");
+  } else if (typeof decodedJWT.payload.exp === "number") {
     if (decodedJWT.payload.exp < now - clockSkewTolerance) {
       result.expired = true;
       result.valid = false;
@@ -255,7 +432,14 @@ export function validateToken(
   }
 
   // SECURITY: Validate not before time (nbf claim)
-  if (typeof decodedJWT.payload.nbf === "number") {
+  if (
+    decodedJWT.payload.nbf !== undefined &&
+    typeof decodedJWT.payload.nbf !== "number"
+  ) {
+    result.notBeforeValid = false;
+    result.valid = false;
+    result.errors.push("Token nbf claim must be a number");
+  } else if (typeof decodedJWT.payload.nbf === "number") {
     if (decodedJWT.payload.nbf > now + clockSkewTolerance) {
       result.notBeforeValid = false;
       result.valid = false;
@@ -314,7 +498,7 @@ export function validateToken(
       result.valid = false;
       result.errors.push("Token is missing required nonce claim");
       logger.warn("Nonce claim is missing");
-    } else if (decodedJWT.payload.nonce !== nonce) {
+    } else if (!timingSafeEqual(decodedJWT.payload.nonce, nonce)) {
       result.nonceValid = false;
       result.valid = false;
       result.errors.push(

@@ -447,6 +447,106 @@ describe("GuardhouseClient", () => {
     expect(revocationBody.get("token_type_hint")).toBe("access_token");
   });
 
+  it("rejects token responses that escalate scopes", async () => {
+    const fetchMock = jest.fn().mockResolvedValueOnce(
+      jsonResponse({
+        access_token: "access",
+        token_type: "Bearer",
+        expires_in: 3600,
+        scope: "read write admin",
+      }),
+    );
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "public-client",
+      scope: "read write",
+    });
+
+    await expect(
+      client.exchangeCodeForTokens(
+        "good-code",
+        validCodeVerifier,
+        "https://app.example.com/callback",
+      ),
+    ).rejects.toMatchObject({
+      code: "SCOPE_ESCALATION_DETECTED",
+    });
+  });
+
+  it("rejects token responses that narrow requested scopes by default", async () => {
+    const fetchMock = jest.fn().mockResolvedValueOnce(
+      jsonResponse({
+        access_token: "access",
+        token_type: "Bearer",
+        expires_in: 3600,
+        scope: "read",
+      }),
+    );
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "public-client",
+      scope: "read write",
+    });
+
+    await expect(
+      client.exchangeCodeForTokens(
+        "good-code",
+        validCodeVerifier,
+        "https://app.example.com/callback",
+      ),
+    ).rejects.toMatchObject({
+      code: "SCOPE_NARROWING_DETECTED",
+    });
+  });
+
+  it("allows scope narrowing when explicitly configured", async () => {
+    const fetchMock = jest.fn().mockResolvedValueOnce(
+      jsonResponse({
+        access_token: "access",
+        token_type: "Bearer",
+        expires_in: 3600,
+        scope: "read",
+      }),
+    );
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "public-client",
+      scope: "read write",
+      allowScopeNarrowing: true,
+    });
+
+    await expect(
+      client.exchangeCodeForTokens(
+        "good-code",
+        validCodeVerifier,
+        "https://app.example.com/callback",
+      ),
+    ).resolves.toMatchObject({
+      access_token: "access",
+    });
+  });
+
   it("returns null data for empty successful responses", async () => {
     const fetchMock = jest
       .fn()
@@ -640,6 +740,54 @@ describe("GuardhouseClient", () => {
     expect(headers.get("Accept")).toBe("application/problem+json");
   });
 
+  it("attaches DPoP proof and uses DPoP auth scheme when configured", async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue(jsonResponse({ sub: "user-1" }));
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      dpopProofFactory: () => "dpop-proof-jwt",
+    });
+
+    await client.getUserInfo("access-token");
+
+    const headers = getCallHeaders(fetchMock, 0);
+    expect(headers.get("DPoP")).toBe("dpop-proof-jwt");
+    expect(headers.get("Authorization")).toBe("DPoP access-token");
+  });
+
+  it("rejects oversized authorization headers", async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue(jsonResponse({ sub: "user-1" }));
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      maxAuthorizationHeaderBytes: 64,
+    });
+
+    await expect(client.getUserInfo("a".repeat(200))).rejects.toMatchObject({
+      code: "HEADER_TOO_LARGE",
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("forwards AbortSignal to fetch", async () => {
     const fetchMock = jest.fn().mockImplementation(
       (_input, init?: RequestInit) =>
@@ -676,6 +824,8 @@ describe("GuardhouseClient", () => {
     const requestPromise = client.fetch("/connect/userinfo", {
       signal: controller.signal,
     });
+
+    await Promise.resolve();
 
     const forwardedSignal = fetchMock.mock.calls[0][1]?.signal as
       | AbortSignal
@@ -777,6 +927,530 @@ describe("GuardhouseClient", () => {
       fetchMock.mock.calls[0][1]?.body as string,
     );
     expect(body.get("token_type_hint")).toBe("refresh_token");
+  });
+
+  it("stores sanitized session state without refresh token value", async () => {
+    const persisted: Record<string, string> = {};
+    const storage = {
+      getItem: jest.fn(async (key: string) => persisted[key] ?? null),
+      setItem: jest.fn(async (key: string, value: string) => {
+        persisted[key] = value;
+      }),
+      removeItem: jest.fn(async (key: string) => {
+        delete persisted[key];
+      }),
+    };
+
+    const fetchMock = jest.fn().mockResolvedValueOnce(
+      jsonResponse({
+        access_token: "access",
+        token_type: "Bearer",
+        expires_in: 3600,
+        refresh_token: "refresh-value",
+        scope: "read",
+      }),
+    );
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      scope: "read",
+      storage,
+    });
+
+    await client.exchangeCodeForTokens(
+      "good-code",
+      validCodeVerifier,
+      "https://app.example.com/callback",
+    );
+
+    const session = await client.getSessionState();
+    expect(session).toMatchObject({
+      accessToken: "access",
+      hasRefreshToken: true,
+    });
+
+    const persistedValues = Object.values(persisted).join(" ");
+    expect(persistedValues.includes("refresh-value")).toBe(false);
+  });
+
+  it("clears local session on silent authentication interaction errors", async () => {
+    const persisted: Record<string, string> = {};
+    const storage = {
+      getItem: jest.fn(async (key: string) => persisted[key] ?? null),
+      setItem: jest.fn(async (key: string, value: string) => {
+        persisted[key] = value;
+      }),
+      removeItem: jest.fn(async (key: string) => {
+        delete persisted[key];
+      }),
+    };
+
+    const fetchMock = jest.fn().mockResolvedValueOnce(
+      jsonResponse({
+        access_token: "access",
+        token_type: "Bearer",
+        expires_in: 3600,
+        scope: "read",
+      }),
+    );
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      scope: "read",
+      storage,
+    });
+
+    await client.exchangeCodeForTokens(
+      "good-code",
+      validCodeVerifier,
+      "https://app.example.com/callback",
+    );
+
+    await expect(
+      client.handleSilentAuthenticationError(
+        "interaction_required",
+        "User interaction is required",
+      ),
+    ).rejects.toMatchObject({
+      code: "SILENT_AUTH_INTERACTION_REQUIRED",
+    });
+
+    expect(await client.getSessionState()).toBeNull();
+    expect(storage.removeItem).toHaveBeenCalled();
+  });
+
+  it("validates OAuth callback state and returns parsed callback", async () => {
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+
+    const callback = await client.validateOAuthCallback(
+      "https://app.example.com/callback?code=abc&state=state-callback-123456",
+      "state-callback-123456",
+    );
+
+    expect(callback.code).toBe("abc");
+    expect(callback.state).toBe("state-callback-123456");
+  });
+
+  it("clears session when silent callback requires interaction", async () => {
+    const persisted: Record<string, string> = {};
+    const storage = {
+      getItem: jest.fn(async (key: string) => persisted[key] ?? null),
+      setItem: jest.fn(async (key: string, value: string) => {
+        persisted[key] = value;
+      }),
+      removeItem: jest.fn(async (key: string) => {
+        delete persisted[key];
+      }),
+    };
+
+    const fetchMock = jest.fn().mockResolvedValueOnce(
+      jsonResponse({
+        access_token: "access",
+        token_type: "Bearer",
+        expires_in: 3600,
+        scope: "read",
+      }),
+    );
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      scope: "read",
+      storage,
+    });
+
+    await client.exchangeCodeForTokens(
+      "good-code",
+      validCodeVerifier,
+      "https://app.example.com/callback",
+    );
+
+    await expect(
+      client.validateOAuthCallback(
+        "https://app.example.com/callback?error=interaction_required&error_description=Need%20login&state=state-callback-654321",
+        "state-callback-654321",
+        "none",
+      ),
+    ).rejects.toMatchObject({
+      code: "SILENT_AUTH_INTERACTION_REQUIRED",
+    });
+
+    expect(await client.getSessionState()).toBeNull();
+  });
+
+  it("clears local session when refresh fails with invalid_grant", async () => {
+    const persisted: Record<string, string> = {};
+    const storage = {
+      getItem: jest.fn(async (key: string) => persisted[key] ?? null),
+      setItem: jest.fn(async (key: string, value: string) => {
+        persisted[key] = value;
+      }),
+      removeItem: jest.fn(async (key: string) => {
+        delete persisted[key];
+      }),
+    };
+
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          access_token: "access",
+          token_type: "Bearer",
+          expires_in: 3600,
+          scope: "read",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            error: "invalid_grant",
+            error_description: "Refresh token expired",
+          },
+          400,
+        ),
+      );
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      scope: "read",
+      storage,
+    });
+
+    await client.exchangeCodeForTokens(
+      "good-code",
+      validCodeVerifier,
+      "https://app.example.com/callback",
+    );
+
+    await expect(client.refreshToken("refresh-value")).rejects.toMatchObject({
+      code: "invalid_grant",
+    });
+
+    expect(await client.getSessionState()).toBeNull();
+  });
+
+  it("requires initial access token for dynamic registration", async () => {
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+
+    await expect(client.registerClient({}, "")).rejects.toMatchObject({
+      code: "INVALID_REQUEST",
+    });
+  });
+
+  it("sends authenticated dynamic registration request", async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue(jsonResponse({ client_id: "registered-client" }));
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+
+    const metadata = {
+      client_name: "My App",
+      redirect_uris: ["https://app.example.com/callback"],
+    };
+
+    const response = await client.registerClient(
+      metadata,
+      "initial-access-token",
+    );
+
+    expect(response.client_id).toBe("registered-client");
+    const headers = getCallHeaders(fetchMock, 0);
+    expect(headers.get("Authorization")).toBe("Bearer initial-access-token");
+  });
+
+  it("fails clickjacking protection check when headers are missing", async () => {
+    const fetchMock = jest.fn().mockResolvedValue(
+      new Response("<html>authorize</html>", {
+        status: 200,
+        headers: {
+          "Content-Type": "text/html",
+        },
+      }),
+    );
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+
+    await expect(
+      client.assertAuthorizationPageClickjackingProtection(),
+    ).rejects.toMatchObject({
+      code: "AUTH_PAGE_CLICKJACKING_RISK",
+    });
+  });
+
+  it("passes clickjacking protection check when frame headers are present", async () => {
+    const fetchMock = jest.fn().mockResolvedValue(
+      new Response("<html>authorize</html>", {
+        status: 200,
+        headers: {
+          "Content-Type": "text/html",
+          "X-Frame-Options": "DENY",
+          "Content-Security-Policy":
+            "default-src 'self'; frame-ancestors 'none'",
+        },
+      }),
+    );
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+
+    await expect(
+      client.assertAuthorizationPageClickjackingProtection(),
+    ).resolves.toMatchObject({
+      protected: true,
+      xFrameOptions: "DENY",
+      frameAncestorsPolicy: "frame-ancestors 'none'",
+    });
+  });
+
+  it("validates UserInfo subject against expected id_token subject", async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue(jsonResponse({ sub: "user-2" }));
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+
+    await expect(
+      client.getUserInfo("access-token", "user-1"),
+    ).rejects.toMatchObject({
+      code: "USERINFO_SUBJECT_MISMATCH",
+    });
+  });
+
+  it("builds secure logout URL and validates redirect allowlist", () => {
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      allowedPostLogoutRedirectUris: ["https://app.example.com/logout"],
+    });
+
+    const logoutUrl = client.buildLogoutUrl({
+      postLogoutRedirectUri: "https://app.example.com/logout",
+      idTokenHint: "id-token-hint",
+      state: "logout-state",
+    });
+
+    const parsed = new URL(logoutUrl);
+    expect(parsed.pathname).toBe("/connect/endsession");
+    expect(parsed.searchParams.get("post_logout_redirect_uri")).toBe(
+      "https://app.example.com/logout",
+    );
+    expect(parsed.searchParams.get("id_token_hint")).toBe("id-token-hint");
+    expect(parsed.searchParams.get("state")).toBe("logout-state");
+  });
+
+  it("rejects unsafe post logout redirect URIs", () => {
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      allowedPostLogoutRedirectUris: ["https://app.example.com/logout"],
+    });
+
+    expect(() =>
+      client.buildLogoutUrl({
+        postLogoutRedirectUri: "https://evil.example/logout",
+      }),
+    ).toThrow("allowedPostLogoutRedirectUris");
+  });
+
+  it("rejects id_token_hint on non-HTTPS authorities", () => {
+    const client = new GuardhouseClient({
+      authority: "http://localhost:3000",
+      clientId: "client-id",
+    });
+
+    expect(() =>
+      client.buildLogoutUrl({
+        idTokenHint: "id-token-hint",
+      }),
+    ).toThrow("id_token_hint can only be used with HTTPS authorities");
+  });
+
+  it("discovers OIDC metadata only from configured authority", async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue(jsonResponse({ issuer: "https://auth.example.com" }));
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+
+    await expect(client.discoverOpenIdConfiguration()).resolves.toMatchObject({
+      issuer: "https://auth.example.com",
+    });
+
+    await expect(
+      client.discoverOpenIdConfiguration(
+        "https://evil.example/.well-known/openid-configuration",
+      ),
+    ).rejects.toMatchObject({
+      code: "UNSAFE_ENDPOINT_URL",
+    });
+  });
+
+  it("opens popup with noopener/noreferrer protections", () => {
+    const popupRef: { opener?: unknown } = { opener: {} };
+    const openMock = jest.fn().mockReturnValue(popupRef);
+
+    Object.defineProperty(globalThis, "window", {
+      value: { open: openMock },
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+
+    client.openAuthorizationPopup("https://auth.example.com/connect/authorize");
+
+    expect(openMock).toHaveBeenCalled();
+    const calledFeatures = openMock.mock.calls[0][2] as string;
+    expect(calledFeatures.includes("noopener")).toBe(true);
+    expect(calledFeatures.includes("noreferrer")).toBe(true);
+    expect(popupRef.opener).toBeNull();
+  });
+
+  it("enforces user interaction checks for sensitive operations", async () => {
+    const fetchMock = jest.fn().mockResolvedValue(jsonResponse({}));
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    Object.defineProperty(globalThis, "navigator", {
+      value: { userActivation: { isActive: false } },
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      requireUserInteractionForSensitiveOperations: true,
+    });
+
+    await expect(client.revokeToken("access-token")).rejects.toMatchObject({
+      code: "USER_INTERACTION_REQUIRED",
+    });
+  });
+
+  it("provides secure defaults for sensitive input attributes", () => {
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+
+    const otpAttributes = client.getSecureInputAttributes("otp");
+    expect(otpAttributes.autocomplete).toBe("off");
+    expect(otpAttributes.inputmode).toBe("numeric");
+
+    const passwordAttributes = client.getSecureInputAttributes("password");
+    expect(passwordAttributes.autocomplete).toBe("new-password");
+  });
+
+  it("limits repeated silent authentication attempts", async () => {
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      maxSilentAuthAttempts: 2,
+    });
+
+    await expect(
+      client.handleSilentAuthenticationError("interaction_required"),
+    ).rejects.toMatchObject({
+      code: "SILENT_AUTH_INTERACTION_REQUIRED",
+    });
+
+    await expect(
+      client.handleSilentAuthenticationError("login_required"),
+    ).rejects.toMatchObject({
+      code: "SILENT_AUTH_INTERACTION_REQUIRED",
+    });
+
+    await expect(
+      client.handleSilentAuthenticationError("interaction_required"),
+    ).rejects.toMatchObject({
+      code: "SILENT_AUTH_RETRY_LIMIT_EXCEEDED",
+    });
   });
 
   it("warns when global fetch is unavailable", () => {

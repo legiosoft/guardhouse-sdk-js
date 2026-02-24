@@ -175,18 +175,9 @@ class FallbackCryptoAdapter implements CryptoAdapter {
       return globalThis.crypto.getRandomValues(new Uint8Array(length));
     }
 
-    if (typeof Math.random !== "function") {
-      throw new Error("Math.random not available");
-    }
-
-    const array = new Uint8Array(length);
-    for (let i = 0; i < length; i++) {
-      array[i] = Math.floor(Math.random() * 256);
-    }
-
-    return new Promise((resolve) => {
-      setTimeout(() => resolve(array), 0);
-    });
+    throw new Error(
+      "Secure random generation is unavailable. Inject a cryptographically secure adapter.",
+    );
   }
 
   async sha256(_data: Uint8Array): Promise<Uint8Array> {

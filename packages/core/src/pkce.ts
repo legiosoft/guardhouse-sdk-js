@@ -47,6 +47,10 @@ export interface PKCEOptions {
 const MIN_CODE_VERIFIER_BYTES = 32;
 const MAX_CODE_VERIFIER_BYTES = 96;
 const MIN_STATE_OR_NONCE_BYTES = 16;
+const PKCE_CODE_VERIFIER_PATTERN = /^[A-Za-z0-9\-._~]{43,128}$/;
+const MAX_STORED_CODE_VERIFIERS = 512;
+const codeVerifierVault = new Map<string, string>();
+const codeVerifierVaultOrder: string[] = [];
 
 function isCryptoAdapter(value: unknown): value is CryptoAdapter {
   return (
@@ -283,6 +287,49 @@ export async function generateNonce(
   });
 
   return nonce;
+}
+
+export async function stashCodeVerifier(codeVerifier: string): Promise<string> {
+  const normalizedVerifier = codeVerifier.trim();
+
+  if (!PKCE_CODE_VERIFIER_PATTERN.test(normalizedVerifier)) {
+    throw new Error(
+      "codeVerifier must be 43-128 RFC7636 unreserved characters",
+    );
+  }
+
+  const cryptoAdapter = await getCryptoAdapter();
+  const handle = bufferToBase64Url(await cryptoAdapter.randomBytes(24));
+
+  codeVerifierVault.set(handle, normalizedVerifier);
+  codeVerifierVaultOrder.push(handle);
+
+  if (codeVerifierVaultOrder.length > MAX_STORED_CODE_VERIFIERS) {
+    const evictedHandle = codeVerifierVaultOrder.shift();
+    if (evictedHandle) {
+      codeVerifierVault.delete(evictedHandle);
+    }
+  }
+
+  return handle;
+}
+
+export function consumeCodeVerifier(handle: string): string {
+  const normalizedHandle = handle.trim();
+  const codeVerifier = codeVerifierVault.get(normalizedHandle);
+
+  if (!codeVerifier) {
+    throw new Error("PKCE verifier handle is invalid or already consumed");
+  }
+
+  codeVerifierVault.delete(normalizedHandle);
+
+  const index = codeVerifierVaultOrder.indexOf(normalizedHandle);
+  if (index >= 0) {
+    codeVerifierVaultOrder.splice(index, 1);
+  }
+
+  return codeVerifier;
 }
 
 /**

@@ -42,8 +42,9 @@ const authUrl = await generateAuthUrl({
   redirectUri: "https://myapp.com/callback",
   responseType: "code",
   scope: "openid profile offline_access",
-  state: "random-state",
-  nonce: "random-nonce",
+  state: await generateState(),
+  nonce: await generateNonce(),
+  audience: "https://api.example.com",
   codeChallenge,
   codeChallengeMethod: "S256",
 });
@@ -120,6 +121,77 @@ Revoke an access token (if supported by server).
 await client.revokeToken(accessToken);
 ```
 
+##### `assertAuthorizationPageClickjackingProtection(endpoint?)`
+
+Verify the authorization page exposes anti-clickjacking headers before starting browser login.
+
+```typescript
+await client.assertAuthorizationPageClickjackingProtection();
+```
+
+##### `buildLogoutUrl(request)`
+
+Builds a validated logout URL and enforces safe `post_logout_redirect_uri` handling.
+
+```typescript
+const logoutUrl = client.buildLogoutUrl({
+  postLogoutRedirectUri: "https://app.example.com/logout",
+  idTokenHint: idToken,
+  state: "logout-state",
+});
+```
+
+##### `discoverOpenIdConfiguration(endpoint?)`
+
+Fetches OIDC discovery metadata from the configured authority origin.
+
+```typescript
+const metadata = await client.discoverOpenIdConfiguration();
+```
+
+##### `openAuthorizationPopup(url, name?, features?)`
+
+Opens auth popup with `noopener,noreferrer` protections and resets `window.opener`.
+
+```typescript
+client.openAuthorizationPopup(authUrl);
+```
+
+##### `validateOAuthCallback(callbackUrl, expectedState, prompt?)`
+
+Parse callback parameters safely, validate `state`, and auto-clear session for `prompt=none` interaction errors.
+
+```typescript
+const callback = await client.validateOAuthCallback(
+  window.location.href,
+  expectedState,
+  "none",
+);
+```
+
+##### `getSessionState()` / `clearSessionState()`
+
+Read or clear sanitized local session state. Refresh token values are never persisted by the SDK.
+
+```typescript
+const session = await client.getSessionState();
+await client.clearSessionState();
+```
+
+##### `registerClient(metadata, initialAccessToken, endpoint?)`
+
+Perform authenticated dynamic client registration. Initial Access Token is required.
+
+```typescript
+const registered = await client.registerClient(
+  {
+    client_name: "My App",
+    redirect_uris: ["https://app.example.com/callback"],
+  },
+  initialAccessToken,
+);
+```
+
 ### PKCE Functions
 
 ##### `generatePKCE(options)`
@@ -147,6 +219,69 @@ Generate random nonce for JWT replay protection.
 
 ```typescript
 const nonce = await generateNonce(); // default 16 bytes (128 bits)
+```
+
+##### `stashCodeVerifier(codeVerifier)` / `consumeCodeVerifier(handle)`
+
+Store `code_verifier` behind one-time in-memory handles to avoid exposing verifier values in global scope.
+
+```typescript
+const handle = await stashCodeVerifier(codeVerifier);
+const verifier = consumeCodeVerifier(handle); // one-time read
+```
+
+##### `stashExpectedState(state)` / `consumeStateBinding(handle, returnedState)`
+
+Store per-request state bindings using one-time in-memory handles to avoid multi-tab collisions.
+
+```typescript
+const stateHandle = stashExpectedState(state);
+consumeStateBinding(stateHandle, returnedStateFromCallback);
+```
+
+##### `validateAndConsumeState(expectedState, returnedState)`
+
+Validate callback `state` and mark it as consumed to prevent replay/session fixation.
+
+```typescript
+validateAndConsumeState(expectedStateFromStorage, stateFromCallback);
+```
+
+##### `parseOAuthCallbackUrl(callbackUrl)` / `sanitizeOAuthCallbackUrl(callbackUrl)`
+
+Safely parse OAuth callback query/fragment params and remove sensitive values from URLs to reduce referer leakage risk.
+
+```typescript
+const callback = parseOAuthCallbackUrl(window.location.href);
+const sanitized = sanitizeOAuthCallbackUrl(window.location.href);
+history.replaceState(null, "", sanitized);
+```
+
+##### `sanitizeAuthorizationUrlForHistory(authUrl)`
+
+Removes sensitive auth request params (like `code_challenge`, `state`, and `nonce`) from URLs stored in app history/logs.
+
+```typescript
+const safeUrl = sanitizeAuthorizationUrlForHistory(authUrl);
+```
+
+##### `validateFormPostCsrfToken(expected, actual)`
+
+Validates CSRF token binding for `response_mode=form_post` handling.
+
+```typescript
+validateFormPostCsrfToken(expectedCsrfToken, csrfTokenFromCookie);
+```
+
+##### `validateFrontChannelLogoutRequest(url, options)`
+
+Verifies `iss` and optional `sid` for front-channel logout requests.
+
+```typescript
+validateFrontChannelLogoutRequest(logoutUrl, {
+  expectedIssuer: "https://auth.example.com",
+  expectedSessionId: "session-123",
+});
 ```
 
 ### Token Functions
@@ -238,6 +373,13 @@ interface GuardhouseConfig {
   redirectUri?: string; // Optional: OAuth callback URI
   scope?: string; // Optional: Default scopes
   requestTimeoutMs?: number; // Optional: Request timeout in milliseconds (default: 30000)
+  allowScopeNarrowing?: boolean; // Optional: Allow missing granted scopes (default: false)
+  maxAuthorizationHeaderBytes?: number; // Optional: Authorization/DPoP header size limit (default: 8192)
+  maxSilentAuthAttempts?: number; // Optional: Silent auth retry ceiling (default: 3)
+  requireUserInteractionForSensitiveOperations?: boolean; // Optional: Require recent user interaction
+  allowedPostLogoutRedirectUris?: string[]; // Optional: Logout redirect allowlist
+  sessionStorageKey?: string; // Optional: Storage key for sanitized session cache
+  dpopProofFactory?: (ctx) => string | Promise<string>; // Optional: DPoP proof generator
   storage?: StorageAdapter; // Optional: Custom storage
   debug?: boolean; // Optional: Enable SDK debug logs
 }
@@ -263,6 +405,9 @@ interface TokenValidationOptions {
   audience?: string; // Expected audience
   nonce?: string; // Expected nonce
   signatureVerified?: boolean; // Must be true after cryptographic verification
+  trustedJkuOrigins?: string[]; // Allowlist of trusted JKU origins
+  supportedCriticalHeaders?: string[]; // Allowed JWT crit extensions
+  expectedKeyType?: "RSA" | "EC" | "oct"; // Enforce alg/key-type compatibility
   clockSkewTolerance?: number; // Clock skew tolerance (default: 30s)
 }
 ```
@@ -287,6 +432,8 @@ interface TokenValidationOptions {
 
 - **TLS Enforcement**: HTTPS required (except localhost)
 - **Basic Auth**: RFC 7617 compliant (Base64 encoded)
+- **DPoP Support**: Optional proof-of-possession via `dpopProofFactory`
+- **Header Size Guardrails**: Configurable max authorization header size
 - **Secret Protection**: Never sent in URLs or query params
 - **SSL Verification**: Can't be disabled (enforced by fetch API)
 
@@ -359,6 +506,8 @@ import {
   GuardhouseClient,
   generatePKCE,
   generateAuthUrl,
+  generateState,
+  generateNonce,
 } from "@guardhouse/core";
 
 const client = new GuardhouseClient({
@@ -377,6 +526,7 @@ const authUrl = await generateAuthUrl({
   codeChallengeMethod: "S256",
   state: await generateState(),
   nonce: await generateNonce(),
+  audience: "https://api.example.com",
 });
 
 console.log("Authorization URL:", authUrl);

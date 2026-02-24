@@ -26,6 +26,16 @@ import {
   sanitizeUrlForLogs,
 } from "./security";
 
+export interface DPoPProofContext {
+  method: string;
+  url: string;
+  accessToken?: string;
+}
+
+export type DPoPProofFactory = (
+  context: DPoPProofContext,
+) => string | Promise<string>;
+
 export interface GuardhouseConfig {
   authority: string;
   clientId: string;
@@ -37,6 +47,13 @@ export interface GuardhouseConfig {
   introspectionEndpoint?: string;
   revocationEndpoint?: string;
   requestTimeoutMs?: number;
+  allowScopeNarrowing?: boolean;
+  maxAuthorizationHeaderBytes?: number;
+  maxSilentAuthAttempts?: number;
+  requireUserInteractionForSensitiveOperations?: boolean;
+  allowedPostLogoutRedirectUris?: string[];
+  sessionStorageKey?: string;
+  dpopProofFactory?: DPoPProofFactory;
   storage?: StorageAdapter;
   debug?: boolean;
 }
@@ -118,6 +135,76 @@ export function validateConfig(config: GuardhouseConfig): void {
     );
   }
 
+  if (
+    config.maxAuthorizationHeaderBytes !== undefined &&
+    (!Number.isFinite(config.maxAuthorizationHeaderBytes) ||
+      config.maxAuthorizationHeaderBytes < 512)
+  ) {
+    throw new ConfigValidationError(
+      "maxAuthorizationHeaderBytes must be at least 512",
+    );
+  }
+
+  if (
+    config.sessionStorageKey !== undefined &&
+    (typeof config.sessionStorageKey !== "string" ||
+      config.sessionStorageKey.trim() === "")
+  ) {
+    throw new ConfigValidationError(
+      "sessionStorageKey must be a non-empty string",
+    );
+  }
+
+  if (
+    config.dpopProofFactory !== undefined &&
+    typeof config.dpopProofFactory !== "function"
+  ) {
+    throw new ConfigValidationError("dpopProofFactory must be a function");
+  }
+
+  if (
+    config.allowScopeNarrowing !== undefined &&
+    typeof config.allowScopeNarrowing !== "boolean"
+  ) {
+    throw new ConfigValidationError("allowScopeNarrowing must be a boolean");
+  }
+
+  if (
+    config.maxSilentAuthAttempts !== undefined &&
+    (!Number.isInteger(config.maxSilentAuthAttempts) ||
+      config.maxSilentAuthAttempts < 1 ||
+      config.maxSilentAuthAttempts > 20)
+  ) {
+    throw new ConfigValidationError(
+      "maxSilentAuthAttempts must be an integer between 1 and 20",
+    );
+  }
+
+  if (
+    config.requireUserInteractionForSensitiveOperations !== undefined &&
+    typeof config.requireUserInteractionForSensitiveOperations !== "boolean"
+  ) {
+    throw new ConfigValidationError(
+      "requireUserInteractionForSensitiveOperations must be a boolean",
+    );
+  }
+
+  if (config.allowedPostLogoutRedirectUris !== undefined) {
+    if (!Array.isArray(config.allowedPostLogoutRedirectUris)) {
+      throw new ConfigValidationError(
+        "allowedPostLogoutRedirectUris must be an array",
+      );
+    }
+
+    for (const uri of config.allowedPostLogoutRedirectUris) {
+      if (typeof uri !== "string" || uri.trim() === "") {
+        throw new ConfigValidationError(
+          "allowedPostLogoutRedirectUris must contain non-empty strings",
+        );
+      }
+    }
+  }
+
   try {
     const url = new URL(config.authority);
 
@@ -134,6 +221,14 @@ export function validateConfig(config: GuardhouseConfig): void {
       authority: sanitizeUrlForLogs(url.toString()),
       hasClientSecret: Boolean(config.clientSecret),
       requestTimeoutMs: config.requestTimeoutMs,
+      allowScopeNarrowing: config.allowScopeNarrowing,
+      maxAuthorizationHeaderBytes: config.maxAuthorizationHeaderBytes,
+      maxSilentAuthAttempts: config.maxSilentAuthAttempts,
+      requireUserInteractionForSensitiveOperations:
+        config.requireUserInteractionForSensitiveOperations,
+      allowedPostLogoutRedirectUriCount:
+        config.allowedPostLogoutRedirectUris?.length ?? 0,
+      hasDpopProofFactory: Boolean(config.dpopProofFactory),
     });
   } catch (error) {
     if (error instanceof ConfigValidationError) {

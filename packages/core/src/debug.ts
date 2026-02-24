@@ -16,12 +16,17 @@ const QUERY_SECRET_PATTERN =
   /([?&](?:access_token|refresh_token|id_token|client_secret|code_verifier|authorization|token)=)[^&#\s]*/gi;
 const ASSIGNMENT_SECRET_PATTERN =
   /((?:access_token|refresh_token|id_token|client_secret|code_verifier|authorization|password|secret)\s*[=:]\s*)[^,\s]*/gi;
+const MAX_LOG_STRING_LENGTH = 4096;
 
 function shouldRedactKey(key: string): boolean {
   return SENSITIVE_KEY_PATTERN.test(key);
 }
 
 function sanitizeString(value: string): string {
+  if (value.length > MAX_LOG_STRING_LENGTH) {
+    return `${value.slice(0, MAX_LOG_STRING_LENGTH)}...[TRUNCATED]`;
+  }
+
   const trimmed = value.trim();
 
   if (BEARER_OR_BASIC_PATTERN.test(trimmed) || JWT_PATTERN.test(trimmed)) {

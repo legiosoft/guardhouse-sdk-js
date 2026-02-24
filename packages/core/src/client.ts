@@ -30,12 +30,18 @@
 
 import type { GuardhouseConfig } from "./config";
 
+import {
+  isSilentAuthenticationError,
+  parseOAuthCallbackUrl,
+  validateAndConsumeState,
+} from "./auth";
 import { GuardhouseError } from "./config";
 import { createGuardhouseLogger, setGuardhouseDebug } from "./debug";
 import {
   enforceSecureHttpUrl,
   isLocalDevelopmentHostname,
   sanitizeUrlForLogs,
+  timingSafeEqual,
   validateRedirectUri,
 } from "./security";
 
@@ -58,6 +64,18 @@ const RESERVED_TOKEN_BODY_PARAM_KEYS = new Set([
 
 const TOKEN_PARAM_KEY_PATTERN = /^[A-Za-z0-9._~-]+$/;
 const PKCE_CODE_VERIFIER_PATTERN = /^[A-Za-z0-9\-._~]+$/;
+const DEFAULT_MAX_AUTH_HEADER_BYTES = 8192;
+const DEFAULT_SESSION_STORAGE_KEY = "guardhouse:session:v1";
+const MAX_DPOP_PROOF_LENGTH = 8192;
+const MAX_TOKEN_PARAM_KEY_LENGTH = 128;
+const MAX_TOKEN_PARAM_VALUE_LENGTH = 4096;
+const DEFAULT_MAX_SILENT_AUTH_ATTEMPTS = 3;
+const SILENT_AUTH_ERROR_CODES = new Set([
+  "interaction_required",
+  "login_required",
+  "consent_required",
+  "account_selection_required",
+]);
 
 export interface RequestOptions {
   method?: "GET" | "HEAD" | "POST" | "PUT" | "DELETE" | "PATCH";
@@ -65,6 +83,7 @@ export interface RequestOptions {
   body?: string;
   token?: string;
   skipAuthHeader?: boolean;
+  skipDpopProof?: boolean;
   signal?: AbortSignal;
 }
 
@@ -108,6 +127,29 @@ export interface IntrospectionResponse {
   [key: string]: any;
 }
 
+export interface AuthorizationPageProtectionResult {
+  protected: boolean;
+  xFrameOptions?: string;
+  frameAncestorsPolicy?: string;
+  warnings: string[];
+}
+
+export interface SessionState {
+  accessToken: string;
+  tokenType: string;
+  expiresAt: number;
+  scope?: string;
+  idToken?: string;
+  hasRefreshToken: boolean;
+}
+
+export interface LogoutRequest {
+  postLogoutRedirectUri?: string;
+  idTokenHint?: string;
+  state?: string;
+  logoutEndpoint?: string;
+}
+
 /**
  * Guardhouse HTTP Client
  *
@@ -132,6 +174,11 @@ export class GuardhouseClient {
   private baseURL: string;
   private logger: ReturnType<typeof createGuardhouseLogger>;
   private requestTimeoutMs: number | null;
+  private maxAuthorizationHeaderBytes: number;
+  private maxSilentAuthAttempts: number;
+  private sessionStorageKey: string;
+  private sessionState: SessionState | null;
+  private silentAuthAttemptCount: number;
   private endpoints: {
     token: string;
     userInfo: string;
@@ -191,6 +238,14 @@ export class GuardhouseClient {
     }
 
     this.requestTimeoutMs = configuredTimeout === 0 ? null : configuredTimeout;
+    this.maxAuthorizationHeaderBytes =
+      config.maxAuthorizationHeaderBytes ?? DEFAULT_MAX_AUTH_HEADER_BYTES;
+    this.maxSilentAuthAttempts =
+      config.maxSilentAuthAttempts ?? DEFAULT_MAX_SILENT_AUTH_ATTEMPTS;
+    this.sessionStorageKey =
+      config.sessionStorageKey ?? DEFAULT_SESSION_STORAGE_KEY;
+    this.sessionState = null;
+    this.silentAuthAttemptCount = 0;
 
     this.baseURL = config.authority.replace(/\/+$/, "");
     this.endpoints = {
@@ -211,8 +266,12 @@ export class GuardhouseClient {
       authority: sanitizeUrlForLogs(this.baseURL),
       hasClientSecret: Boolean(config.clientSecret),
       requestTimeoutMs: this.requestTimeoutMs,
+      maxAuthorizationHeaderBytes: this.maxAuthorizationHeaderBytes,
+      maxSilentAuthAttempts: this.maxSilentAuthAttempts,
       allowsHttp: authorityUrl.protocol === "http:",
       localAuthority: isLocalDevelopmentHostname(authorityUrl.hostname),
+      hasStorageAdapter: Boolean(config.storage),
+      hasDpopProofFactory: Boolean(config.dpopProofFactory),
     });
   }
 
@@ -242,6 +301,11 @@ export class GuardhouseClient {
         continue;
       }
 
+      if (key.length > MAX_TOKEN_PARAM_KEY_LENGTH) {
+        blockedKeys.push(rawKey);
+        continue;
+      }
+
       const normalizedKey = key.toLowerCase();
       if (RESERVED_TOKEN_BODY_PARAM_KEYS.has(normalizedKey)) {
         blockedKeys.push(rawKey);
@@ -254,6 +318,11 @@ export class GuardhouseClient {
       }
 
       if (rawValue === undefined || rawValue === null || rawValue === "") {
+        continue;
+      }
+
+      if (rawValue.length > MAX_TOKEN_PARAM_VALUE_LENGTH) {
+        blockedKeys.push(rawKey);
         continue;
       }
 
@@ -344,6 +413,376 @@ export class GuardhouseClient {
         }
       },
     };
+  }
+
+  private ensureHeaderWithinLimit(
+    headerName: string,
+    headerValue: string,
+  ): void {
+    const byteLength =
+      typeof Buffer !== "undefined"
+        ? Buffer.byteLength(headerValue, "utf8")
+        : typeof TextEncoder === "function"
+          ? new TextEncoder().encode(headerValue).length
+          : headerValue.length;
+
+    if (byteLength > this.maxAuthorizationHeaderBytes) {
+      this.logger.error("Header length exceeds configured limit", {
+        headerName,
+        byteLength,
+        limit: this.maxAuthorizationHeaderBytes,
+      });
+
+      throw new GuardhouseError(
+        `${headerName} header exceeds maximum allowed size`,
+        "HEADER_TOO_LARGE",
+      );
+    }
+  }
+
+  private async createDpopProof(
+    method: string,
+    url: string,
+    accessToken: string | undefined,
+    skipDpopProof: boolean,
+  ): Promise<string | null> {
+    if (!this.config.dpopProofFactory || skipDpopProof) {
+      return null;
+    }
+
+    const proof = await this.config.dpopProofFactory({
+      method,
+      url,
+      accessToken,
+    });
+
+    if (typeof proof !== "string" || proof.trim() === "") {
+      throw new GuardhouseError(
+        "dpopProofFactory returned an invalid proof",
+        "INVALID_DPOP_PROOF",
+      );
+    }
+
+    const normalizedProof = proof.trim();
+    if (normalizedProof.length > MAX_DPOP_PROOF_LENGTH) {
+      throw new GuardhouseError(
+        "DPoP proof is too large",
+        "INVALID_DPOP_PROOF",
+      );
+    }
+
+    this.ensureHeaderWithinLimit("DPoP", normalizedProof);
+    return normalizedProof;
+  }
+
+  private buildSessionStateFromTokenResponse(
+    tokenResponse: TokenResponse,
+  ): SessionState {
+    return {
+      accessToken: tokenResponse.access_token,
+      tokenType: tokenResponse.token_type,
+      expiresAt: Date.now() + tokenResponse.expires_in * 1000,
+      scope: tokenResponse.scope,
+      idToken: tokenResponse.id_token,
+      hasRefreshToken: Boolean(tokenResponse.refresh_token),
+    };
+  }
+
+  private resetSilentAuthAttemptCounter(): void {
+    this.silentAuthAttemptCount = 0;
+  }
+
+  private async cacheSessionState(tokenResponse: TokenResponse): Promise<void> {
+    const sessionState = this.buildSessionStateFromTokenResponse(tokenResponse);
+    this.sessionState = sessionState;
+
+    if (!this.config.storage) {
+      return;
+    }
+
+    try {
+      await this.config.storage.setItem(
+        this.sessionStorageKey,
+        JSON.stringify(sessionState),
+      );
+    } catch (error) {
+      this.logger.warn("Failed to persist session state", {
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  async getSessionState(): Promise<SessionState | null> {
+    if (this.sessionState) {
+      return { ...this.sessionState };
+    }
+
+    if (!this.config.storage) {
+      return null;
+    }
+
+    try {
+      const serialized = await this.config.storage.getItem(
+        this.sessionStorageKey,
+      );
+      if (!serialized) {
+        return null;
+      }
+
+      const parsed = JSON.parse(serialized) as SessionState;
+      if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        typeof parsed.accessToken !== "string" ||
+        typeof parsed.tokenType !== "string" ||
+        typeof parsed.expiresAt !== "number" ||
+        typeof parsed.hasRefreshToken !== "boolean"
+      ) {
+        await this.clearSessionState();
+        return null;
+      }
+
+      this.sessionState = parsed;
+      return { ...parsed };
+    } catch {
+      await this.clearSessionState();
+      return null;
+    }
+  }
+
+  async clearSessionState(resetSilentAuthCounter = true): Promise<void> {
+    this.sessionState = null;
+
+    if (resetSilentAuthCounter) {
+      this.silentAuthAttemptCount = 0;
+    }
+
+    if (!this.config.storage) {
+      return;
+    }
+
+    try {
+      await this.config.storage.removeItem(this.sessionStorageKey);
+    } catch (error) {
+      this.logger.warn("Failed to clear persisted session state", {
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  async handleSilentAuthenticationError(
+    errorCode: string,
+    errorDescription?: string,
+  ): Promise<never> {
+    const normalizedErrorCode = this.requireNonEmptyString(
+      errorCode,
+      "errorCode",
+    );
+    const requiresInteraction =
+      SILENT_AUTH_ERROR_CODES.has(normalizedErrorCode);
+
+    if (requiresInteraction) {
+      this.silentAuthAttemptCount += 1;
+
+      if (this.silentAuthAttemptCount > this.maxSilentAuthAttempts) {
+        await this.clearSessionState(false);
+        throw new GuardhouseError(
+          "Silent authentication retry limit exceeded",
+          "SILENT_AUTH_RETRY_LIMIT_EXCEEDED",
+        );
+      }
+
+      await this.clearSessionState(false);
+      this.logger.warn("Silent authentication failed and session was cleared", {
+        errorCode: normalizedErrorCode,
+        errorDescription,
+        attempt: this.silentAuthAttemptCount,
+        maxAttempts: this.maxSilentAuthAttempts,
+      });
+
+      throw new GuardhouseError(
+        "Silent authentication failed and local session state was cleared",
+        "SILENT_AUTH_INTERACTION_REQUIRED",
+      );
+    }
+
+    throw new GuardhouseError(
+      errorDescription || normalizedErrorCode,
+      normalizedErrorCode,
+    );
+  }
+
+  async validateOAuthCallback(
+    callbackUrl: string,
+    expectedState: string,
+    prompt?: string,
+  ): Promise<ReturnType<typeof parseOAuthCallbackUrl>> {
+    const callback = parseOAuthCallbackUrl(callbackUrl);
+
+    if (callback.error) {
+      const normalizedPrompt = prompt?.trim().toLowerCase();
+
+      if (
+        normalizedPrompt === "none" &&
+        isSilentAuthenticationError(callback.error)
+      ) {
+        await this.handleSilentAuthenticationError(
+          callback.error,
+          callback.errorDescription,
+        );
+      }
+
+      throw new GuardhouseError(
+        callback.errorDescription || callback.error,
+        callback.error,
+      );
+    }
+
+    if (!callback.state) {
+      throw new GuardhouseError(
+        "OAuth callback is missing state",
+        "STATE_VALIDATION_FAILED",
+      );
+    }
+
+    validateAndConsumeState(expectedState, callback.state);
+    this.resetSilentAuthAttemptCounter();
+
+    return callback;
+  }
+
+  private parseScope(scope: string | undefined): Set<string> {
+    if (!scope) {
+      return new Set<string>();
+    }
+
+    return new Set(
+      scope
+        .split(/\s+/)
+        .map((value) => value.trim())
+        .filter((value) => value.length > 0),
+    );
+  }
+
+  private assertNoScopeEscalation(
+    requestedScope: string | undefined,
+    grantedScope: string | undefined,
+  ): void {
+    if (!requestedScope) {
+      return;
+    }
+
+    const requested = this.parseScope(requestedScope);
+
+    if (!grantedScope) {
+      this.logger.warn(
+        "Token response did not include scope; unable to verify full scope consistency",
+        {
+          requestedScope,
+        },
+      );
+      return;
+    }
+
+    const granted = this.parseScope(grantedScope);
+    const unexpected: string[] = [];
+    const missing: string[] = [];
+
+    for (const scope of granted) {
+      if (!requested.has(scope)) {
+        unexpected.push(scope);
+      }
+    }
+
+    for (const scope of requested) {
+      if (!granted.has(scope)) {
+        missing.push(scope);
+      }
+    }
+
+    if (unexpected.length > 0) {
+      this.logger.error("Token response scope escalation detected", {
+        requestedScope,
+        grantedScope,
+        unexpectedScopes: unexpected,
+      });
+
+      throw new GuardhouseError(
+        "Token response included scopes that were not explicitly requested",
+        "SCOPE_ESCALATION_DETECTED",
+      );
+    }
+
+    if (missing.length > 0) {
+      this.logger.warn("Token response scope narrowing detected", {
+        requestedScope,
+        grantedScope,
+        missingScopes: missing,
+      });
+
+      if (!this.config.allowScopeNarrowing) {
+        throw new GuardhouseError(
+          "Token response is missing one or more requested scopes",
+          "SCOPE_NARROWING_DETECTED",
+        );
+      }
+    }
+  }
+
+  private getFrameAncestorsDirective(cspHeader: string): string | undefined {
+    const directives = cspHeader
+      .split(";")
+      .map((directive) => directive.trim())
+      .filter((directive) => directive.length > 0);
+
+    const frameAncestors = directives.find((directive) =>
+      directive.toLowerCase().startsWith("frame-ancestors"),
+    );
+
+    return frameAncestors;
+  }
+
+  private assertRecentUserInteraction(operationName: string): void {
+    if (!this.config.requireUserInteractionForSensitiveOperations) {
+      return;
+    }
+
+    const runtime = globalThis as typeof globalThis & {
+      navigator?: {
+        userActivation?: {
+          isActive?: boolean;
+        };
+      };
+    };
+
+    const isActive = runtime.navigator?.userActivation?.isActive;
+    if (isActive === false) {
+      throw new GuardhouseError(
+        `${operationName} requires recent user interaction`,
+        "USER_INTERACTION_REQUIRED",
+      );
+    }
+  }
+
+  private assertAllowedPostLogoutRedirect(redirectUri: string): void {
+    const allowlist = this.config.allowedPostLogoutRedirectUris;
+
+    if (!allowlist || allowlist.length === 0) {
+      return;
+    }
+
+    const normalizedRedirectUri = validateRedirectUri(redirectUri).toString();
+    const isAllowed = allowlist.some(
+      (allowedUri) =>
+        validateRedirectUri(allowedUri).toString() === normalizedRedirectUri,
+    );
+
+    if (!isAllowed) {
+      throw new GuardhouseError(
+        "post_logout_redirect_uri is not in allowedPostLogoutRedirectUris",
+        "UNSAFE_LOGOUT_REDIRECT_URI",
+      );
+    }
   }
 
   private isAbsoluteEndpointWithinBase(endpoint: string): boolean {
@@ -473,6 +912,12 @@ export class GuardhouseClient {
     });
 
     const headers = new Headers(options.headers);
+    const dpopProof = await this.createDpopProof(
+      method,
+      url,
+      options.token,
+      Boolean(options.skipDpopProof),
+    );
 
     if (!headers.has("Content-Type")) {
       headers.set("Content-Type", "application/json");
@@ -490,12 +935,21 @@ export class GuardhouseClient {
       headers.delete("User-Agent");
     }
 
+    if (dpopProof) {
+      headers.set("DPoP", dpopProof);
+    }
+
     if (options.token && !options.skipAuthHeader) {
-      headers.set("Authorization", `Bearer ${options.token}`);
+      const authScheme = dpopProof ? "DPoP" : "Bearer";
+      const authorizationValue = `${authScheme} ${options.token}`;
+      this.ensureHeaderWithinLimit("Authorization", authorizationValue);
+      headers.set("Authorization", authorizationValue);
     }
 
     if (!options.token && !options.skipAuthHeader && this.config.clientSecret) {
-      headers.set("Authorization", this.buildBasicAuthHeader());
+      const authorizationValue = this.buildBasicAuthHeader();
+      this.ensureHeaderWithinLimit("Authorization", authorizationValue);
+      headers.set("Authorization", authorizationValue);
     }
 
     this.logger.debug("Prepared request headers", {
@@ -759,6 +1213,10 @@ export class GuardhouseClient {
     });
 
     const tokenResponse = response.data as TokenResponse;
+    const requestedScope = params.scope ?? this.config.scope;
+    this.assertNoScopeEscalation(requestedScope, tokenResponse.scope);
+    await this.cacheSessionState(tokenResponse);
+    this.resetSilentAuthAttemptCounter();
 
     this.logger.info("Authorization code exchange succeeded", {
       expiresIn: tokenResponse.expires_in,
@@ -815,22 +1273,42 @@ export class GuardhouseClient {
 
     this.logger.info("Refreshing access token");
 
-    const response = await this.fetch(this.endpoints.token, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: body.toString(),
-    });
+    try {
+      const response = await this.fetch(this.endpoints.token, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: body.toString(),
+      });
 
-    const tokenResponse = response.data as TokenResponse;
+      const tokenResponse = response.data as TokenResponse;
+      const requestedScope = params.scope ?? this.config.scope;
+      this.assertNoScopeEscalation(requestedScope, tokenResponse.scope);
+      await this.cacheSessionState(tokenResponse);
+      this.resetSilentAuthAttemptCounter();
 
-    this.logger.info("Access token refreshed", {
-      expiresIn: tokenResponse.expires_in,
-      hasRefreshToken: Boolean(tokenResponse.refresh_token),
-    });
+      this.logger.info("Access token refreshed", {
+        expiresIn: tokenResponse.expires_in,
+        hasRefreshToken: Boolean(tokenResponse.refresh_token),
+      });
 
-    return tokenResponse;
+      return tokenResponse;
+    } catch (error) {
+      if (
+        error instanceof GuardhouseError &&
+        (error.code === "invalid_grant" ||
+          (typeof error.code === "string" &&
+            SILENT_AUTH_ERROR_CODES.has(error.code)))
+      ) {
+        await this.clearSessionState(false);
+        this.logger.warn("Refresh failed and session state was cleared", {
+          errorCode: error.code,
+        });
+      }
+
+      throw error;
+    }
   }
 
   /**
@@ -848,8 +1326,15 @@ export class GuardhouseClient {
    * NOTE: This endpoint is designed for user tokens (from authorization code flow).
    * For client credentials tokens, use introspectToken() instead.
    */
-  async getUserInfo(token: string): Promise<UserInfoResponse> {
+  async getUserInfo(
+    token: string,
+    expectedSubject?: string,
+  ): Promise<UserInfoResponse> {
     const normalizedToken = this.requireNonEmptyString(token, "token");
+    const normalizedExpectedSubject =
+      typeof expectedSubject === "string" && expectedSubject.trim() !== ""
+        ? expectedSubject.trim()
+        : undefined;
 
     this.logger.debug("Fetching user info", {
       hasToken: true,
@@ -860,6 +1345,16 @@ export class GuardhouseClient {
     });
 
     const user = response.data as UserInfoResponse;
+
+    if (
+      normalizedExpectedSubject &&
+      !timingSafeEqual(user.sub ?? "", normalizedExpectedSubject)
+    ) {
+      throw new GuardhouseError(
+        "UserInfo response subject does not match expected subject",
+        "USERINFO_SUBJECT_MISMATCH",
+      );
+    }
 
     this.logger.debug("User info fetched", {
       hasSubject: Boolean(user.sub),
@@ -925,6 +1420,8 @@ export class GuardhouseClient {
     token: string,
     tokenTypeHint: "access_token" | "refresh_token" = "access_token",
   ): Promise<void> {
+    this.assertRecentUserInteraction("Token revocation");
+
     const normalizedToken = this.requireNonEmptyString(token, "token");
 
     this.logger.info("Revoking token", {
@@ -947,7 +1444,232 @@ export class GuardhouseClient {
       body: body.toString(),
     });
 
+    await this.clearSessionState();
+
     this.logger.info("Token revoked");
+  }
+
+  getSecureInputAttributes(
+    inputKind: "otp" | "mfa" | "password" = "otp",
+  ): Record<string, string> {
+    const attributes: Record<string, string> = {
+      autocomplete: "off",
+      autocapitalize: "off",
+      autocorrect: "off",
+      spellcheck: "false",
+    };
+
+    if (inputKind === "otp" || inputKind === "mfa") {
+      attributes["inputmode"] = "numeric";
+      attributes["maxlength"] = "12";
+    }
+
+    if (inputKind === "password") {
+      attributes["autocomplete"] = "new-password";
+    }
+
+    return attributes;
+  }
+
+  buildLogoutUrl(request: LogoutRequest = {}): string {
+    const logoutEndpoint = request.logoutEndpoint || "/connect/endsession";
+    const logoutUrl = new URL(this.buildRequestUrl(logoutEndpoint));
+
+    if (request.postLogoutRedirectUri) {
+      const validatedRedirect = validateRedirectUri(
+        request.postLogoutRedirectUri,
+      ).toString();
+
+      this.assertAllowedPostLogoutRedirect(validatedRedirect);
+      logoutUrl.searchParams.set("post_logout_redirect_uri", validatedRedirect);
+    }
+
+    if (request.idTokenHint) {
+      const originUrl = new URL(this.baseURL);
+
+      if (originUrl.protocol !== "https:") {
+        throw new GuardhouseError(
+          "id_token_hint can only be used with HTTPS authorities",
+          "INSECURE_ID_TOKEN_HINT_USAGE",
+        );
+      }
+
+      logoutUrl.searchParams.set("id_token_hint", request.idTokenHint);
+    }
+
+    if (request.state) {
+      logoutUrl.searchParams.set("state", request.state);
+    }
+
+    return logoutUrl.toString();
+  }
+
+  async discoverOpenIdConfiguration(
+    discoveryEndpoint = "/.well-known/openid-configuration",
+  ): Promise<Record<string, unknown>> {
+    const discoveryUrl = new URL(this.buildRequestUrl(discoveryEndpoint));
+    const authorityUrl = new URL(this.baseURL);
+
+    if (discoveryUrl.origin !== authorityUrl.origin) {
+      throw new GuardhouseError(
+        "Discovery endpoint must share the configured authority origin",
+        "UNSAFE_DISCOVERY_URL",
+      );
+    }
+
+    const response = await this.fetch(discoveryUrl.toString(), {
+      method: "GET",
+      skipAuthHeader: true,
+      skipDpopProof: true,
+    });
+
+    if (!response.data || typeof response.data !== "object") {
+      throw new GuardhouseError(
+        "Discovery response is invalid",
+        "DISCOVERY_ERROR",
+      );
+    }
+
+    return response.data as Record<string, unknown>;
+  }
+
+  openAuthorizationPopup(
+    authorizationUrl: string,
+    popupName = "guardhouse_oauth_popup",
+    popupFeatures = "width=500,height=700",
+  ): unknown {
+    const runtime = globalThis as typeof globalThis & {
+      window?: {
+        open?: (url?: string, target?: string, features?: string) => unknown;
+      };
+    };
+
+    const openFn = runtime.window?.open;
+    if (typeof openFn !== "function") {
+      throw new GuardhouseError(
+        "window.open is unavailable in this environment",
+        "POPUP_UNAVAILABLE",
+      );
+    }
+
+    const featureSet = `${popupFeatures},noopener,noreferrer`;
+    const popup = openFn(authorizationUrl, popupName, featureSet);
+
+    if (typeof popup === "object" && popup !== null) {
+      try {
+        (popup as { opener?: unknown }).opener = null;
+      } catch {
+        // noop
+      }
+    }
+
+    return popup;
+  }
+
+  async registerClient(
+    metadata: Record<string, unknown>,
+    initialAccessToken: string,
+    registrationEndpoint = "/connect/register",
+  ): Promise<Record<string, unknown>> {
+    this.assertRecentUserInteraction("Client registration");
+
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+      throw new GuardhouseError(
+        "metadata must be a JSON object",
+        "INVALID_CLIENT_METADATA",
+      );
+    }
+
+    const normalizedInitialAccessToken = this.requireNonEmptyString(
+      initialAccessToken,
+      "initialAccessToken",
+    );
+
+    const redirectUris = metadata["redirect_uris"];
+    if (Array.isArray(redirectUris)) {
+      for (const redirectUri of redirectUris) {
+        if (typeof redirectUri !== "string") {
+          throw new GuardhouseError(
+            "redirect_uris entries must be strings",
+            "INVALID_CLIENT_METADATA",
+          );
+        }
+        validateRedirectUri(redirectUri);
+      }
+    }
+
+    const response = await this.fetch(registrationEndpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(metadata),
+      token: normalizedInitialAccessToken,
+    });
+
+    if (!response.data || typeof response.data !== "object") {
+      throw new GuardhouseError(
+        "Client registration response is invalid",
+        "REGISTRATION_ERROR",
+      );
+    }
+
+    return response.data as Record<string, unknown>;
+  }
+
+  async assertAuthorizationPageClickjackingProtection(
+    authorizationEndpoint = "/connect/authorize",
+  ): Promise<AuthorizationPageProtectionResult> {
+    const response = await this.fetch(authorizationEndpoint, {
+      method: "GET",
+      skipAuthHeader: true,
+      skipDpopProof: true,
+      headers: {
+        Accept: "text/html,application/xhtml+xml",
+      },
+    });
+
+    const xFrameOptions =
+      response.headers.get("X-Frame-Options")?.trim() ?? undefined;
+    const cspHeader =
+      response.headers.get("Content-Security-Policy")?.trim() ?? undefined;
+    const frameAncestorsPolicy = cspHeader
+      ? this.getFrameAncestorsDirective(cspHeader)
+      : undefined;
+
+    const warnings: string[] = [];
+
+    if (!xFrameOptions) {
+      warnings.push("X-Frame-Options header is missing");
+    }
+
+    if (!frameAncestorsPolicy) {
+      warnings.push("CSP frame-ancestors directive is missing");
+    }
+
+    if (warnings.length > 0) {
+      this.logger.error(
+        "Authorization page is missing anti-clickjacking headers",
+        {
+          endpoint: sanitizeUrlForLogs(
+            this.buildRequestUrl(authorizationEndpoint),
+          ),
+          warnings,
+        },
+      );
+
+      throw new GuardhouseError(
+        "Authorization page protection check failed: missing clickjacking defense headers",
+        "AUTH_PAGE_CLICKJACKING_RISK",
+      );
+    }
+
+    return {
+      protected: true,
+      xFrameOptions,
+      frameAncestorsPolicy,
+      warnings,
+    };
   }
 
   /**

@@ -12,6 +12,24 @@ const DANGEROUS_PROTOCOLS = new Set([
   "file:",
 ]);
 
+const MAX_SAFE_COMPARE_BYTES = 4096;
+
+function toUtf8Bytes(value: string): Uint8Array {
+  if (typeof TextEncoder === "function") {
+    return new TextEncoder().encode(value);
+  }
+
+  if (typeof Buffer !== "undefined") {
+    return new Uint8Array(Buffer.from(value, "utf8"));
+  }
+
+  const bytes = new Uint8Array(value.length);
+  for (let index = 0; index < value.length; index += 1) {
+    bytes[index] = value.charCodeAt(index) & 0xff;
+  }
+  return bytes;
+}
+
 function normalizeHostname(hostname: string): string {
   const lowered = hostname.trim().toLowerCase();
 
@@ -74,9 +92,9 @@ export function validateRedirectUri(redirectUri: string): URL {
       throw new Error("redirectUri must use HTTPS unless it targets localhost");
     }
   } else if (protocol !== "https:") {
-    if (!/^[a-z][a-z0-9+.-]*:$/.test(protocol)) {
-      throw new Error("redirectUri protocol is invalid");
-    }
+    throw new Error(
+      "redirectUri must use HTTPS or localhost HTTP; custom URI schemes are not allowed",
+    );
   }
 
   if (parsed.username || parsed.password) {
@@ -102,4 +120,27 @@ export function sanitizeUrlForLogs(value: string): string {
   } catch {
     return value;
   }
+}
+
+export function timingSafeEqual(left: string, right: string): boolean {
+  const leftBytes = toUtf8Bytes(left);
+  const rightBytes = toUtf8Bytes(right);
+
+  if (
+    leftBytes.length > MAX_SAFE_COMPARE_BYTES ||
+    rightBytes.length > MAX_SAFE_COMPARE_BYTES
+  ) {
+    return false;
+  }
+
+  const compareLength = Math.max(leftBytes.length, rightBytes.length);
+  let mismatch = leftBytes.length ^ rightBytes.length;
+
+  for (let index = 0; index < compareLength; index += 1) {
+    const leftByte = index < leftBytes.length ? leftBytes[index] : 0;
+    const rightByte = index < rightBytes.length ? rightBytes[index] : 0;
+    mismatch |= leftByte ^ rightByte;
+  }
+
+  return mismatch === 0;
 }

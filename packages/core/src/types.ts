@@ -9,6 +9,17 @@ export interface GuardhouseConfig {
   introspectionEndpoint?: string;
   revocationEndpoint?: string;
   requestTimeoutMs?: number;
+  allowScopeNarrowing?: boolean;
+  maxAuthorizationHeaderBytes?: number;
+  maxSilentAuthAttempts?: number;
+  requireUserInteractionForSensitiveOperations?: boolean;
+  allowedPostLogoutRedirectUris?: string[];
+  sessionStorageKey?: string;
+  dpopProofFactory?: (context: {
+    method: string;
+    url: string;
+    accessToken?: string;
+  }) => string | Promise<string>;
   debug?: boolean;
 }
 
@@ -94,6 +105,7 @@ export interface AuthUrlOptions {
   prompt?: string;
   audience?: string;
   responseMode?: string;
+  formPostCsrfToken?: string;
   maxAge?: number;
   extraParams?: Record<string, string | number | null | undefined>;
 }

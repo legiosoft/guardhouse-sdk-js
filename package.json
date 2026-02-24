@@ -12,7 +12,7 @@
     "clean": "node -e \"const fs=require('fs');const path=require('path');const targets=['node_modules'];const root='packages';if(fs.existsSync(root)){for(const name of fs.readdirSync(root)){targets.push(path.join(root,name,'dist'));targets.push(path.join(root,name,'node_modules'));}}for(const target of targets){fs.rmSync(target,{recursive:true,force:true});}\""
   },
   "devDependencies": {
-    "typescript": "^5.3.0",
-    "prettier": "latest"
+    "typescript": "5.9.3",
+    "prettier": "3.7.4"
   }
 }
