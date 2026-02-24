@@ -19,7 +19,7 @@
  *    - Should not persist beyond auth flow
  *    - Minimizes attack surface if device is compromised
  *
- * 4. Why call /connect/endsession on logout?
+ * 4. Why call /connect/logout on logout?
  *    - Clears server-side session and cookies
  *    - Prevents session fixation attacks
  *    - Prevents other apps from using SSO cookies
@@ -659,7 +659,7 @@ export function GuardhouseProvider({
   /**
    * Logout user and clear session
    *
-   * SECURITY: Calls /connect/endsession to clear server cookies
+   * SECURITY: Calls /connect/logout to clear server cookies
    * SECURITY: Clears all local sensitive data from Keychain
    * SECURITY: Prevents session fixation attacks
    */
@@ -670,8 +670,8 @@ export function GuardhouseProvider({
 
         const returnTo = options?.returnTo || redirectUri || "com.myapp://";
 
-        // Call end-session endpoint to clear server session and cookies
-        const logoutUrl = new URL(`${authority}/connect/endsession`);
+        // Call logout endpoint to clear server session and cookies
+        const logoutUrl = new URL(`${authority}/connect/logout`);
         logoutUrl.searchParams.set("post_logout_redirect_uri", returnTo);
 
         const idToken = await storage.getItem(STORAGE_KEYS.ID_TOKEN);

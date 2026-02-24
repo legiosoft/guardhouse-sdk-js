@@ -221,6 +221,24 @@ describe("generateAuthUrl", () => {
     expect(parsed.searchParams.get("audience")).toBeNull();
   });
 
+  it("preserves root redirect_uri without forcing a trailing slash", () => {
+    const authUrl = generateAuthUrl({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      redirectUri: "http://localhost:3000",
+      responseType: "code",
+      state: "state-value-123456",
+      nonce: "nonce-value",
+      codeChallenge: "code-challenge",
+      audience: "api",
+    });
+
+    const parsed = new URL(authUrl);
+    expect(parsed.searchParams.get("redirect_uri")).toBe(
+      "http://localhost:3000",
+    );
+  });
+
   it("allows non-code response types without PKCE", () => {
     const authUrl = generateAuthUrl({
       authority: "https://auth.example.com",

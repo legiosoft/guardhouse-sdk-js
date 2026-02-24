@@ -128,6 +128,12 @@ export function validateRedirectUri(redirectUri: string): URL {
   return parsed;
 }
 
+export function validateAndNormalizeRedirectUri(redirectUri: string): string {
+  const normalizedRedirectUri = redirectUri.trim();
+  validateRedirectUri(normalizedRedirectUri);
+  return normalizedRedirectUri;
+}
+
 export function sanitizeUrlForLogs(value: string): string {
   try {
     const url = new URL(value);

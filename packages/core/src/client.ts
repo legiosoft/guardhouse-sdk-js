@@ -46,6 +46,7 @@ import {
   isLocalDevelopmentHostname,
   sanitizeUrlForLogs,
   timingSafeEqual,
+  validateAndNormalizeRedirectUri,
   validateRedirectUri,
 } from "./security";
 
@@ -1098,10 +1099,10 @@ export class GuardhouseClient {
       return;
     }
 
-    const normalizedRedirectUri = validateRedirectUri(redirectUri).toString();
+    const normalizedRedirectUri = validateAndNormalizeRedirectUri(redirectUri);
     const isAllowed = allowlist.some(
       (allowedUri) =>
-        validateRedirectUri(allowedUri).toString() === normalizedRedirectUri,
+        validateAndNormalizeRedirectUri(allowedUri) === normalizedRedirectUri,
     );
 
     if (!isAllowed) {
@@ -1498,7 +1499,7 @@ export class GuardhouseClient {
   ): Promise<TokenResponse> {
     const normalizedCode = this.requireNonEmptyString(code, "code");
     const normalizedCodeVerifier = this.validatePkceCodeVerifier(codeVerifier);
-    const normalizedRedirectUri = validateRedirectUri(redirectUri).toString();
+    const normalizedRedirectUri = validateAndNormalizeRedirectUri(redirectUri);
 
     const { safeParams, blockedKeys } = this.sanitizeTokenBodyParams(params);
 
@@ -2066,13 +2067,13 @@ export class GuardhouseClient {
   }
 
   buildLogoutUrl(request: LogoutRequest = {}): string {
-    const logoutEndpoint = request.logoutEndpoint || "/connect/endsession";
+    const logoutEndpoint = request.logoutEndpoint || "/connect/logout";
     const logoutUrl = new URL(this.buildRequestUrl(logoutEndpoint));
 
     if (request.postLogoutRedirectUri) {
-      const validatedRedirect = validateRedirectUri(
+      const validatedRedirect = validateAndNormalizeRedirectUri(
         request.postLogoutRedirectUri,
-      ).toString();
+      );
 
       this.assertAllowedPostLogoutRedirect(validatedRedirect);
       logoutUrl.searchParams.set("post_logout_redirect_uri", validatedRedirect);

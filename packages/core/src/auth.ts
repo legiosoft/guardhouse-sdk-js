@@ -6,7 +6,7 @@ import {
   isUnsafeObjectKey,
   sanitizeUrlForLogs,
   timingSafeEqual,
-  validateRedirectUri,
+  validateAndNormalizeRedirectUri,
 } from "./security";
 
 type ErrorWithCauseConstructor = new (
@@ -646,7 +646,7 @@ export function sanitizeAuthorizationUrlForHistory(authUrl: string): string {
 export function createLocationHeaderRedirect(
   redirectUrl: string,
 ): RedirectResponse {
-  const validatedRedirect = validateRedirectUri(redirectUrl).toString();
+  const validatedRedirect = validateAndNormalizeRedirectUri(redirectUrl);
 
   return {
     statusCode: 302,
@@ -804,7 +804,7 @@ export function generateAuthUrl(options: AuthUrlOptions): string {
     const authorityUrl = new URL(authority);
     enforceSecureHttpUrl(authorityUrl, "Authority");
     enforceNonSpoofableHostname(authorityUrl, "Authority");
-    const validatedRedirectUri = validateRedirectUri(redirectUri).toString();
+    const validatedRedirectUri = validateAndNormalizeRedirectUri(redirectUri);
     const normalizedRequestUri = normalizeRequestUri(requestUri);
 
     if (

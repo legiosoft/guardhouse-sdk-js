@@ -68,6 +68,7 @@ function ProtectedPage() {
 - OIDC session data (access token, refresh token, ID token, expiry, user claims, issuer/audience context) is stored in `sessionStorage` only.
 - Callback handling and token operations are delegated to `@guardhouse/core` so the same hardened security checks are consistently applied.
 - For IdPs that reject `audience` on `/authorize`, set `allowAuthorizationWithoutAudience: true` and omit `audience`.
+- Token exchange/refresh requests omit `scope` by default for OpenIddict compatibility.
 
 ## License
 

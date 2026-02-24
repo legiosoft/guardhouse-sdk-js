@@ -515,6 +515,39 @@ describe("GuardhouseClient", () => {
     expect(refreshBody.get("custom_refresh")).toBe("ok");
   });
 
+  it("preserves root redirect_uri without forcing trailing slash in token exchange", async () => {
+    const fetchMock = jest.fn().mockResolvedValueOnce(
+      jsonResponse({
+        access_token: "access",
+        token_type: "Bearer",
+        expires_in: 3600,
+      }),
+    );
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+
+    await client.exchangeCodeForTokens(
+      "good-code",
+      validCodeVerifier,
+      "http://localhost:3000",
+    );
+
+    const exchangeBody = new URLSearchParams(
+      fetchMock.mock.calls[0][1]?.body as string,
+    );
+
+    expect(exchangeBody.get("redirect_uri")).toBe("http://localhost:3000");
+  });
+
   it("includes client_id for public-client token requests", async () => {
     const fetchMock = jest
       .fn()
@@ -1672,7 +1705,7 @@ describe("GuardhouseClient", () => {
     });
 
     const parsed = new URL(logoutUrl);
-    expect(parsed.pathname).toBe("/connect/endsession");
+    expect(parsed.pathname).toBe("/connect/logout");
     expect(parsed.searchParams.get("post_logout_redirect_uri")).toBe(
       "https://app.example.com/logout",
     );

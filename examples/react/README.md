@@ -63,3 +63,4 @@ Run `examples/node` server to test end-to-end.
 - If your provider supports resource indicators, set `VITE_AUDIENCE` and optionally set `VITE_ALLOW_AUTH_WITHOUT_AUDIENCE=false`.
 - Keeps `allowOfflineAccessScope=true` when requesting `offline_access`.
 - `VITE_REDIRECT_URI` must exactly match an allowed redirect URI on the client in Guardhouse/OpenIddict.
+- Token requests omit `scope` by default, which matches OpenIddict expectations for authorization-code exchanges.

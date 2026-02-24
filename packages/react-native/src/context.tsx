@@ -467,7 +467,7 @@ export function GuardhouseProvider({
 
         const returnTo = options?.returnTo || redirectUri || "com.myapp://";
 
-        const logoutUrl = new URL(`${authority}/connect/endsession`);
+        const logoutUrl = new URL(`${authority}/connect/logout`);
         logoutUrl.searchParams.set("post_logout_redirect_uri", returnTo);
 
         const idToken = await secureStorage.getItem(StorageKeys.ID_TOKEN);

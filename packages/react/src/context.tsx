@@ -185,8 +185,6 @@ export function GuardhouseProvider({
       requireDpopForAccessTokenRequests:
         config.requireDpopForAccessTokenRequests,
       dpopProofFactory: config.dpopProofFactory,
-      sessionStorageKey: `${StorageKeys.OIDC_SESSION}:core`,
-      storage,
       debug: config.debug,
     }),
     [
@@ -208,7 +206,6 @@ export function GuardhouseProvider({
       config.scope,
       config.tokenEndpoint,
       config.userInfoEndpoint,
-      storage,
     ],
   );
 
@@ -313,14 +310,8 @@ export function GuardhouseProvider({
       }
 
       try {
-        const refreshParams: Record<string, string> = {};
-        if (sessionData.scope) {
-          refreshParams["scope"] = sessionData.scope;
-        }
-
         const tokenResponse = await client.refreshToken(
           sessionData.refreshToken,
-          refreshParams,
         );
 
         const refreshedSession: OidcSessionData = {
@@ -402,16 +393,10 @@ export function GuardhouseProvider({
         throw new Error("OAuth callback did not include an authorization code");
       }
 
-      const tokenParams: Record<string, string> = {};
-      if (requestedScope && requestedScope.trim() !== "") {
-        tokenParams["scope"] = requestedScope;
-      }
-
       const tokenData = await client.exchangeCodeForTokens(
         callback.code,
         codeVerifier,
         config.redirectUri,
-        tokenParams,
       );
 
       logger.debug("Token exchange succeeded", {
