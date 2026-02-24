@@ -14,6 +14,7 @@
 - The `@guardhouse/core` package must be built before `@guardhouse/node`, `@guardhouse/react`, or `@guardhouse/react-native` packages.
 - Run `npm run build:core` to build the core package first.
 - Use `npm run build` to build all packages in the correct order.
+- Publishing guide: see `DEPLOYMENT.md`.
 
 ## Debug Mode
 
