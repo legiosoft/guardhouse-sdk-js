@@ -85,14 +85,16 @@ export type {
 
 // PKCE exports
 export {
-  consumeCodeVerifier,
-  dropCodeVerifier,
   generatePKCE,
   generateState,
   generateNonce,
-  stashCodeVerifier,
+  OAuthPKCEManager,
 } from "./pkce";
-export type { PKCECodePair, PKCEOptions } from "./pkce";
+export type {
+  PKCECodePair,
+  PKCEOptions,
+  OAuthPKCEManagerOptions,
+} from "./pkce";
 
 // Crypto exports
 export {

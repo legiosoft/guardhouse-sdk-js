@@ -125,6 +125,27 @@ function tryLoadNodeCrypto(): NodeCryptoLike | null {
   }
 }
 
+export function bytesToBase64Url(buffer: Uint8Array): string {
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(buffer)
+      .toString("base64")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=/g, "");
+  }
+
+  if (typeof btoa !== "function") {
+    throw new Error("Base64 encoding is unavailable in this environment");
+  }
+
+  let binary = "";
+  for (const byte of buffer) {
+    binary += String.fromCharCode(byte);
+  }
+
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+}
+
 export interface CryptoAdapter {
   name?: string;
   randomBytes(length: number): Promise<Uint8Array>;

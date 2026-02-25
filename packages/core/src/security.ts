@@ -16,7 +16,7 @@ const PUNYCODE_LABEL_PREFIX = "xn--";
 
 const MAX_SAFE_COMPARE_BYTES = 4096;
 
-function toUtf8Bytes(value: string): Uint8Array {
+export function toUtf8Bytes(value: string): Uint8Array {
   if (typeof TextEncoder === "function") {
     return new TextEncoder().encode(value);
   }

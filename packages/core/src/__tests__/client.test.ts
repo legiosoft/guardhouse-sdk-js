@@ -1,6 +1,5 @@
 import { GuardhouseClient } from "../client";
 import { GuardhouseError } from "../config";
-import { stashCodeVerifier } from "../pkce";
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -700,13 +699,13 @@ describe("GuardhouseClient", () => {
       writable: true,
     });
 
-    const verifierHandle = await stashCodeVerifier(validCodeVerifier);
-
     const client = new GuardhouseClient({
       authority: "https://auth.example.com",
       clientId: "public-client",
       scope: "read",
     });
+
+    const verifierHandle = await client.stashCodeVerifier(validCodeVerifier);
 
     await expect(
       client.exchangeCodeForTokensUsingHandle(
@@ -1391,7 +1390,7 @@ describe("GuardhouseClient", () => {
     });
 
     await client.validateOAuthCallback(
-      `https://app.example.com/callback?state=state-callback-xyz123#code=abc&access_token=access-token-123&id_token=${idToken}`,
+      `https://app.example.com/callback#state=state-callback-xyz123&code=abc&access_token=access-token-123&id_token=${idToken}`,
       "state-callback-xyz123",
     );
 

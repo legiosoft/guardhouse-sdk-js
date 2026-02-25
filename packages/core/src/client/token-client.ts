@@ -1,5 +1,5 @@
 import { GuardhouseError } from "../config";
-import { consumeCodeVerifier, dropCodeVerifier } from "../pkce";
+import { OAuthPKCEManager } from "../pkce";
 import { decodeJWT, validateOidcHashClaims } from "../token";
 import {
   sanitizeUrlForLogs,
@@ -16,6 +16,12 @@ import type {
 } from "./types";
 
 export class GuardhouseClientToken extends GuardhouseClientSession {
+  private readonly pkceManager = new OAuthPKCEManager();
+
+  async stashCodeVerifier(codeVerifier: string): Promise<string> {
+    return this.pkceManager.stashCodeVerifier(codeVerifier);
+  }
+
   async exchangeCodeForTokens(
     code: string,
     codeVerifier: string,
@@ -113,7 +119,7 @@ export class GuardhouseClientToken extends GuardhouseClientSession {
     let verifier = "";
 
     try {
-      verifier = consumeCodeVerifier(normalizedHandle);
+      verifier = this.pkceManager.consumeCodeVerifier(normalizedHandle);
       return await this.exchangeCodeForTokens(
         code,
         verifier,
@@ -122,7 +128,7 @@ export class GuardhouseClientToken extends GuardhouseClientSession {
       );
     } finally {
       verifier = "";
-      dropCodeVerifier(normalizedHandle);
+      this.pkceManager.dropCodeVerifier(normalizedHandle);
     }
   }
 
