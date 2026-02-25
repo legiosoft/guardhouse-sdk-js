@@ -44,9 +44,23 @@
 
 import { createGuardhouseLogger } from "./debug";
 
-type NodeRequireFunction = (moduleId: string) => any;
+interface NodeCryptoHashLike {
+  update(data: Uint8Array): NodeCryptoHashLike;
+  digest(): Uint8Array;
+}
 
-function tryLoadNodeCrypto(): any | null {
+interface NodeCryptoLike {
+  randomBytes(length: number): Uint8Array;
+  randomBytes(
+    length: number,
+    callback: (error: Error | null, buffer: Uint8Array) => void,
+  ): void;
+  createHash(algorithm: "sha256"): NodeCryptoHashLike;
+}
+
+type NodeRequireFunction = (moduleId: string) => unknown;
+
+function tryLoadNodeCrypto(): NodeCryptoLike | null {
   try {
     const dynamicRequire = Function(
       "return typeof require !== 'undefined' ? require : null;",
@@ -56,7 +70,56 @@ function tryLoadNodeCrypto(): any | null {
       return null;
     }
 
-    return dynamicRequire("crypto");
+    const loadedCrypto = dynamicRequire(
+      "crypto",
+    ) as Partial<NodeCryptoLike> | null;
+
+    const randomBytes = loadedCrypto?.randomBytes;
+    const createHash = loadedCrypto?.createHash;
+
+    if (
+      !loadedCrypto ||
+      typeof randomBytes !== "function" ||
+      typeof createHash !== "function"
+    ) {
+      return null;
+    }
+
+    try {
+      const syncRandomBytes = randomBytes as (length: number) => unknown;
+      const probeRandom = syncRandomBytes.call(loadedCrypto, 1);
+
+      if (probeRandom instanceof Uint8Array) {
+        // Expected Node.js Buffer/Uint8Array output.
+      } else if (
+        typeof ArrayBuffer !== "undefined" &&
+        probeRandom instanceof ArrayBuffer
+      ) {
+        void new Uint8Array(probeRandom);
+      } else if (
+        typeof probeRandom === "object" &&
+        probeRandom !== null &&
+        "length" in probeRandom &&
+        typeof (probeRandom as { length: unknown }).length === "number"
+      ) {
+        void new Uint8Array(probeRandom as ArrayLike<number>);
+      } else {
+        return null;
+      }
+
+      const probeHash = createHash.call(loadedCrypto, "sha256");
+      if (
+        !probeHash ||
+        typeof probeHash.update !== "function" ||
+        typeof probeHash.digest !== "function"
+      ) {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+
+    return loadedCrypto as NodeCryptoLike;
   } catch {
     return null;
   }
@@ -91,10 +154,16 @@ class SubtleCryptoAdapter implements CryptoAdapter {
 
   async sha256(data: Uint8Array): Promise<Uint8Array> {
     if (typeof globalThis.crypto?.subtle === "object") {
-      const buffer = await globalThis.crypto.subtle.digest(
-        { name: "SHA-256" },
-        data as any,
-      );
+      const subtle = globalThis.crypto.subtle;
+      const bufferToHash =
+        data.byteOffset === 0 && data.byteLength === data.buffer.byteLength
+          ? data.buffer
+          : data.slice().buffer;
+      const digestInput = bufferToHash as unknown as Parameters<
+        typeof subtle.digest
+      >[1];
+
+      const buffer = await subtle.digest({ name: "SHA-256" }, digestInput);
       return new Uint8Array(buffer);
     }
     throw new Error("crypto.subtle not available");
@@ -114,9 +183,9 @@ class SubtleCryptoAdapter implements CryptoAdapter {
  */
 class NodeCryptoAdapter implements CryptoAdapter {
   name = "NodeCrypto";
-  private nodeCrypto: any;
+  private nodeCrypto: NodeCryptoLike;
 
-  constructor(nodeCrypto?: any) {
+  constructor(nodeCrypto?: NodeCryptoLike) {
     const resolvedNodeCrypto = nodeCrypto ?? tryLoadNodeCrypto();
 
     if (!resolvedNodeCrypto) {
@@ -128,12 +197,14 @@ class NodeCryptoAdapter implements CryptoAdapter {
 
   async randomBytes(length: number): Promise<Uint8Array> {
     return new Promise((resolve, reject) => {
-      try {
-        const buffer = this.nodeCrypto.randomBytes(length);
+      this.nodeCrypto.randomBytes(length, (error, buffer) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
         resolve(new Uint8Array(buffer));
-      } catch (error) {
-        reject(error);
-      }
+      });
     });
   }
 
@@ -141,7 +212,7 @@ class NodeCryptoAdapter implements CryptoAdapter {
     return new Promise((resolve, reject) => {
       try {
         const hash = this.nodeCrypto.createHash("sha256");
-        hash.update(Buffer.from(data));
+        hash.update(Buffer.from(data.buffer, data.byteOffset, data.byteLength));
         resolve(new Uint8Array(hash.digest()));
       } catch (error) {
         reject(error);
@@ -201,9 +272,13 @@ class FallbackCryptoAdapter implements CryptoAdapter {
 export function detectCryptoAdapter(): CryptoAdapter {
   logger.debug("Detecting crypto adapter");
 
+  const webCrypto = globalThis.crypto;
+
   if (
-    typeof globalThis.crypto?.subtle === "object" &&
-    typeof globalThis.crypto?.getRandomValues === "function"
+    webCrypto &&
+    typeof webCrypto.getRandomValues === "function" &&
+    webCrypto.subtle &&
+    typeof webCrypto.subtle.digest === "function"
   ) {
     logger.info("Using SubtleCrypto adapter");
     return new SubtleCryptoAdapter();
