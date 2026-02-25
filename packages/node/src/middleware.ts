@@ -1,7 +1,8 @@
 import jwt from "jsonwebtoken";
-import jwksClient, { JwksClient } from "jwks-rsa";
+import type { JwksClient } from "jwks-rsa";
+import jwksClient from "jwks-rsa";
 import { GuardhouseConstants } from "./constants";
-import {
+import type {
   GuardhouseResourceOptions,
   GuardhouseUser,
   ExpressRequest,
@@ -9,8 +10,8 @@ import {
   ExpressNextFunction,
   ExpressMiddleware,
   TokenValidationMode,
-  IntrospectionCredentialTransmission,
 } from "./types";
+import { IntrospectionCredentialTransmission } from "./types";
 import {
   buildClaimsFromIntrospection,
   createWWWAuthenticateHeader,
@@ -22,7 +23,8 @@ import {
   getTokenHash,
 } from "./utils";
 import { createNodeLogger } from "./debug";
-import { GuardhouseClient, IntrospectionResponse } from "@guardhouse/core";
+import type { IntrospectionResponse } from "@guardhouse/core";
+import { GuardhouseClient } from "@guardhouse/core";
 
 interface IntrospectionCacheEntry {
   result: IntrospectionResponse;
@@ -173,7 +175,7 @@ export class GuardhouseResourceService {
 
     try {
       header = JSON.parse(Buffer.from(headerPart, "base64").toString("utf-8"));
-    } catch (error) {
+    } catch {
       throw new Error("Failed to parse token header");
     }
 

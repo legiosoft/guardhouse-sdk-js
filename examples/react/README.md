@@ -29,7 +29,7 @@ VITE_SCOPE=openid profile email offline_access
 VITE_AUDIENCE=
 VITE_ALLOW_AUTH_WITHOUT_AUDIENCE=true
 VITE_ALLOW_OFFLINE_ACCESS_SCOPE=true
-VITE_API_BASE_URL=http://localhost:3001
+VITE_API_SERVER_URL=https://localhost:5001
 ```
 
 3. Install dependencies:
@@ -54,8 +54,14 @@ npm run preview
 
 ## API demo
 
-The API demo calls `${VITE_API_BASE_URL}/protected` with the access token.
-Run `examples/node` server to test end-to-end.
+The API demo calls `/api/products/{id}` with the access token.
+In dev mode, Vite proxies `/api/*` to `VITE_API_SERVER_URL`.
+
+To test with the .NET resource sample from the sibling repo, run:
+
+- `../guardhouse-sdk-dotnet/examples/ExampleResource`
+
+Default HTTPS URL for that sample is `https://localhost:5001`.
 
 ## Security defaults in this example
 

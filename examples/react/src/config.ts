@@ -10,9 +10,11 @@ const clientId = import.meta.env.VITE_CLIENT_ID?.trim() || "your-client-id";
 const redirectUri = import.meta.env.VITE_REDIRECT_URI?.trim() || runtimeOrigin;
 const postLogoutRedirectUri =
   import.meta.env.VITE_POST_LOGOUT_REDIRECT_URI?.trim() || redirectUri;
-const apiBaseUrl =
-  import.meta.env.VITE_API_BASE_URL?.trim().replace(/\/+$/, "") ||
-  "http://localhost:3001";
+const apiServerUrl = (
+  import.meta.env.VITE_API_SERVER_URL?.trim() ||
+  import.meta.env.VITE_API_BASE_URL?.trim() ||
+  "https://localhost:5001"
+).replace(/\/+$/, "");
 const scope =
   import.meta.env.VITE_SCOPE?.trim() || "openid profile email offline_access";
 const audience = import.meta.env.VITE_AUDIENCE?.trim() || undefined;
@@ -36,5 +38,6 @@ export const appConfig = {
   audience,
   allowAuthorizationWithoutAudience,
   allowOfflineAccessScope,
-  apiBaseUrl,
+  apiServerUrl,
+  apiBaseUrl: apiServerUrl,
 };

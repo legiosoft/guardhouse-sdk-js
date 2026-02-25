@@ -25,11 +25,7 @@ function toUtf8Bytes(value: string): Uint8Array {
     return new Uint8Array(Buffer.from(value, "utf8"));
   }
 
-  const bytes = new Uint8Array(value.length);
-  for (let index = 0; index < value.length; index += 1) {
-    bytes[index] = value.charCodeAt(index) & 0xff;
-  }
-  return bytes;
+  throw new Error("A valid UTF-8 encoder is unavailable in this environment.");
 }
 
 function normalizeHostname(hostname: string): string {
@@ -49,7 +45,7 @@ export function isLocalDevelopmentHostname(hostname: string): boolean {
     return true;
   }
 
-  if (normalized.startsWith("127.")) {
+  if (/^127(?:\.(?:25[0-5]|2[0-4]\d|[01]?\d\d?)){3}$/.test(normalized)) {
     return true;
   }
 
@@ -111,10 +107,8 @@ export function validateRedirectUri(redirectUri: string): URL {
     if (!isLocalDevelopmentHostname(parsed.hostname)) {
       throw new Error("redirectUri must use HTTPS unless it targets localhost");
     }
-  } else if (protocol !== "https:") {
-    throw new Error(
-      "redirectUri must use HTTPS or localhost HTTP; custom URI schemes are not allowed",
-    );
+  } else if (protocol !== "https:" && !protocol.endsWith(":")) {
+    throw new Error("redirectUri must use a valid URI protocol");
   }
 
   if (parsed.username || parsed.password) {
@@ -152,20 +146,18 @@ export function timingSafeEqual(left: string, right: string): boolean {
   const leftBytes = toUtf8Bytes(left);
   const rightBytes = toUtf8Bytes(right);
 
-  if (
-    leftBytes.length > MAX_SAFE_COMPARE_BYTES ||
-    rightBytes.length > MAX_SAFE_COMPARE_BYTES
-  ) {
+  if (leftBytes.length !== rightBytes.length) {
     return false;
   }
 
-  const compareLength = Math.max(leftBytes.length, rightBytes.length);
-  let mismatch = leftBytes.length ^ rightBytes.length;
+  if (leftBytes.length > MAX_SAFE_COMPARE_BYTES) {
+    return false;
+  }
 
-  for (let index = 0; index < compareLength; index += 1) {
-    const leftByte = index < leftBytes.length ? leftBytes[index] : 0;
-    const rightByte = index < rightBytes.length ? rightBytes[index] : 0;
-    mismatch |= leftByte ^ rightByte;
+  let mismatch = 0;
+
+  for (let index = 0; index < leftBytes.length; index += 1) {
+    mismatch |= leftBytes[index] ^ rightBytes[index];
   }
 
   return mismatch === 0;

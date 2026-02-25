@@ -511,6 +511,49 @@ export function GuardhouseProvider({
     storage,
   ]);
 
+  const handlePostLogoutRedirect = useCallback(async (): Promise<boolean> => {
+    const searchParams = parseQueryParams(window.location.search);
+    const hashParams = parseQueryParams(
+      window.location.hash.startsWith("#")
+        ? `?${window.location.hash.slice(1)}`
+        : window.location.hash,
+    );
+
+    const callbackState = searchParams["state"] ?? hashParams["state"];
+    const hasIssuerHints = Boolean(
+      searchParams["iss"] ||
+      searchParams["sid"] ||
+      hashParams["iss"] ||
+      hashParams["sid"],
+    );
+
+    if (!callbackState && !hasIssuerHints) {
+      return false;
+    }
+
+    const expectedLogoutState = await storage.getItem(StorageKeys.LOGOUT_STATE);
+    const matchesExpectedLogoutState =
+      typeof expectedLogoutState === "string" &&
+      expectedLogoutState.trim() !== "" &&
+      typeof callbackState === "string" &&
+      callbackState.trim() !== "" &&
+      callbackState === expectedLogoutState;
+
+    if (!matchesExpectedLogoutState && !hasIssuerHints) {
+      return false;
+    }
+
+    logger.debug("Detected post-logout callback, sanitizing URL", {
+      hasIssuerHints,
+      hasState: Boolean(callbackState),
+    });
+
+    await storage.removeItem(StorageKeys.LOGOUT_STATE);
+    removeQueryParams();
+
+    return true;
+  }, [logger, storage]);
+
   const checkSession = useCallback(async () => {
     try {
       handleLoading();
@@ -600,8 +643,11 @@ export function GuardhouseProvider({
       return;
     }
 
-    void checkSession();
-  }, [checkSession, handleCallback, logger]);
+    void (async () => {
+      await handlePostLogoutRedirect();
+      await checkSession();
+    })();
+  }, [checkSession, handleCallback, handlePostLogoutRedirect, logger]);
 
   const loginWithRedirect = useCallback(
     async (options?: LoginOptions) => {
@@ -748,6 +794,8 @@ export function GuardhouseProvider({
         federated: options?.federated,
       });
 
+      await storage.setItem(StorageKeys.LOGOUT_STATE, logoutState);
+
       logger.debug("Clearing local auth state before redirecting to logout");
       await clearAuthState();
 
@@ -764,6 +812,7 @@ export function GuardhouseProvider({
       config.logoutRedirectUri,
       logger,
       readStoredOidcSession,
+      storage,
     ],
   );
 

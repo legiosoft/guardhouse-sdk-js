@@ -12,6 +12,13 @@ Universal JavaScript/TypeScript library for OAuth 2.0 Authorization Code Flow wi
 - **Dual Output**: ESM and CommonJS support
 - **Strictly Typed**: Full TypeScript support
 
+## Source Layout
+
+- `src/auth/`: OAuth URL generation, callback parsing/sanitization, state/CSRF helpers
+- `src/client/`: Guardhouse client split by responsibility (base/session/token/advanced)
+- `src/token/`: JWT decode/validation, OIDC hash claims, JWK validation, replay cache
+- `src/auth.ts`, `src/client.ts`, `src/token.ts`: compatibility entry files that re-export folder modules
+
 ## Installation
 
 ```bash

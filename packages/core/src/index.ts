@@ -66,17 +66,16 @@ export type {
   SessionState,
 } from "./client";
 export {
-  consumeStateBinding,
   createLocationHeaderRedirect,
   generateAuthUrl,
   isSilentAuthenticationError,
+  OAuthStateManager,
   parseOAuthCallbackUrl,
   sanitizeAuthorizationUrlForHistory,
   sanitizeOAuthCallbackUrl,
-  stashExpectedState,
+  StateExpiredError,
   validateFormPostCsrfToken,
   validateFrontChannelLogoutRequest,
-  validateAndConsumeState,
 } from "./auth";
 export type {
   FrontChannelLogoutValidationOptions,

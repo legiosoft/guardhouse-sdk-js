@@ -95,7 +95,7 @@ export class GuardhouseError extends Error {
 
 export interface AuthUrlOptions {
   authority: string;
-  authorizationEndpoint?: string;
+  authorizationEndpoint: string;
   clientId: string;
   redirectUri: string;
   requestUri?: string;

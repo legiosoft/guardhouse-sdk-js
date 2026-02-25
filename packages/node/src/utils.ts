@@ -99,7 +99,9 @@ export function parseErrorResponse(responseContent: string): string {
       }
       return `Error: ${error}`;
     }
-  } catch {}
+  } catch {
+    return "Authentication failed";
+  }
 
   return "Authentication failed";
 }

@@ -1,4 +1,4 @@
-import { StorageAdapter } from "./types";
+import type { StorageAdapter } from "./types";
 
 const UNSAFE_QUERY_PARAM_KEYS = new Set([
   "__proto__",
@@ -52,6 +52,7 @@ export const StorageKeys = {
   USER: "gh_user",
   CODE_VERIFIER: "gh_code_verifier",
   STATE: "gh_state",
+  LOGOUT_STATE: "gh_logout_state",
   NONCE: "gh_nonce",
   REQUESTED_SCOPE: "gh_requested_scope",
   REQUESTED_AUDIENCE: "gh_requested_audience",
@@ -70,7 +71,7 @@ export function generateBase64UrlEncodedString(length: number): string {
   const array = new Uint8Array(length);
   crypto.getRandomValues(array);
 
-  let base64 = btoa(String.fromCharCode(...array));
+  const base64 = btoa(String.fromCharCode(...array));
   return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
 }
 
@@ -114,6 +115,8 @@ export function removeQueryParams(): void {
   searchParams.delete("scope");
   searchParams.delete("error");
   searchParams.delete("error_description");
+  searchParams.delete("iss");
+  searchParams.delete("sid");
 
   const rawHash = url.hash.startsWith("#") ? url.hash.slice(1) : url.hash;
   if (rawHash.includes("=") || rawHash.includes("&")) {
@@ -130,6 +133,8 @@ export function removeQueryParams(): void {
     hashParams.delete("scope");
     hashParams.delete("error");
     hashParams.delete("error_description");
+    hashParams.delete("iss");
+    hashParams.delete("sid");
 
     const sanitizedHash = hashParams.toString();
     url.hash = sanitizedHash ? `#${sanitizedHash}` : "";

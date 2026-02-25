@@ -1,25 +1,24 @@
+import type { ReactNode } from "react";
 import React, {
   createContext,
   useContext,
   useState,
   useEffect,
   useCallback,
-  ReactNode,
   useRef,
 } from "react";
 import { Linking } from "react-native";
 import InAppBrowser from "react-native-inappbrowser-reborn";
-import {
-  generateAuthUrl,
-  generatePKCE,
-  User as CoreUser,
-} from "@guardhouse/core";
-import {
+import type { User as CoreUser } from "@guardhouse/core";
+import { generateAuthUrl, generatePKCE } from "@guardhouse/core";
+import type {
   AuthState,
   TokenData,
   LoginOptions,
   LogoutOptions,
   SecurityError,
+} from "./types";
+import {
   RefreshTokenError,
   BiometricAuthFailedError,
   SessionExpiredError,

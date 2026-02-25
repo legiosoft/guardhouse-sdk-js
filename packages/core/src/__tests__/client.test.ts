@@ -1164,7 +1164,7 @@ describe("GuardhouseClient", () => {
 
   it("times out requests when requestTimeoutMs is exceeded", async () => {
     const fetchMock = jest.fn().mockImplementation(
-      (input: RequestInfo | URL, init?: RequestInit) =>
+      (input: string | URL, init?: RequestInit) =>
         new Promise<Response>((resolve, reject) => {
           void input;
           void resolve;

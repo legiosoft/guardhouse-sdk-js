@@ -163,7 +163,8 @@ function ProtectedPage() {
 
 function ApiDemo() {
   const { getAccessToken, user } = useAuth();
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<unknown>(null);
+  const [productId, setProductId] = useState("1");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -174,14 +175,25 @@ function ApiDemo() {
 
     try {
       const token = await getAccessToken();
+      const normalizedProductId = productId.trim();
 
       if (!token) {
         throw new Error("No access token available");
       }
 
-      const response = await fetch(`${appConfig.apiBaseUrl}/protected`, {
+      if (
+        !/^\d+$/.test(normalizedProductId) ||
+        Number(normalizedProductId) <= 0
+      ) {
+        throw new Error("Product ID must be a positive integer");
+      }
+
+      const requestPath = `/api/products/${encodeURIComponent(normalizedProductId)}`;
+
+      const response = await fetch(requestPath, {
         headers: {
           Authorization: `Bearer ${token}`,
+          Accept: "application/json",
         },
       });
 
@@ -204,14 +216,32 @@ function ApiDemo() {
 
       {user ? (
         <>
-          <p>Test authentication by calling a protected API endpoint.</p>
+          <p>
+            Call the protected products endpoint in the .NET resource example.
+            <br />
+            <code>/api/products/{"{id}"}</code> (proxied to{" "}
+            <code>{appConfig.apiServerUrl}</code>)
+          </p>
+
+          <div style={{ marginBottom: "1rem" }}>
+            <label htmlFor="product-id">Product ID: </label>
+            <input
+              id="product-id"
+              type="number"
+              min={1}
+              step={1}
+              value={productId}
+              onChange={(event) => setProductId(event.target.value)}
+              style={{ marginLeft: "0.5rem", padding: "0.35rem 0.5rem" }}
+            />
+          </div>
 
           <button
             className="button"
             onClick={fetchProtectedData}
             disabled={loading}
           >
-            {loading ? "Fetching..." : "Fetch Protected Data"}
+            {loading ? "Fetching..." : "Fetch Protected Product"}
           </button>
 
           {error && (

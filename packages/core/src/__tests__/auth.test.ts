@@ -1,16 +1,26 @@
 import {
-  consumeStateBinding,
   createLocationHeaderRedirect,
-  generateAuthUrl,
+  generateAuthUrl as rawGenerateAuthUrl,
   isSilentAuthenticationError,
+  OAuthStateManager,
   parseOAuthCallbackUrl,
   sanitizeAuthorizationUrlForHistory,
   sanitizeOAuthCallbackUrl,
-  stashExpectedState,
+  StateExpiredError,
   validateFormPostCsrfToken,
   validateFrontChannelLogoutRequest,
-  validateAndConsumeState,
 } from "../auth";
+
+const generateAuthUrl = (options: unknown): string => {
+  if (!options || typeof options !== "object") {
+    return rawGenerateAuthUrl(options as never);
+  }
+
+  return rawGenerateAuthUrl({
+    authorizationEndpoint: "/connect/authorize",
+    ...(options as Record<string, unknown>),
+  } as never);
+};
 
 describe("generateAuthUrl", () => {
   it("requires options", () => {
@@ -28,6 +38,17 @@ describe("generateAuthUrl", () => {
         state: "state-value-123456",
       }),
     ).toThrow("authority is required");
+  });
+
+  it("requires authorizationEndpoint", () => {
+    expect(() =>
+      rawGenerateAuthUrl({
+        authority: "https://auth.example.com",
+        clientId: "client-id",
+        redirectUri: "https://app.example.com/callback",
+        state: "state-value-123456",
+      } as never),
+    ).toThrow("authorizationEndpoint is required");
   });
 
   it("requires clientId", () => {
@@ -148,6 +169,9 @@ describe("generateAuthUrl", () => {
       extraParams: {
         client_id: "evil-client",
         state: "evil-state",
+        id_token_hint: "evil-id-token",
+        client_secret: "leak",
+        code_verifier: "verifier",
         custom_param: "custom-value",
       },
     });
@@ -156,6 +180,9 @@ describe("generateAuthUrl", () => {
 
     expect(parsed.searchParams.get("client_id")).toBe("good-client");
     expect(parsed.searchParams.get("state")).toBe("good-state-123456");
+    expect(parsed.searchParams.get("id_token_hint")).toBeNull();
+    expect(parsed.searchParams.get("client_secret")).toBeNull();
+    expect(parsed.searchParams.get("code_verifier")).toBeNull();
     expect(parsed.searchParams.get("custom_param")).toBe("custom-value");
   });
 
@@ -334,18 +361,34 @@ describe("generateAuthUrl", () => {
     ).toThrow("internationalized domain label");
   });
 
-  it("rejects custom redirect URI schemes", () => {
+  it("allows custom redirect URI schemes for native apps", () => {
+    const authUrl = generateAuthUrl({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      redirectUri: "myapp://callback",
+      state: "state-value-123456",
+      nonce: "nonce-value",
+      codeChallenge: "code-challenge",
+      audience: "https://api.example.com",
+    });
+
+    expect(new URL(authUrl).searchParams.get("redirect_uri")).toBe(
+      "myapp://callback",
+    );
+  });
+
+  it("rejects non-loopback localhost-like IPv4 shortcuts", () => {
     expect(() =>
       generateAuthUrl({
         authority: "https://auth.example.com",
         clientId: "client-id",
-        redirectUri: "myapp://callback",
+        redirectUri: "http://127.bad/callback",
         state: "state-value-123456",
         nonce: "nonce-value",
         codeChallenge: "code-challenge",
         audience: "https://api.example.com",
       }),
-    ).toThrow("custom URI schemes are not allowed");
+    ).toThrow("redirectUri must use HTTPS unless it targets localhost");
   });
 
   it("blocks redirect-like extra params", () => {
@@ -381,6 +424,37 @@ describe("generateAuthUrl", () => {
         prompt: "none login",
       }),
     ).toThrow('prompt value "none" must not be combined');
+  });
+
+  it("rejects maxAge when prompt includes none", () => {
+    expect(() =>
+      generateAuthUrl({
+        authority: "https://auth.example.com/authorize",
+        clientId: "client-id",
+        redirectUri: "https://app.example.com/callback",
+        state: "state-value-123456",
+        nonce: "nonce-value",
+        codeChallenge: "code-challenge",
+        audience: "https://api.example.com",
+        prompt: "none",
+        maxAge: 60,
+      }),
+    ).toThrow("maxAge cannot be used with prompt='none'");
+  });
+
+  it("rejects unsupported prompt values", () => {
+    expect(() =>
+      generateAuthUrl({
+        authority: "https://auth.example.com",
+        clientId: "client-id",
+        redirectUri: "https://app.example.com/callback",
+        state: "state-value-123456",
+        nonce: "nonce-value",
+        codeChallenge: "code-challenge",
+        audience: "https://api.example.com",
+        prompt: "login custom",
+      }),
+    ).toThrow("prompt contains unsupported values");
   });
 
   it("requires formPostCsrfToken for response_mode=form_post", () => {
@@ -463,13 +537,90 @@ describe("generateAuthUrl", () => {
   });
 
   it("validates and consumes state tokens once", () => {
+    const manager = new OAuthStateManager();
+
     expect(() =>
-      validateAndConsumeState("state-value-123456", "state-value-123456"),
+      manager.validateAndConsumeState(
+        "state-value-123456",
+        "state-value-123456",
+      ),
     ).not.toThrow();
 
     expect(() =>
-      validateAndConsumeState("state-value-123456", "state-value-123456"),
+      manager.validateAndConsumeState(
+        "state-value-123456",
+        "state-value-123456",
+      ),
     ).toThrow("already used");
+  });
+
+  it("supports isolated state managers per instance", () => {
+    const managerA = new OAuthStateManager();
+    const managerB = new OAuthStateManager();
+
+    expect(() =>
+      managerA.validateAndConsumeState(
+        "state-value-abcdef12",
+        "state-value-abcdef12",
+      ),
+    ).not.toThrow();
+
+    expect(() =>
+      managerB.validateAndConsumeState(
+        "state-value-abcdef12",
+        "state-value-abcdef12",
+      ),
+    ).not.toThrow();
+  });
+
+  it("expires replay protection entries based on TTL", () => {
+    const nowSpy = jest.spyOn(Date, "now");
+
+    try {
+      const manager = new OAuthStateManager({ stateTtlMs: 10 });
+
+      nowSpy.mockReturnValue(1_000);
+      manager.validateAndConsumeState(
+        "state-value-ttl-123",
+        "state-value-ttl-123",
+      );
+
+      nowSpy.mockReturnValue(1_005);
+      expect(() =>
+        manager.validateAndConsumeState(
+          "state-value-ttl-123",
+          "state-value-ttl-123",
+        ),
+      ).toThrow("already used");
+
+      nowSpy.mockReturnValue(1_020);
+      expect(() =>
+        manager.validateAndConsumeState(
+          "state-value-ttl-123",
+          "state-value-ttl-123",
+        ),
+      ).not.toThrow();
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it("expires state handles and throws StateExpiredError", () => {
+    const nowSpy = jest.spyOn(Date, "now");
+
+    try {
+      const manager = new OAuthStateManager({ stateTtlMs: 10 });
+
+      nowSpy.mockReturnValue(10_000);
+      const handle = manager.stashExpectedState("state-value-ttl-456");
+
+      nowSpy.mockReturnValue(10_020);
+      expect(() =>
+        manager.consumeStateBinding(handle, "state-value-ttl-456"),
+      ).toThrow(StateExpiredError);
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it("identifies silent authentication error codes", () => {
@@ -477,9 +628,24 @@ describe("generateAuthUrl", () => {
     expect(isSilentAuthenticationError("access_denied")).toBe(false);
   });
 
-  it("parses OAuth callback values from query and hash", () => {
+  it("parses OAuth callback values from query params", () => {
     const callback = parseOAuthCallbackUrl(
-      "https://app.example.com/callback?code=abc&state=state123#id_token=id.jwt&expires_in=3600",
+      "https://app.example.com/callback?code=abc&state=state123&iss=https%3A%2F%2Fauth.example.com&session_state=session-123&response=jarm.jwt&id_token=id.jwt&expires_in=3600",
+    );
+
+    expect(callback.code).toBe("abc");
+    expect(callback.state).toBe("state123");
+    expect(callback.iss).toBe("https://auth.example.com");
+    expect(callback.sessionState).toBe("session-123");
+    expect(callback.response).toBe("jarm.jwt");
+    expect(callback.idToken).toBe("id.jwt");
+    expect(callback.expiresIn).toBe(3600);
+    expect(callback.params.code).toBe("abc");
+  });
+
+  it("parses OAuth callback values from fragment params", () => {
+    const callback = parseOAuthCallbackUrl(
+      "https://app.example.com/callback#code=abc&state=state123&id_token=id.jwt&expires_in=3600",
     );
 
     expect(callback.code).toBe("abc");
@@ -489,10 +655,30 @@ describe("generateAuthUrl", () => {
     expect(callback.params.code).toBe("abc");
   });
 
+  it("parses standard callback fields case-insensitively", () => {
+    const callback = parseOAuthCallbackUrl(
+      "https://app.example.com/callback?CoDe=abc&StAtE=state123&Id_ToKeN=id.jwt&ExPiReS_In=3600&ErRoR_UrI=https%3A%2F%2Fdocs.example.com%2Foauth-errors",
+    );
+
+    expect(callback.code).toBe("abc");
+    expect(callback.state).toBe("state123");
+    expect(callback.idToken).toBe("id.jwt");
+    expect(callback.expiresIn).toBe(3600);
+    expect(callback.errorUri).toBe("https://docs.example.com/oauth-errors");
+  });
+
+  it("rejects callback params split between query and hash", () => {
+    expect(() =>
+      parseOAuthCallbackUrl(
+        "https://app.example.com/callback?code=abc#state=state123",
+      ),
+    ).toThrow("both query and fragment");
+  });
+
   it("rejects duplicate callback params to prevent HPP", () => {
     expect(() =>
       parseOAuthCallbackUrl(
-        "https://app.example.com/callback?code=abc#code=def",
+        "https://app.example.com/callback?code=abc&code=def",
       ),
     ).toThrow("duplicate parameter values");
   });
@@ -503,31 +689,206 @@ describe("generateAuthUrl", () => {
         "https://app.example.com/callback#code=%3Cscript%3Ealert(1)%3C/script%3E",
       ),
     ).toThrow("unsafe content");
+
+    expect(() =>
+      parseOAuthCallbackUrl(
+        "https://app.example.com/callback#code=abc%0D%0Aset-cookie%3Aevil%3D1",
+      ),
+    ).toThrow("unsafe content");
+
+    expect(() =>
+      parseOAuthCallbackUrl(
+        "https://app.example.com/callback#code=vbscript:msgbox(1)",
+      ),
+    ).toThrow("unsafe content");
+
+    expect(() =>
+      parseOAuthCallbackUrl(
+        "https://app.example.com/callback#code=file:///etc/passwd",
+      ),
+    ).toThrow("unsafe content");
+  });
+
+  it("validates callback error_uri values as https URLs", () => {
+    const callback = parseOAuthCallbackUrl(
+      "https://app.example.com/callback#error=access_denied&error_uri=https%3A%2F%2Fdocs.example.com%2Foauth-errors",
+    );
+
+    expect(callback.errorUri).toBe("https://docs.example.com/oauth-errors");
+
+    expect(() =>
+      parseOAuthCallbackUrl(
+        "https://app.example.com/callback?error=access_denied&error_uri=javascript:alert(1)",
+      ),
+    ).toThrow("unsafe error_uri");
+
+    expect(() =>
+      parseOAuthCallbackUrl(
+        "https://app.example.com/callback?error=access_denied&error_uri=data:text/plain,boom",
+      ),
+    ).toThrow("unsafe error_uri");
+  });
+
+  it("normalizes and rejects unsafe callback error_uri values", () => {
+    expect(() =>
+      parseOAuthCallbackUrl(
+        "https://app.example.com/callback?error=access_denied&error_uri=java%0ascript:alert(1)",
+      ),
+    ).toThrow("unsafe error_uri");
+
+    expect(() =>
+      parseOAuthCallbackUrl(
+        "https://app.example.com/callback?error=access_denied&error_uri=java\\script:alert(1)",
+      ),
+    ).toThrow("unsafe error_uri");
+
+    expect(() =>
+      parseOAuthCallbackUrl(
+        "https://app.example.com/callback?error=access_denied&error_uri=file:///etc/passwd",
+      ),
+    ).toThrow("unsafe error_uri");
+
+    expect(() =>
+      parseOAuthCallbackUrl(
+        "https://app.example.com/callback?error=access_denied&error_uri=https%3A%2F%2F127.0.0.1%2Foauth-errors",
+      ),
+    ).toThrow("unsafe error_uri");
+
+    expect(() =>
+      parseOAuthCallbackUrl(
+        "https://app.example.com/callback?error=access_denied&error_uri=https%3A%2F%2Flocalhost.%2Foauth-errors",
+      ),
+    ).toThrow("unsafe error_uri");
+
+    expect(() =>
+      parseOAuthCallbackUrl(
+        "https://app.example.com/callback?error=access_denied&error_uri=https%3A%2F%2F%5B%3A%3A1%5D%2Foauth-errors",
+      ),
+    ).toThrow("unsafe error_uri");
+
+    expect(() =>
+      parseOAuthCallbackUrl(
+        "https://app.example.com/callback?error=access_denied&error_uri=https%3A%2F%2F0x7f.0.0.1%2Foauth-errors",
+      ),
+    ).toThrow("unsafe error_uri");
+
+    expect(() =>
+      parseOAuthCallbackUrl(
+        "https://app.example.com/callback?error=access_denied&error_uri=https%3A%2F%2F0177.0.0.1%2Foauth-errors",
+      ),
+    ).toThrow("unsafe error_uri");
+
+    expect(() =>
+      parseOAuthCallbackUrl(
+        "https://app.example.com/callback?error=access_denied&error_uri=https%3A%2F%2F2130706433%2Foauth-errors",
+      ),
+    ).toThrow("unsafe error_uri");
+  });
+
+  it("requires expires_in to be a bounded positive integer", () => {
+    expect(
+      parseOAuthCallbackUrl(
+        "https://app.example.com/callback#expires_in=2147483647",
+      ).expiresIn,
+    ).toBe(2147483647);
+
+    expect(() =>
+      parseOAuthCallbackUrl("https://app.example.com/callback#expires_in=0"),
+    ).toThrow("invalid expires_in");
+
+    expect(() =>
+      parseOAuthCallbackUrl(
+        "https://app.example.com/callback#expires_in=2147483648",
+      ),
+    ).toThrow("invalid expires_in");
   });
 
   it("sanitizes callback URL to remove sensitive params", () => {
     const sanitized = sanitizeOAuthCallbackUrl(
-      "https://app.example.com/callback?code=abc&state=state123&keep=yes#id_token=id.jwt&foo=bar",
+      "https://app.example.com/callback?CoDe=abc&StAtE=state123&keep=yes#Id_Token=id.jwt&ExPiReS_In=3600&foo=bar",
     );
 
     const parsed = new URL(sanitized);
-    expect(parsed.searchParams.get("code")).toBeNull();
-    expect(parsed.searchParams.get("state")).toBeNull();
+    expect(parsed.searchParams.get("CoDe")).toBeNull();
+    expect(parsed.searchParams.get("StAtE")).toBeNull();
     expect(parsed.searchParams.get("keep")).toBe("yes");
     expect(parsed.hash).toBe("#foo=bar");
   });
 
+  it("aggressively sanitizes error-only callback URLs", () => {
+    const sanitized = sanitizeOAuthCallbackUrl(
+      "https://user:pass@app.example.com/callback?error=access_denied&error_description=bad+request&keep=yes#foo=bar",
+    );
+
+    const parsed = new URL(sanitized);
+    expect(parsed.search).toBe("");
+    expect(parsed.hash).toBe("");
+    expect(parsed.username).toBe("");
+    expect(parsed.password).toBe("");
+  });
+
+  it("detects error-only callbacks case-insensitively", () => {
+    const sanitized = sanitizeOAuthCallbackUrl(
+      "https://user:pass@app.example.com/callback?ErRoR=access_denied&ErRoR_DeScRiPtIoN=bad+request&keep=yes#foo=bar",
+    );
+
+    const parsed = new URL(sanitized);
+    expect(parsed.search).toBe("");
+    expect(parsed.hash).toBe("");
+    expect(parsed.username).toBe("");
+    expect(parsed.password).toBe("");
+  });
+
+  it("does not treat id_token or state callbacks as error-only", () => {
+    const withIdToken = sanitizeOAuthCallbackUrl(
+      "https://user:pass@app.example.com/callback?error=access_denied&id_token=id.jwt&keep=yes#foo=bar",
+    );
+    const parsedWithIdToken = new URL(withIdToken);
+
+    expect(parsedWithIdToken.searchParams.get("keep")).toBe("yes");
+    expect(parsedWithIdToken.hash).toBe("#foo=bar");
+
+    const withState = sanitizeOAuthCallbackUrl(
+      "https://user:pass@app.example.com/callback?error=access_denied&state=state123&keep=yes#foo=bar",
+    );
+    const parsedWithState = new URL(withState);
+
+    expect(parsedWithState.searchParams.get("keep")).toBe("yes");
+    expect(parsedWithState.hash).toBe("#foo=bar");
+
+    const withCodeCasing = sanitizeOAuthCallbackUrl(
+      "https://user:pass@app.example.com/callback?ErRoR=access_denied&CoDe=abc&keep=yes#foo=bar",
+    );
+    const parsedWithCodeCasing = new URL(withCodeCasing);
+
+    expect(parsedWithCodeCasing.searchParams.get("keep")).toBe("yes");
+    expect(parsedWithCodeCasing.hash).toBe("#foo=bar");
+  });
+
+  it("sanitizes truthy callback hashes as URLSearchParams", () => {
+    const sanitized = sanitizeOAuthCallbackUrl(
+      "https://app.example.com/callback#id_token",
+    );
+
+    expect(new URL(sanitized).hash).toBe("");
+  });
+
   it("sanitizes authorization URL to remove sensitive request params", () => {
     const authUrl =
-      "https://auth.example.com/connect/authorize?client_id=client&state=s123&code_challenge=abc&nonce=n1&scope=openid";
+      "https://user:pass@auth.example.com/connect/authorize?client_id=client&StAtE=s123&CoDe_ChAlLeNgE=abc&NoNcE=n1&Id_ToKeN_HiNt=hint&GuArDhOuSe_FoRm_PoSt_CsRf=csrf&scope=openid#fragment";
 
     const sanitized = sanitizeAuthorizationUrlForHistory(authUrl);
     const parsed = new URL(sanitized);
 
-    expect(parsed.searchParams.get("state")).toBeNull();
-    expect(parsed.searchParams.get("code_challenge")).toBeNull();
-    expect(parsed.searchParams.get("nonce")).toBeNull();
+    expect(parsed.searchParams.get("StAtE")).toBeNull();
+    expect(parsed.searchParams.get("CoDe_ChAlLeNgE")).toBeNull();
+    expect(parsed.searchParams.get("NoNcE")).toBeNull();
+    expect(parsed.searchParams.get("Id_ToKeN_HiNt")).toBeNull();
+    expect(parsed.searchParams.get("GuArDhOuSe_FoRm_PoSt_CsRf")).toBeNull();
     expect(parsed.searchParams.get("scope")).toBe("openid");
+    expect(parsed.username).toBe("");
+    expect(parsed.password).toBe("");
+    expect(parsed.hash).toBe("");
   });
 
   it("validates form_post CSRF token using timing-safe compare", () => {
@@ -541,15 +902,16 @@ describe("generateAuthUrl", () => {
   });
 
   it("supports multi-tab state binding handles", () => {
-    const handle = stashExpectedState("state-binding-123456");
+    const manager = new OAuthStateManager();
+    const handle = manager.stashExpectedState("state-binding-123456");
 
     expect(() =>
-      consumeStateBinding(handle, "state-binding-123456"),
+      manager.consumeStateBinding(handle, "state-binding-123456"),
     ).not.toThrow();
 
-    expect(() => consumeStateBinding(handle, "state-binding-123456")).toThrow(
-      "already been consumed",
-    );
+    expect(() =>
+      manager.consumeStateBinding(handle, "state-binding-123456"),
+    ).toThrow("already been consumed");
   });
 
   it("validates front-channel logout issuer and sid", () => {
@@ -574,6 +936,14 @@ describe("generateAuthUrl", () => {
         },
       ),
     ).toThrow("issuer validation failed");
+  });
+
+  it("rejects malformed front-channel logout request URLs gracefully", () => {
+    expect(() =>
+      validateFrontChannelLogoutRequest("http://%", {
+        expectedIssuer: "https://auth.example.com",
+      }),
+    ).toThrow("Invalid logout request URL format");
   });
 
   it("normalizes and validates acr_values", () => {
@@ -620,6 +990,32 @@ describe("generateAuthUrl", () => {
         loginHint: 'bad@example.com" onfocus=alert(1)',
       }),
     ).toThrow("loginHint contains unsafe characters");
+
+    expect(() =>
+      generateAuthUrl({
+        authority: "https://auth.example.com",
+        clientId: "client-id",
+        redirectUri: "https://app.example.com/callback",
+        state: "state-value-123456",
+        nonce: "nonce-value",
+        codeChallenge: "code-challenge",
+        audience: "https://api.example.com",
+        loginHint: "user(name)",
+      }),
+    ).toThrow("loginHint contains unsafe characters");
+
+    expect(() =>
+      generateAuthUrl({
+        authority: "https://auth.example.com",
+        clientId: "client-id",
+        redirectUri: "https://app.example.com/callback",
+        state: "state-value-123456",
+        nonce: "nonce-value",
+        codeChallenge: "code-challenge",
+        audience: "https://api.example.com",
+        loginHint: "user\\name",
+      }),
+    ).toThrow("loginHint contains unsafe characters");
   });
 
   it("supports request_uri based authorization URLs", () => {
@@ -638,6 +1034,102 @@ describe("generateAuthUrl", () => {
       "urn:ietf:params:oauth:request_uri:abc123",
     );
     expect(parsed.searchParams.get("code_challenge")).toBeNull();
+  });
+
+  it("accepts secure request_uri URLs and rejects unsafe schemes", () => {
+    const httpsAuthUrl = generateAuthUrl({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      redirectUri: "https://app.example.com/callback",
+      state: "state-value-123456",
+      responseType: "code",
+      scope: "profile email",
+      requestUri: "https://request.example.com/obj.jwt",
+    });
+
+    expect(new URL(httpsAuthUrl).searchParams.get("request_uri")).toBe(
+      "https://request.example.com/obj.jwt",
+    );
+
+    const localhostAuthUrl = generateAuthUrl({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      redirectUri: "https://app.example.com/callback",
+      state: "state-value-123456",
+      responseType: "code",
+      scope: "profile email",
+      requestUri: "http://localhost:5173/request.jwt",
+    });
+
+    expect(new URL(localhostAuthUrl).searchParams.get("request_uri")).toBe(
+      "http://localhost:5173/request.jwt",
+    );
+
+    const loopbackIPv4AuthUrl = generateAuthUrl({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      redirectUri: "https://app.example.com/callback",
+      state: "state-value-123456",
+      responseType: "code",
+      scope: "profile email",
+      requestUri: "http://127.0.0.1:5173/request.jwt",
+    });
+
+    expect(new URL(loopbackIPv4AuthUrl).searchParams.get("request_uri")).toBe(
+      "http://127.0.0.1:5173/request.jwt",
+    );
+
+    const loopbackIPv6AuthUrl = generateAuthUrl({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      redirectUri: "https://app.example.com/callback",
+      state: "state-value-123456",
+      responseType: "code",
+      scope: "profile email",
+      requestUri: "http://[::1]:5173/request.jwt",
+    });
+
+    expect(new URL(loopbackIPv6AuthUrl).searchParams.get("request_uri")).toBe(
+      "http://[::1]:5173/request.jwt",
+    );
+
+    const androidEmulatorAuthUrl = generateAuthUrl({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      redirectUri: "https://app.example.com/callback",
+      state: "state-value-123456",
+      responseType: "code",
+      scope: "profile email",
+      requestUri: "http://10.0.2.2:8080/request.jwt",
+    });
+
+    expect(
+      new URL(androidEmulatorAuthUrl).searchParams.get("request_uri"),
+    ).toBe("http://10.0.2.2:8080/request.jwt");
+
+    expect(() =>
+      generateAuthUrl({
+        authority: "https://auth.example.com",
+        clientId: "client-id",
+        redirectUri: "https://app.example.com/callback",
+        state: "state-value-123456",
+        responseType: "code",
+        scope: "profile email",
+        requestUri: "javascript:alert(1)",
+      }),
+    ).toThrow("requestUri must");
+
+    expect(() =>
+      generateAuthUrl({
+        authority: "https://auth.example.com",
+        clientId: "client-id",
+        redirectUri: "https://app.example.com/callback",
+        state: "state-value-123456",
+        responseType: "code",
+        scope: "profile email",
+        requestUri: "file:///tmp/request.jwt",
+      }),
+    ).toThrow("requestUri must");
   });
 
   it("rejects non-integer maxAge values", () => {
@@ -663,6 +1155,23 @@ describe("generateAuthUrl", () => {
     expect(redirect.statusCode).toBe(302);
     expect(redirect.headers.Location).toBe("https://app.example.com/callback");
     expect(redirect.headers["Cache-Control"]).toBe("no-store");
+    expect(redirect.headers.Pragma).toBe("no-cache");
+    expect(redirect.headers.Expires).toBe("0");
+  });
+
+  it("enforces redirect allowlists for Location header redirects", () => {
+    const redirect = createLocationHeaderRedirect(
+      "https://app.example.com/callback",
+      ["HTTPS://APP.EXAMPLE.COM:443/callback", "myapp://callback"],
+    );
+
+    expect(redirect.headers.Location).toBe("https://app.example.com/callback");
+
+    expect(() =>
+      createLocationHeaderRedirect("https://evil.example/callback", [
+        "https://app.example.com/callback",
+      ]),
+    ).toThrow("not included in allowedUris");
   });
 
   it("encodes extraParams values to prevent parameter injection", () => {
@@ -714,6 +1223,23 @@ describe("generateAuthUrl", () => {
         "https://app.example.com/callback?code=abc&state=state123&__proto__=x",
       ),
     ).toThrow("unsafe parameter key");
+
+    expect(() =>
+      parseOAuthCallbackUrl(
+        "https://app.example.com/callback?code=abc&state=state123&__PrOtO__=x",
+      ),
+    ).toThrow("unsafe parameter key");
+  });
+
+  it("normalizes callback params object keys to lowercase", () => {
+    const callback = parseOAuthCallbackUrl(
+      "https://app.example.com/callback?CoDe=abc&StAtE=state123&Custom_Key=value",
+    );
+
+    expect(callback.params.code).toBe("abc");
+    expect(callback.params.state).toBe("state123");
+    expect(callback.params.custom_key).toBe("value");
+    expect(callback.params.CoDe).toBeUndefined();
   });
 
   it("requires explicit consent for offline_access scope", () => {

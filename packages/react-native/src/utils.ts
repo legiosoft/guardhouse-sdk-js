@@ -1,5 +1,6 @@
 import * as Keychain from "react-native-keychain";
-import { jwtDecode, JwtPayload } from "jwt-decode";
+import type { JwtPayload } from "jwt-decode";
+import { jwtDecode } from "jwt-decode";
 
 interface IdTokenPayload extends JwtPayload {
   nonce?: string;
@@ -109,7 +110,7 @@ export function generateBase64UrlEncodedString(length: number): string {
     throw new Error("CSPRNG not available in this environment");
   }
 
-  let base64 = btoa(String.fromCharCode(...array));
+  const base64 = btoa(String.fromCharCode(...array));
   return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
 }
 
@@ -124,7 +125,7 @@ export function parseQueryParams(queryString: string): Record<string, string> {
         params[decodeURIComponent(key)] = value
           ? decodeURIComponent(value)
           : "";
-      } catch (error) {
+      } catch {
         console.warn("Failed to decode query parameter:", key);
         params[key] = value || "";
       }

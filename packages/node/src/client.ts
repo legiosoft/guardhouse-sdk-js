@@ -1,6 +1,7 @@
-import { GuardhouseClient, TokenResponse } from "@guardhouse/core";
+import type { TokenResponse } from "@guardhouse/core";
+import { GuardhouseClient } from "@guardhouse/core";
 import { GuardhouseConstants } from "./constants";
-import { GuardhouseClientOptions } from "./types";
+import type { GuardhouseClientOptions } from "./types";
 import { createNodeLogger } from "./debug";
 import { generateCorrelationId, stripStackTrace } from "./utils";
 
@@ -27,7 +28,7 @@ export class GuardhouseNodeClient {
   }
 
   protected redactUrl(url: string): string {
-    return url.replace(/https?:\/\/[^\/]+/, "***");
+    return url.replace(/https?:\/\/[^/]+/, "***");
   }
 
   private getTokenCacheKey(): string {

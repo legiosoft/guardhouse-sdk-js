@@ -129,7 +129,4 @@ export interface AuthContextValue extends AuthState {
  *
  * Internal type for context object
  */
-export interface AuthContext extends Omit<
-  AuthContextValue,
-  "user" | "accessToken"
-> {}
+export type AuthContext = Omit<AuthContextValue, "user" | "accessToken">;

@@ -9,10 +9,19 @@
     "build": "npm run build:core && npm run build:apps",
     "build:core": "npm run build -w @guardhouse/core",
     "build:apps": "npm run build -w @guardhouse/node -w @guardhouse/react -w @guardhouse/react-native",
+    "typecheck": "npm run typecheck -w @guardhouse/core -w @guardhouse/node -w @guardhouse/react -w @guardhouse/react-native",
+    "lint": "npm run lint -w @guardhouse/core -w @guardhouse/node -w @guardhouse/react -w @guardhouse/react-native",
+    "lint:fix": "npm run lint:fix -w @guardhouse/core -w @guardhouse/node -w @guardhouse/react -w @guardhouse/react-native",
+    "format": "npm run format -w @guardhouse/core -w @guardhouse/node -w @guardhouse/react -w @guardhouse/react-native",
     "clean": "node -e \"const fs=require('fs');const path=require('path');const targets=['node_modules'];const root='packages';if(fs.existsSync(root)){for(const name of fs.readdirSync(root)){targets.push(path.join(root,name,'dist'));targets.push(path.join(root,name,'node_modules'));}}for(const target of targets){fs.rmSync(target,{recursive:true,force:true});}\""
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.3",
+    "eslint": "^9.39.3",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.3.0",
+    "prettier": "3.7.4",
     "typescript": "5.9.3",
-    "prettier": "3.7.4"
+    "typescript-eslint": "^8.56.1"
   }
 }

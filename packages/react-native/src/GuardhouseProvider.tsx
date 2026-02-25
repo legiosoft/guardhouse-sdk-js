@@ -31,13 +31,13 @@
  *    - Documented in README (user's responsibility)
  */
 
+import type { ReactNode } from "react";
 import React, {
   createContext,
   useContext,
   useState,
   useEffect,
   useCallback,
-  ReactNode,
   useMemo,
   useRef,
 } from "react";
@@ -53,10 +53,15 @@ import {
   validateToken,
 } from "@guardhouse/core";
 import type { CryptoAdapter, User as CoreUser } from "@guardhouse/core";
-import { AuthState, TokenData, LoginOptions, LogoutOptions } from "./types";
+import type {
+  AuthState,
+  TokenData,
+  LoginOptions,
+  LogoutOptions,
+} from "./types";
+import type { SessionData } from "./utils/storage";
 import {
   SecureStorage,
-  SessionData,
   PromiseLock,
   isTokenExpired,
   STORAGE_KEYS,
