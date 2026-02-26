@@ -1,19 +1,24 @@
-import React from "react";
+import { useEffect, useRef } from "react";
+import type { ComponentType, ReactNode } from "react";
 import { useAuth } from "./context";
 import type { ProtectedRouteProps } from "./types";
 
-export function ProtectedRoute({
+export function ProtectedRoute<P extends object>({
   component: Component,
   children,
   onRedirecting,
   ...rest
-}: ProtectedRouteProps) {
+}: ProtectedRouteProps<P>) {
   const { isAuthenticated, isLoading, loginWithRedirect } = useAuth();
+  const hasTriggeredLogin = useRef(false);
 
-  React.useEffect(() => {
-    if (!isLoading && !isAuthenticated) {
-      loginWithRedirect();
+  useEffect(() => {
+    if (isLoading || isAuthenticated || hasTriggeredLogin.current) {
+      return;
     }
+
+    hasTriggeredLogin.current = true;
+    void loginWithRedirect();
   }, [isAuthenticated, isLoading, loginWithRedirect]);
 
   if (isLoading) {
@@ -25,26 +30,30 @@ export function ProtectedRoute({
   }
 
   if (Component) {
-    return <Component {...rest} />;
+    return <Component {...(rest as P)} />;
   }
 
   return <>{children}</>;
 }
 
 export function withAuthenticationRequired<P extends object>(
-  Component: React.ComponentType<P>,
+  Component: ComponentType<P>,
   options?: {
     returnTo?: string;
-    onRedirecting?: () => React.ReactNode;
+    onRedirecting?: () => ReactNode;
   },
 ) {
   return function WithAuthenticationRequired(props: P) {
     const { isAuthenticated, isLoading, loginWithRedirect } = useAuth();
+    const hasTriggeredLogin = useRef(false);
 
-    React.useEffect(() => {
-      if (!isLoading && !isAuthenticated) {
-        loginWithRedirect({ appState: { returnTo: options?.returnTo } });
+    useEffect(() => {
+      if (isLoading || isAuthenticated || hasTriggeredLogin.current) {
+        return;
       }
+
+      hasTriggeredLogin.current = true;
+      void loginWithRedirect({ appState: { returnTo: options?.returnTo } });
     }, [isAuthenticated, isLoading, loginWithRedirect, options?.returnTo]);
 
     if (isLoading) {

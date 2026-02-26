@@ -1,3 +1,4 @@
+import { decodeJWT } from "@guardhouse/core";
 import type { StorageAdapter } from "./types";
 
 const UNSAFE_QUERY_PARAM_KEYS = new Set([
@@ -71,7 +72,9 @@ export function generateBase64UrlEncodedString(length: number): string {
   const array = new Uint8Array(length);
   crypto.getRandomValues(array);
 
-  const base64 = btoa(String.fromCharCode(...array));
+  const base64 = btoa(
+    Array.from(array, (byte) => String.fromCharCode(byte)).join(""),
+  );
   return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
 }
 
@@ -148,21 +151,14 @@ export function validateIdToken(
   nonce: string,
   issuer: string,
   audience: string,
-): any {
-  const parts = idToken.split(".");
-  if (parts.length !== 3) {
-    throw new Error("Invalid ID token format");
-  }
+): Record<string, unknown> {
+  const { payload } = decodeJWT(idToken);
 
-  const payload = JSON.parse(
-    atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")),
-  );
-
-  if (payload.nonce !== nonce) {
+  if (typeof payload.nonce !== "string" || payload.nonce !== nonce) {
     throw new Error("ID token nonce does not match");
   }
 
-  if (payload.iss !== issuer) {
+  if (typeof payload.iss !== "string" || payload.iss !== issuer) {
     throw new Error("ID token issuer does not match");
   }
 
@@ -170,13 +166,21 @@ export function validateIdToken(
     if (!payload.aud.includes(audience)) {
       throw new Error("ID token audience does not match");
     }
-  } else if (payload.aud !== audience) {
+  } else if (typeof payload.aud !== "string" || payload.aud !== audience) {
     throw new Error("ID token audience does not match");
   }
 
+  if (typeof payload.exp !== "number" || !Number.isFinite(payload.exp)) {
+    throw new Error("ID token expiration claim is missing or invalid");
+  }
+
   const now = Math.floor(Date.now() / 1000);
-  if (payload.exp && payload.exp < now) {
+  if (payload.exp <= now - 60) {
     throw new Error("ID token has expired");
+  }
+
+  if (typeof payload.sub !== "string" || payload.sub.trim() === "") {
+    throw new Error("ID token subject is missing or invalid");
   }
 
   return payload;

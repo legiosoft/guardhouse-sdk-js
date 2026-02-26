@@ -1,3 +1,4 @@
+import type { ComponentType, ReactNode } from "react";
 import type { DPoPProofFactory, User as CoreUser } from "@guardhouse/core";
 
 export interface GuardhouseConfig {
@@ -32,7 +33,7 @@ export interface GuardhouseConfig {
 
 export interface AppState {
   returnTo?: string;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 export interface AuthState {
@@ -45,6 +46,11 @@ export interface AuthState {
 export interface TokenData {
   access_token: string;
   refresh_token?: string;
+  /**
+   * SECURITY WARNING:
+   * Never trust id_token claims directly for local authentication decisions.
+   * Always validate signature, issuer, audience, and expiration with a JWT/OIDC validation library first.
+   */
   id_token?: string;
   expires_in: number;
   token_type: string;
@@ -84,14 +90,15 @@ export interface StorageAdapter {
   removeItem(key: string): Promise<void>;
 }
 
-export interface ProtectedRouteProps {
-  component?: React.ComponentType<any>;
-  children?: React.ReactNode;
-  onRedirecting?: () => React.ReactNode;
-  [key: string]: any;
+export interface ProtectedRouteProps<
+  P extends object = Record<string, unknown>,
+> {
+  component?: ComponentType<P>;
+  children?: ReactNode;
+  onRedirecting?: () => ReactNode;
 }
 
 export interface WithAuthenticationRequiredOptions {
   returnTo?: string;
-  onRedirecting?: () => React.ReactNode;
+  onRedirecting?: () => ReactNode;
 }

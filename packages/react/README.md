@@ -10,7 +10,7 @@ Frontend SDK for React 18+ web applications with hooks and protected routes.
 - **Debug Mode**: Set `config.debug = true` to trace SDK activity
 - **Protected Routes**: ProtectedRoute component to secure routes
 - **Core Security Policies**: React provider uses `@guardhouse/core` client flows (strict endpoint/origin checks, callback validation, silent-auth safeguards, DPoP/security config support)
-- **React 18 Compatible**: Supports Concurrent Mode and Server Components
+- **React 18 Compatible**: Supports Concurrent Mode and SSR frameworks via client component boundaries
 
 ## Installation
 
@@ -61,6 +61,33 @@ function ProtectedPage() {
       <button onClick={logout}>Logout</button>
     </div>
   );
+}
+```
+
+## SSR / Next.js / Remix Notes
+
+- `GuardhouseProvider` starts with `isLoading: true` and restores session state from `sessionStorage` in a client-side `useEffect`.
+- This is intentional: the first render is a loading state, then auth state resolves on the client.
+- In SSR frameworks, put `GuardhouseProvider` and `useAuth()` consumers in a client component boundary.
+- Gate auth-dependent UI on `isLoading` before branching on `isAuthenticated`.
+
+```tsx
+"use client";
+
+import { useAuth } from "@guardhouse/react";
+
+export function AuthGate() {
+  const { isLoading, isAuthenticated, user } = useAuth();
+
+  if (isLoading) {
+    return <div>Loading...</div>;
+  }
+
+  if (!isAuthenticated) {
+    return <div>Please sign in.</div>;
+  }
+
+  return <div>Welcome, {user?.name ?? user?.sub}</div>;
 }
 ```
 

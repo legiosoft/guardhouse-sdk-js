@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -154,6 +155,11 @@ export function GuardhouseProvider({
     error: null,
     user: null,
   });
+  const hasHandledCallback = useRef<boolean>(false);
+  const activeRefreshPromise = useRef<Promise<OidcSessionData | null> | null>(
+    null,
+  );
+  const isMountedRef = useRef<boolean>(true);
 
   const storage: StorageAdapter = useMemo(
     () => new SessionStorageAdapter(),
@@ -215,6 +221,14 @@ export function GuardhouseProvider({
   );
 
   useEffect(() => {
+    isMountedRef.current = true;
+
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
     setGuardhouseDebug(Boolean(config.debug));
     logger.info("Debug mode updated", { enabled: Boolean(config.debug) });
   }, [config.debug, logger]);
@@ -262,25 +276,28 @@ export function GuardhouseProvider({
   }, [logger]);
 
   const clearTransientLoginState = useCallback(async () => {
-    await storage.removeItem(StorageKeys.CODE_VERIFIER);
-    await storage.removeItem(StorageKeys.STATE);
-    await storage.removeItem(StorageKeys.NONCE);
-    await storage.removeItem(StorageKeys.REQUESTED_SCOPE);
-    await storage.removeItem(StorageKeys.REQUESTED_AUDIENCE);
-    await storage.removeItem(StorageKeys.PROMPT);
-    await storage.removeItem(StorageKeys.APP_STATE);
+    await Promise.all([
+      storage.removeItem(StorageKeys.CODE_VERIFIER),
+      storage.removeItem(StorageKeys.STATE),
+      storage.removeItem(StorageKeys.NONCE),
+      storage.removeItem(StorageKeys.REQUESTED_SCOPE),
+      storage.removeItem(StorageKeys.REQUESTED_AUDIENCE),
+      storage.removeItem(StorageKeys.PROMPT),
+      storage.removeItem(StorageKeys.APP_STATE),
+    ]);
   }, [storage]);
 
   const clearAuthState = useCallback(async () => {
     logger.debug("Clearing stored auth state from session storage");
 
-    await storage.removeItem(StorageKeys.OIDC_SESSION);
-
-    await storage.removeItem(StorageKeys.ACCESS_TOKEN);
-    await storage.removeItem(StorageKeys.REFRESH_TOKEN);
-    await storage.removeItem(StorageKeys.ID_TOKEN);
-    await storage.removeItem(StorageKeys.EXPIRES_AT);
-    await storage.removeItem(StorageKeys.USER);
+    await Promise.all([
+      storage.removeItem(StorageKeys.OIDC_SESSION),
+      storage.removeItem(StorageKeys.ACCESS_TOKEN),
+      storage.removeItem(StorageKeys.REFRESH_TOKEN),
+      storage.removeItem(StorageKeys.ID_TOKEN),
+      storage.removeItem(StorageKeys.EXPIRES_AT),
+      storage.removeItem(StorageKeys.USER),
+    ]);
 
     await clearTransientLoginState();
     await client.clearSessionState();
@@ -304,39 +321,57 @@ export function GuardhouseProvider({
 
   const refreshSession = useCallback(
     async (sessionData: OidcSessionData): Promise<OidcSessionData | null> => {
-      if (!sessionData.refreshToken) {
-        await clearAuthState();
-        return null;
+      if (activeRefreshPromise.current) {
+        logger.debug("Joining in-flight token refresh request");
+        return activeRefreshPromise.current;
       }
 
+      const refreshPromise = (async (): Promise<OidcSessionData | null> => {
+        if (!sessionData.refreshToken) {
+          await clearAuthState();
+          return null;
+        }
+
+        try {
+          const tokenResponse = await client.refreshToken(
+            sessionData.refreshToken,
+          );
+
+          const refreshedSession: OidcSessionData = {
+            ...sessionData,
+            accessToken: tokenResponse.access_token,
+            refreshToken:
+              tokenResponse.refresh_token || sessionData.refreshToken,
+            idToken: tokenResponse.id_token || sessionData.idToken,
+            tokenType: tokenResponse.token_type,
+            scope: tokenResponse.scope || sessionData.scope,
+            expiresAt: Math.floor(Date.now() / 1000) + tokenResponse.expires_in,
+          };
+
+          await persistOidcSession(refreshedSession);
+
+          logger.info("Silent token refresh succeeded", {
+            expiresAt: refreshedSession.expiresAt,
+          });
+
+          return refreshedSession;
+        } catch (error) {
+          logger.error("Token refresh failed", {
+            error: String(error),
+          });
+          await clearAuthState();
+          return null;
+        }
+      })();
+
+      activeRefreshPromise.current = refreshPromise;
+
       try {
-        const tokenResponse = await client.refreshToken(
-          sessionData.refreshToken,
-        );
-
-        const refreshedSession: OidcSessionData = {
-          ...sessionData,
-          accessToken: tokenResponse.access_token,
-          refreshToken: tokenResponse.refresh_token || sessionData.refreshToken,
-          idToken: tokenResponse.id_token || sessionData.idToken,
-          tokenType: tokenResponse.token_type,
-          scope: tokenResponse.scope || sessionData.scope,
-          expiresAt: Math.floor(Date.now() / 1000) + tokenResponse.expires_in,
-        };
-
-        await persistOidcSession(refreshedSession);
-
-        logger.info("Silent token refresh succeeded", {
-          expiresAt: refreshedSession.expiresAt,
-        });
-
-        return refreshedSession;
-      } catch (error) {
-        logger.error("Token refresh failed", {
-          error: String(error),
-        });
-        await clearAuthState();
-        return null;
+        return await refreshPromise;
+      } finally {
+        if (activeRefreshPromise.current === refreshPromise) {
+          activeRefreshPromise.current = null;
+        }
       }
     },
     [clearAuthState, client, logger, persistOidcSession],
@@ -485,9 +520,17 @@ export function GuardhouseProvider({
 
       removeQueryParams();
     } catch (error) {
-      handleError(
-        error instanceof Error ? error.message : "Unknown error occurred",
-      );
+      const errorMessage =
+        error instanceof Error ? error.message : "Unknown error occurred";
+
+      if (isMountedRef.current) {
+        handleError(errorMessage);
+      } else {
+        logger.warn("Skipping callback error state update after unmount", {
+          error: errorMessage,
+        });
+      }
+
       await clearAuthState();
       removeQueryParams();
     } finally {
@@ -639,6 +682,12 @@ export function GuardhouseProvider({
     );
 
     if (hasAuthResponse) {
+      if (hasHandledCallback.current) {
+        logger.debug("Skipping duplicate OAuth callback handling");
+        return;
+      }
+
+      hasHandledCallback.current = true;
       void handleCallback();
       return;
     }
