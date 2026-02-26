@@ -305,13 +305,13 @@ describe("GuardhouseClient", () => {
         method: "PUT",
       }),
     ).rejects.toMatchObject({
-      code: "HTTP_METHOD_NOT_ALLOWED",
+      code: "INVALID_HTTP_METHOD",
     });
 
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("allows unsafe HTTP verbs only when explicitly enabled", async () => {
+  it("rejects unsupported HTTP verbs even when unsafe mode is enabled", async () => {
     const fetchMock = jest
       .fn()
       .mockImplementation(() => Promise.resolve(jsonResponse({ ok: true })));
@@ -328,12 +328,15 @@ describe("GuardhouseClient", () => {
       allowUnsafeHttpMethods: true,
     });
 
-    await client.fetch("/connect/userinfo", {
-      method: "PUT",
+    await expect(
+      client.fetch("/connect/userinfo", {
+        method: "PUT",
+      }),
+    ).rejects.toMatchObject({
+      code: "INVALID_HTTP_METHOD",
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe("PUT");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("uses configurable endpoints and authenticates confidential-client calls", async () => {
@@ -1606,6 +1609,25 @@ describe("GuardhouseClient", () => {
     expect(headers.get("Authorization")).toBe("Bearer initial-access-token");
   });
 
+  it("rejects client registration redirect URIs with forbidden characters", async () => {
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+
+    await expect(
+      client.registerClient(
+        {
+          client_name: "My App",
+          redirect_uris: ["https://app.example.com/callback\n"],
+        },
+        "initial-access-token",
+      ),
+    ).rejects.toMatchObject({
+      code: "INVALID_CLIENT_METADATA",
+    });
+  });
+
   it("fails clickjacking protection check when headers are missing", async () => {
     const fetchMock = jest.fn().mockResolvedValue(
       new Response("<html>authorize</html>", {
@@ -1726,6 +1748,25 @@ describe("GuardhouseClient", () => {
     ).toThrow("allowedPostLogoutRedirectUris");
   });
 
+  it("rejects invalid logout state values", () => {
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+
+    expect(() =>
+      client.buildLogoutUrl({
+        state: "invalid_state",
+      }),
+    ).toThrow("letters, numbers, and hyphens");
+
+    expect(() =>
+      client.buildLogoutUrl({
+        state: "a".repeat(129),
+      }),
+    ).toThrow("1-128 characters");
+  });
+
   it("rejects id_token_hint on non-HTTPS authorities", () => {
     const client = new GuardhouseClient({
       authority: "http://localhost:3000",
@@ -1793,6 +1834,113 @@ describe("GuardhouseClient", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(first).toEqual(second);
     expect(first).not.toBe(second);
+  });
+
+  it("invalidates discovery cache when client context changes", async () => {
+    const fetchMock = jest
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(jsonResponse({ issuer: "https://auth.example.com" })),
+      );
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      discoveryCacheTtlMs: 60_000,
+    });
+
+    await client.discoverOpenIdConfiguration();
+
+    (
+      client as unknown as {
+        config: {
+          clientId: string;
+        };
+      }
+    ).config.clientId = "changed-client-id";
+
+    await client.discoverOpenIdConfiguration();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("logs only standard discovery metadata keys", async () => {
+    const debugSpy = jest.spyOn(console, "debug").mockImplementation(() => {});
+    const fetchMock = jest.fn().mockResolvedValue(
+      jsonResponse({
+        issuer: "https://auth.example.com",
+        authorization_endpoint:
+          "https://auth.example.com/connect/authorize?foo=bar#frag",
+        "x-vendor-secret": "should-not-log",
+      }),
+    );
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    try {
+      const client = new GuardhouseClient({
+        authority: "https://auth.example.com",
+        clientId: "client-id",
+        debug: true,
+      });
+
+      await client.discoverOpenIdConfiguration();
+
+      const discoveryLogCall = debugSpy.mock.calls.find((call) =>
+        call.some(
+          (entry) =>
+            typeof entry === "string" &&
+            entry.includes("Fetched OIDC discovery metadata"),
+        ),
+      );
+
+      expect(discoveryLogCall).toBeDefined();
+
+      const logPayload = discoveryLogCall?.find(
+        (entry) => typeof entry === "object" && entry !== null,
+      ) as Record<string, unknown> | undefined;
+
+      const metadata =
+        (logPayload?.metadata as Record<string, unknown> | undefined) ?? {};
+      expect(metadata["issuer"]).toBeDefined();
+      expect(metadata["authorization_endpoint"]).toBe("[REDACTED]");
+      expect(metadata["x-vendor-secret"]).toBeUndefined();
+    } finally {
+      debugSpy.mockRestore();
+    }
+  });
+
+  it("rejects discovery metadata when issuer does not exactly match authority", async () => {
+    const fetchMock = jest.fn().mockResolvedValue(
+      jsonResponse({
+        issuer: "https://auth.example.com/",
+      }),
+    );
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+
+    await expect(client.discoverOpenIdConfiguration()).rejects.toMatchObject({
+      code: "ISSUER_AUTHORITY_MISMATCH",
+    });
   });
 
   it("does not cache OIDC discovery responses when TTL is disabled", async () => {
@@ -1951,6 +2099,33 @@ describe("GuardhouseClient", () => {
     expect(calledFeatures.includes("noopener")).toBe(true);
     expect(calledFeatures.includes("noreferrer")).toBe(true);
     expect(popupRef.opener).toBeNull();
+  });
+
+  it("prevents popup feature overrides for noopener and noreferrer", () => {
+    const openMock = jest.fn().mockReturnValue({});
+
+    Object.defineProperty(globalThis, "window", {
+      value: { open: openMock },
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+
+    client.openAuthorizationPopup(
+      "https://auth.example.com/connect/authorize",
+      "guardhouse_oauth_popup",
+      "width=400,noopener=no,noreferrer=0,height=500",
+    );
+
+    const calledFeatures = openMock.mock.calls[0][2] as string;
+    expect(calledFeatures.includes("noopener=no")).toBe(false);
+    expect(calledFeatures.includes("noreferrer=0")).toBe(false);
+    expect(calledFeatures.includes("noopener")).toBe(true);
+    expect(calledFeatures.includes("noreferrer")).toBe(true);
   });
 
   it("posts popup messages only to explicit target origins", () => {
@@ -2145,6 +2320,76 @@ describe("GuardhouseClient", () => {
       fetchMock.mock.calls[0][1]?.body as string,
     );
     expect(body.get("client_id")).toBe("public-client");
+  });
+
+  it("logs PAR request context with sensitive params redacted", async () => {
+    const debugSpy = jest.spyOn(console, "debug").mockImplementation(() => {});
+    const fetchMock = jest.fn().mockResolvedValue(
+      jsonResponse({
+        request_uri: "urn:ietf:params:oauth:request_uri:xyz",
+        expires_in: 90,
+      }),
+    );
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    try {
+      const client = new GuardhouseClient({
+        authority: "https://auth.example.com",
+        clientId: "public-client",
+        debug: true,
+      });
+
+      await client.createPushedAuthorizationRequest({
+        response_type: "code",
+        client_secret: "top-secret",
+        code_verifier: "verifier-value",
+      });
+
+      const parLogCall = debugSpy.mock.calls.find((call) =>
+        call.some(
+          (entry) =>
+            typeof entry === "string" &&
+            entry.includes("Submitting PAR request"),
+        ),
+      );
+
+      expect(parLogCall).toBeDefined();
+
+      const payload = parLogCall?.find(
+        (entry) => typeof entry === "object" && entry !== null,
+      ) as Record<string, unknown> | undefined;
+      const params =
+        (payload?.params as Record<string, unknown> | undefined) ?? {};
+
+      expect(params["client_secret"]).toBe("[REDACTED]");
+      expect(params["code_verifier"]).toBe("[REDACTED]");
+    } finally {
+      debugSpy.mockRestore();
+    }
+  });
+
+  it("rejects request object recursion params in PAR requests", async () => {
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "public-client",
+    });
+
+    await expect(
+      client.createPushedAuthorizationRequest({
+        request: "jwt-request-object",
+      }),
+    ).rejects.toThrow("Invalid PAR parameter: request");
+
+    await expect(
+      client.createPushedAuthorizationRequest({
+        request_uri: "urn:ietf:params:oauth:request_uri:abc",
+      }),
+    ).rejects.toThrow("Invalid PAR parameter: request_uri");
   });
 
   it("limits repeated silent authentication attempts", async () => {

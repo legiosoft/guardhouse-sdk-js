@@ -44,7 +44,14 @@ export class GuardhouseClientBase {
   protected silentAuthAttemptCount: number;
   protected discoveryCache: Map<
     string,
-    { expiresAt: number; data: Record<string, unknown> }
+    {
+      expiresAt: number;
+      data: Record<string, unknown>;
+      context?: {
+        authority: string;
+        clientId: string;
+      };
+    }
   >;
   protected endpoints: {
     token: string;

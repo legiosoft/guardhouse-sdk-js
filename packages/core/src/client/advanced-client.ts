@@ -10,6 +10,7 @@ import {
 } from "../security";
 
 import {
+  DISCOVERY_ENDPOINT_KEYS,
   MAX_TOKEN_PARAM_KEY_LENGTH,
   MAX_TOKEN_PARAM_VALUE_LENGTH,
   SAFE_COOKIE_NAME_PATTERN,
@@ -26,7 +27,23 @@ import type {
   SecureCookieOptions,
 } from "./types";
 
+const FORBIDDEN_REDIRECT_URI_CHARS = new Set([
+  "<",
+  ">",
+  '"',
+  "'",
+  "`",
+  "\\",
+  "\r",
+  "\n",
+]);
+
 export class GuardhouseClientAdvanced extends GuardhouseClientToken {
+  private readonly discoveryCacheContext = new Map<
+    string,
+    { authority: string; clientId: string }
+  >();
+
   getSecureInputAttributes(
     inputKind: "otp" | "mfa" | "password" = "otp",
   ): Record<string, string> {
@@ -182,9 +199,20 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
     for (const [key, value] of Object.entries(params)) {
       const normalizedKey = key.trim();
       const normalizedValue = value.trim();
+      const normalizedKeyLower = normalizedKey.toLowerCase();
 
       if (!normalizedKey || !normalizedValue) {
         continue;
+      }
+
+      if (
+        normalizedKeyLower === "request" ||
+        normalizedKeyLower === "request_uri"
+      ) {
+        throw new GuardhouseError(
+          `Invalid PAR parameter: ${normalizedKey}`,
+          "INVALID_REQUEST",
+        );
       }
 
       if (isUnsafeObjectKey(normalizedKey)) {
@@ -211,6 +239,11 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
     if (!this.config.clientSecret && !body.has("client_id")) {
       body.set("client_id", this.config.clientId);
     }
+
+    this.logger.debug("Submitting PAR request", {
+      endpoint: sanitizeUrlForLogs(this.buildRequestUrl(parEndpoint)),
+      params: this.sanitizeParBodyForLogs(body),
+    });
 
     const response = await this.fetch(parEndpoint, {
       method: "POST",
@@ -277,7 +310,22 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
     }
 
     if (request.state) {
-      logoutUrl.searchParams.set("state", request.state);
+      const normalizedState = this.requireNonEmptyString(
+        request.state,
+        "state",
+      );
+
+      if (
+        normalizedState.length > 128 ||
+        !/^[A-Za-z0-9-]+$/.test(normalizedState)
+      ) {
+        throw new GuardhouseError(
+          "state must be 1-128 characters and contain only letters, numbers, and hyphens",
+          "INVALID_REQUEST",
+        );
+      }
+
+      logoutUrl.searchParams.set("state", normalizedState);
     }
 
     if (request.federated) {
@@ -304,6 +352,10 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
     const discoveryUrl = new URL(this.buildRequestUrl(discoveryEndpoint));
     const authorityUrl = new URL(this.baseURL);
     const cacheKey = discoveryUrl.toString();
+    const cacheContext = {
+      authority: this.baseURL,
+      clientId: this.config.clientId,
+    };
 
     if (discoveryUrl.origin !== authorityUrl.origin) {
       throw new GuardhouseError(
@@ -315,11 +367,17 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
     if (this.discoveryCacheTtlMs > 0) {
       const cachedEntry = this.discoveryCache.get(cacheKey);
       if (cachedEntry) {
-        if (cachedEntry.expiresAt > Date.now()) {
+        const cachedContext = this.discoveryCacheContext.get(cacheKey);
+        const contextMatches =
+          cachedContext?.authority === cacheContext.authority &&
+          cachedContext.clientId === cacheContext.clientId;
+
+        if (cachedEntry.expiresAt > Date.now() && contextMatches) {
           return { ...cachedEntry.data };
         }
 
         this.discoveryCache.delete(cacheKey);
+        this.discoveryCacheContext.delete(cacheKey);
       }
     }
 
@@ -347,11 +405,29 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
 
     this.assertTrustedDiscoveryMetadata(discoveryData, authorityUrl);
 
+    const issuer = discoveryData["issuer"];
+    const normalizedIssuer = typeof issuer === "string" ? issuer.trim() : "";
+    if (normalizedIssuer !== this.baseURL) {
+      throw new GuardhouseError(
+        "Discovery issuer must exactly match configured authority",
+        "ISSUER_AUTHORITY_MISMATCH",
+      );
+    }
+
+    this.logger.debug("Fetched OIDC discovery metadata", {
+      endpoint: sanitizeUrlForLogs(discoveryUrl.toString()),
+      metadata: this.sanitizeDiscoveryMetadataForLogs(discoveryData),
+      vendorSpecificKeysRedacted: Object.keys(discoveryData).filter((key) =>
+        key.toLowerCase().startsWith("x-"),
+      ).length,
+    });
+
     if (this.discoveryCacheTtlMs > 0) {
       this.discoveryCache.set(cacheKey, {
         expiresAt: Date.now() + this.discoveryCacheTtlMs,
         data: discoveryData,
       });
+      this.discoveryCacheContext.set(cacheKey, cacheContext);
     }
 
     return { ...discoveryData };
@@ -376,7 +452,20 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
       );
     }
 
-    const featureSet = `${popupFeatures},noopener,noreferrer`;
+    const sanitizedFeatureTokens = popupFeatures
+      .split(",")
+      .map((token) => token.trim())
+      .filter((token) => token.length > 0)
+      .filter((token) => {
+        const featureName = token.split("=")[0]?.trim().toLowerCase();
+        return featureName !== "noopener" && featureName !== "noreferrer";
+      });
+
+    const featureSet = [
+      ...sanitizedFeatureTokens,
+      "noopener",
+      "noreferrer",
+    ].join(",");
     const popup = openFn(authorizationUrl, popupName, featureSet);
 
     if (typeof popup === "object" && popup !== null) {
@@ -388,6 +477,61 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
     }
 
     return popup;
+  }
+
+  private sanitizeDiscoveryMetadataForLogs(
+    discoveryData: Record<string, unknown>,
+  ): Record<string, string> {
+    const safeMetadata: Record<string, string> = {};
+
+    const issuer = discoveryData["issuer"];
+    if (typeof issuer === "string" && issuer.trim() !== "") {
+      safeMetadata["issuer"] = this.sanitizeDiscoveryUrlForLogs(issuer);
+    }
+
+    for (const key of DISCOVERY_ENDPOINT_KEYS) {
+      const value = discoveryData[key];
+      if (typeof value === "string" && value.trim() !== "") {
+        safeMetadata[key] = this.sanitizeDiscoveryUrlForLogs(value);
+      }
+    }
+
+    return safeMetadata;
+  }
+
+  private sanitizeDiscoveryUrlForLogs(urlValue: string): string {
+    try {
+      const parsed = new URL(urlValue);
+      parsed.search = "";
+      parsed.hash = "";
+      parsed.username = "";
+      parsed.password = "";
+      return `${parsed.origin}${parsed.pathname}`;
+    } catch {
+      return "[REDACTED]";
+    }
+  }
+
+  private sanitizeParBodyForLogs(
+    body: URLSearchParams,
+  ): Record<string, string> {
+    const redactedParams: Record<string, string> = {};
+
+    for (const [key, value] of body.entries()) {
+      const normalizedKey = key.toLowerCase();
+      if (
+        normalizedKey.includes("secret") ||
+        normalizedKey.includes("token") ||
+        normalizedKey.includes("assertion") ||
+        normalizedKey === "code_verifier"
+      ) {
+        redactedParams[key] = "[REDACTED]";
+      } else {
+        redactedParams[key] = value;
+      }
+    }
+
+    return redactedParams;
   }
 
   postMessageToPopup(
@@ -445,6 +589,23 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
             "INVALID_CLIENT_METADATA",
           );
         }
+
+        if (redirectUri !== redirectUri.trim()) {
+          throw new GuardhouseError(
+            "redirect_uris entries must not contain surrounding whitespace",
+            "INVALID_CLIENT_METADATA",
+          );
+        }
+
+        for (const character of redirectUri) {
+          if (FORBIDDEN_REDIRECT_URI_CHARS.has(character)) {
+            throw new GuardhouseError(
+              "redirect_uris contains forbidden characters",
+              "INVALID_CLIENT_METADATA",
+            );
+          }
+        }
+
         validateRedirectUri(redirectUri);
       }
     }
