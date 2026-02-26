@@ -8,7 +8,7 @@ import { decodeJWT, validateOidcHashClaims } from "../token";
 
 import { SILENT_AUTH_ERROR_CODES } from "./constants";
 import { GuardhouseClientBase } from "./base-client";
-import type { TokenResponse } from "./types";
+import type { SessionState, TokenResponse } from "./types";
 
 export class GuardhouseClientSession extends GuardhouseClientBase {
   private readonly stateManager = new OAuthStateManager();
@@ -52,21 +52,54 @@ export class GuardhouseClientSession extends GuardhouseClientBase {
         return null;
       }
 
-      const parsed = JSON.parse(serialized);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(serialized);
+      } catch (error) {
+        this.logger.warn(
+          "Corrupt persisted session state detected; clearing local session state",
+          {
+            reason: error instanceof Error ? error.message : String(error),
+          },
+        );
+        await this.clearSessionState();
+        return null;
+      }
+
+      if (typeof parsed !== "object" || parsed === null) {
+        await this.clearSessionState();
+        return null;
+      }
+
+      const parsedRecord = parsed as Record<string, unknown>;
+
       if (
-        typeof parsed !== "object" ||
-        parsed === null ||
-        typeof parsed.accessToken !== "string" ||
-        typeof parsed.tokenType !== "string" ||
-        typeof parsed.expiresAt !== "number" ||
-        typeof parsed.hasRefreshToken !== "boolean"
+        typeof parsedRecord["accessToken"] !== "string" ||
+        typeof parsedRecord["tokenType"] !== "string" ||
+        typeof parsedRecord["expiresAt"] !== "number" ||
+        typeof parsedRecord["hasRefreshToken"] !== "boolean"
       ) {
         await this.clearSessionState();
         return null;
       }
 
-      this.sessionState = parsed;
-      return { ...parsed };
+      const sessionState: SessionState = {
+        accessToken: parsedRecord["accessToken"],
+        tokenType: parsedRecord["tokenType"],
+        expiresAt: parsedRecord["expiresAt"],
+        hasRefreshToken: Boolean(parsedRecord["hasRefreshToken"]),
+        scope:
+          typeof parsedRecord["scope"] === "string"
+            ? parsedRecord["scope"]
+            : undefined,
+        idToken:
+          typeof parsedRecord["idToken"] === "string"
+            ? parsedRecord["idToken"]
+            : undefined,
+      };
+
+      this.sessionState = sessionState;
+      return { ...sessionState };
     } catch {
       await this.clearSessionState();
       return null;
@@ -144,6 +177,7 @@ export class GuardhouseClientSession extends GuardhouseClientBase {
     this.maybeClearSensitiveCallbackUrl(callbackUrl, callback.sanitizedUrl);
 
     if (callback.idToken) {
+      // SECURITY REQUIREMENT: The id_token received in the front-channel callback MUST be cryptographically verified (signature, iss, aud, exp) using the full validateToken flow BEFORE trusting the at_hash or c_hash. Decoding alone is insufficient and highly vulnerable to injection attacks.
       const decodedIdToken = decodeJWT(callback.idToken, {
         debug: this.config.debug,
       });
@@ -190,6 +224,8 @@ export class GuardhouseClientSession extends GuardhouseClientBase {
       );
     }
 
+    // OAuthStateManager performs TTL-based lazy cleanup internally during
+    // validateAndConsumeState, so expired state entries are purged on each callback.
     this.stateManager.validateAndConsumeState(expectedState, callback.state);
     this.resetSilentAuthAttemptCounter();
 

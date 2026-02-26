@@ -3,11 +3,13 @@ import { OAuthPKCEManager } from "../pkce";
 import { decodeJWT, validateOidcHashClaims } from "../token";
 import {
   sanitizeUrlForLogs,
-  timingSafeEqual,
   validateAndNormalizeRedirectUri,
 } from "../security";
 
-import { SILENT_AUTH_ERROR_CODES } from "./constants";
+import {
+  MAX_TOKEN_PARAM_VALUE_LENGTH,
+  SILENT_AUTH_ERROR_CODES,
+} from "./constants";
 import { GuardhouseClientSession } from "./session-client";
 import type {
   IntrospectionResponse,
@@ -74,6 +76,7 @@ export class GuardhouseClientToken extends GuardhouseClientSession {
     this.assertNoScopeEscalation(requestedScope, tokenResponse.scope);
 
     if (tokenResponse.id_token) {
+      // SECURITY REQUIREMENT: The id_token MUST be cryptographically verified (signature, iss, aud, exp) using the full validateToken flow BEFORE trusting the at_hash. Decoding alone is insufficient per OIDC Core 3.1.3.7.
       const decodedIdToken = decodeJWT(tokenResponse.id_token, {
         debug: this.config.debug,
       });
@@ -142,6 +145,13 @@ export class GuardhouseClientToken extends GuardhouseClientSession {
       "refreshToken",
     );
 
+    if (normalizedRefreshToken.length > MAX_TOKEN_PARAM_VALUE_LENGTH) {
+      throw new GuardhouseError(
+        `refreshToken exceeds maximum allowed length (${MAX_TOKEN_PARAM_VALUE_LENGTH})`,
+        "INVALID_REQUEST",
+      );
+    }
+
     const { safeParams, blockedKeys } = this.sanitizeTokenBodyParams(params);
 
     if (blockedKeys.length > 0) {
@@ -179,6 +189,7 @@ export class GuardhouseClientToken extends GuardhouseClientSession {
       this.assertNoScopeEscalation(requestedScope, tokenResponse.scope);
 
       if (tokenResponse.id_token) {
+        // SECURITY REQUIREMENT: The id_token MUST be cryptographically verified (signature, iss, aud, exp) using the full validateToken flow BEFORE trusting the at_hash. Decoding alone is insufficient per OIDC Core 3.1.3.7.
         const decodedIdToken = decodeJWT(tokenResponse.id_token, {
           debug: this.config.debug,
         });
@@ -246,7 +257,7 @@ export class GuardhouseClientToken extends GuardhouseClientSession {
 
     if (
       normalizedExpectedSubject &&
-      !timingSafeEqual(user.sub ?? "", normalizedExpectedSubject)
+      (user.sub ?? "") !== normalizedExpectedSubject
     ) {
       throw new GuardhouseError(
         "UserInfo response subject does not match expected subject",

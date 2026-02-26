@@ -81,7 +81,8 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
       );
     }
 
-    if (typeof options.domain === "string" && options.domain.trim() !== "") {
+    const runtimeDomain = (options as { domain?: unknown }).domain;
+    if (typeof runtimeDomain === "string" && runtimeDomain.trim() !== "") {
       throw new GuardhouseError(
         "Domain attribute is not allowed for SDK-managed cookies; use host-only cookies",
         "UNSAFE_COOKIE_DOMAIN",

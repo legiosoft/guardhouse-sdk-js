@@ -1,5 +1,5 @@
 export interface RequestOptions {
-  method?: "GET" | "HEAD" | "POST" | "PUT" | "DELETE" | "PATCH";
+  method?: "GET" | "HEAD" | "POST";
   headers?: Headers | Record<string, string> | Array<[string, string]>;
   body?: string;
   token?: string;
@@ -36,7 +36,7 @@ export interface UserInfoResponse {
   picture?: string;
   roles?: string[];
   scopes?: string[];
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 export interface IntrospectionResponse {
@@ -48,11 +48,14 @@ export interface IntrospectionResponse {
   exp?: number;
   iat?: number;
   nbf?: number;
+  /**
+   * For user-context tokens, validate that `sub` is present and matches the expected subject.
+   */
   sub?: string;
   aud?: string | string[];
   iss?: string;
   jti?: string;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 export interface AuthorizationPageProtectionResult {
@@ -84,7 +87,10 @@ export interface SecureCookieOptions {
   path?: string;
   sameSite?: "Strict" | "Lax" | "None";
   secure?: boolean;
-  domain?: string;
+  /**
+   * Domain attributes are forbidden to enforce Host-Only cookies and prevent Cookie Tossing attacks.
+   */
+  domain?: never;
 }
 
 export interface AccountLinkingContext {

@@ -908,6 +908,7 @@ export class GuardhouseClientBase {
         headers,
         body: options.body,
         cache: options.cacheMode,
+        redirect: "error",
         signal: abortContext.signal ?? options.signal,
       });
 
@@ -919,12 +920,16 @@ export class GuardhouseClientBase {
 
       if (!response.ok) {
         const errorData = await this.parseErrorResponse(response);
+        const rawErrorCode = Object.prototype.hasOwnProperty.call(
+          errorData,
+          "error",
+        )
+          ? errorData["error"]
+          : undefined;
         const errorCode =
-          typeof errorData.error === "string"
-            ? errorData.error
-            : "server_error";
+          typeof rawErrorCode === "string" ? rawErrorCode : "server_error";
         const errorMessage =
-          typeof errorData.error === "string"
+          typeof rawErrorCode === "string"
             ? `Request failed (${errorCode})`
             : `Request failed with status ${response.status}`;
 
@@ -995,7 +1000,9 @@ export class GuardhouseClientBase {
     }
   }
 
-  private async parseErrorResponse(response: Response): Promise<any> {
+  private async parseErrorResponse(
+    response: Response,
+  ): Promise<Record<string, unknown>> {
     const contentType =
       response.headers.get("Content-Type")?.toLowerCase() || "";
 
@@ -1008,11 +1015,30 @@ export class GuardhouseClientBase {
 
       if (contentType.includes("json")) {
         try {
-          const errorData = JSON.parse(rawBody);
+          const parsedErrorData = JSON.parse(rawBody) as unknown;
+
+          if (
+            typeof parsedErrorData !== "object" ||
+            parsedErrorData === null ||
+            Array.isArray(parsedErrorData)
+          ) {
+            return {
+              error: "server_error",
+              error_description: rawBody.slice(0, 200),
+            };
+          }
+
+          const errorData = parsedErrorData as Record<string, unknown>;
+          const rawErrorCode = Object.prototype.hasOwnProperty.call(
+            errorData,
+            "error",
+          )
+            ? errorData["error"]
+            : undefined;
 
           this.logger.debug("Parsed HTTP error response", {
             status: response.status,
-            hasOAuthError: Boolean(errorData?.error),
+            hasOAuthError: typeof rawErrorCode === "string",
           });
 
           return errorData;
@@ -1035,7 +1061,20 @@ export class GuardhouseClientBase {
       }
 
       try {
-        return JSON.parse(rawBody);
+        const parsed = JSON.parse(rawBody) as unknown;
+
+        if (
+          typeof parsed !== "object" ||
+          parsed === null ||
+          Array.isArray(parsed)
+        ) {
+          return {
+            error: "server_error",
+            error_description: rawBody.slice(0, 200),
+          };
+        }
+
+        return parsed as Record<string, unknown>;
       } catch {
         return {
           error: "server_error",
