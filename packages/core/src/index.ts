@@ -131,6 +131,7 @@ export type {
   JwkMetadataValidationResult,
   DecodedJWT,
   ExpectedJwkKeyType,
+  VerifiedSignatureProof,
   OidcHashValidationOptions,
   OidcHashValidationResult,
   JtiReplayCacheOptions,

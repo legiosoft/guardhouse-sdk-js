@@ -16,17 +16,11 @@ import type {
 } from "./types";
 
 const DEFAULT_CLOCK_SKEW_TOLERANCE_SECONDS = 60;
+const MAX_TOTAL_NESTED_CLAIM_KEYS = 100;
 
-function timingSafeIncludes(candidates: string[], expected: string): boolean {
-  let match = false;
-
-  for (const candidate of candidates) {
-    if (timingSafeEqual(candidate, expected)) {
-      match = true;
-    }
-  }
-
-  return match;
+interface NestedClaimTraversalState {
+  keyCount: number;
+  maxTotalKeys: number;
 }
 
 function normalizeAudienceClaim(aud: unknown): string[] | null {
@@ -36,7 +30,7 @@ function normalizeAudienceClaim(aud: unknown): string[] | null {
 
   if (typeof aud === "string") {
     const normalized = aud.trim();
-    return normalized ? [normalized] : [];
+    return normalized ? [normalized] : null;
   }
 
   if (!Array.isArray(aud)) {
@@ -65,6 +59,10 @@ function collectNestedClaimPaths(
   value: Record<string, unknown>,
   basePath: string,
   depth = 0,
+  traversalState: NestedClaimTraversalState = {
+    keyCount: 0,
+    maxTotalKeys: MAX_TOTAL_NESTED_CLAIM_KEYS,
+  },
 ): string[] {
   if (depth > 4) {
     return [basePath];
@@ -73,6 +71,11 @@ function collectNestedClaimPaths(
   const paths: string[] = [];
 
   for (const [key, entryValue] of Object.entries(value)) {
+    traversalState.keyCount += 1;
+    if (traversalState.keyCount > traversalState.maxTotalKeys) {
+      throw new Error("Token nested claims exceed maximum supported key count");
+    }
+
     const path = `${basePath}.${key}`;
 
     if (
@@ -85,6 +88,7 @@ function collectNestedClaimPaths(
           entryValue as Record<string, unknown>,
           path,
           depth + 1,
+          traversalState,
         ),
       );
       continue;
@@ -110,7 +114,8 @@ export function validateToken(
     audience,
     clientId,
     nonce,
-    signatureVerified = false,
+    verifiedSignature,
+    signatureVerified: signatureVerifiedFlag = false,
     trustedJkuOrigins = [],
     supportedCriticalHeaders = [],
     allowedAlgorithms,
@@ -130,6 +135,9 @@ export function validateToken(
     clockSkewTolerance = DEFAULT_CLOCK_SKEW_TOLERANCE_SECONDS,
     debug,
   } = options;
+
+  const signatureVerified =
+    (verifiedSignature?.verified ?? false) || signatureVerifiedFlag;
 
   if (!Number.isFinite(clockSkewTolerance) || clockSkewTolerance < 0) {
     throw new Error("clockSkewTolerance must be a non-negative number");
@@ -172,6 +180,16 @@ export function validateToken(
 
   const now = Math.floor(Date.now() / 1000);
 
+  const tokenSubject =
+    typeof decodedJWT.payload.sub === "string"
+      ? decodedJWT.payload.sub.trim()
+      : "";
+
+  if (!tokenSubject) {
+    result.valid = false;
+    result.errors.push("Token is missing mandatory subject (sub) claim.");
+  }
+
   if (!signatureVerified) {
     result.valid = false;
     result.errors.push("JWT signature has not been cryptographically verified");
@@ -184,11 +202,60 @@ export function validateToken(
   const jkuHeader = decodedJWT.header.jku;
   const kidHeader = decodedJWT.header.kid;
 
+  if (signatureVerifiedFlag && !verifiedSignature) {
+    logger.warn(
+      "signatureVerified boolean was provided without verifiedSignature proof",
+      {
+        recommendation:
+          "Provide verifiedSignature for type-safe verification context",
+      },
+    );
+  }
+
   if (typeof algorithm !== "string" || algorithm.trim() === "") {
     result.valid = false;
     result.errors.push("JWT header is missing a valid alg value");
     logger.error("JWT validation failed: missing alg header");
     return result;
+  }
+
+  if (verifiedSignature) {
+    const normalizedProofAlgorithm =
+      typeof verifiedSignature.algorithm === "string"
+        ? verifiedSignature.algorithm.trim()
+        : "";
+    const normalizedHeaderKid =
+      typeof kidHeader === "string" ? kidHeader.trim() : undefined;
+    const normalizedProofKid =
+      typeof verifiedSignature.kid === "string"
+        ? verifiedSignature.kid.trim()
+        : undefined;
+
+    if (!normalizedProofAlgorithm || normalizedProofAlgorithm !== algorithm) {
+      result.valid = false;
+      result.signatureVerified = false;
+      result.errors.push(
+        "verifiedSignature algorithm does not match JWT header alg",
+      );
+    }
+
+    if (normalizedProofKid && normalizedProofKid !== normalizedHeaderKid) {
+      result.valid = false;
+      result.kidValid = false;
+      result.errors.push("verifiedSignature kid does not match JWT header kid");
+    }
+
+    if (
+      expectedKeyType &&
+      verifiedSignature.keyType &&
+      verifiedSignature.keyType !== expectedKeyType
+    ) {
+      result.valid = false;
+      result.jwkMetadataValid = false;
+      result.errors.push(
+        "verifiedSignature keyType does not match expected key type",
+      );
+    }
   }
 
   if (algorithm === "none") {
@@ -251,7 +318,7 @@ export function validateToken(
             ? [expectedKid.trim()]
             : [];
 
-      if (!timingSafeIncludes(normalizedAllowedKids, normalizedKid)) {
+      if (!normalizedAllowedKids.includes(normalizedKid)) {
         result.kidValid = false;
         result.valid = false;
         result.errors.push("JWT kid validation failed");
@@ -298,7 +365,6 @@ export function validateToken(
     }
 
     const supportedCriticalHeaderSet = new Set<string>([
-      "b64",
       ...supportedCriticalHeaders.map((entry) => entry.trim()),
     ]);
 
@@ -381,6 +447,20 @@ export function validateToken(
     }
   }
 
+  if (
+    decodedJWT.payload.iat !== undefined &&
+    typeof decodedJWT.payload.iat !== "number"
+  ) {
+    result.valid = false;
+    result.errors.push("Token iat claim must be a number");
+  } else if (
+    typeof decodedJWT.payload.iat === "number" &&
+    decodedJWT.payload.iat > now + clockSkewTolerance
+  ) {
+    result.valid = false;
+    result.errors.push("Token issued-at time is in the future.");
+  }
+
   const hasAmrRequirement =
     requiredAmrValues.length > 0 || requirePhishingResistantMfa;
   if (hasAmrRequirement) {
@@ -412,8 +492,11 @@ export function validateToken(
       }
 
       if (requirePhishingResistantMfa) {
-        const hasPhishingResistantAmr = normalizedAmrValues.some((value) =>
-          PHISHING_RESISTANT_AMR_VALUES.has(value.toLowerCase()),
+        const normalizedAmrValuesLower = normalizedAmrValues.map((value) =>
+          value.toLowerCase(),
+        );
+        const hasPhishingResistantAmr = normalizedAmrValuesLower.some((value) =>
+          PHISHING_RESISTANT_AMR_VALUES.has(value),
         );
 
         if (!hasPhishingResistantAmr) {
@@ -438,6 +521,10 @@ export function validateToken(
       result.cnfValid = false;
       result.valid = false;
       result.errors.push("Token is missing cnf.jkt claim");
+    } else if (actualJkt.length !== expectedJkt.length) {
+      result.cnfValid = false;
+      result.valid = false;
+      result.errors.push("Token cnf.jkt does not match expected binding");
     } else if (!timingSafeEqual(actualJkt, expectedJkt)) {
       result.cnfValid = false;
       result.valid = false;
@@ -452,7 +539,7 @@ export function validateToken(
     result.valid = false;
     result.errors.push("Token exp claim must be a number");
   } else if (typeof decodedJWT.payload.exp === "number") {
-    if (decodedJWT.payload.exp < now - clockSkewTolerance) {
+    if (decodedJWT.payload.exp <= now - clockSkewTolerance) {
       result.expired = true;
       result.valid = false;
       result.errors.push("Token has expired");
@@ -475,20 +562,23 @@ export function validateToken(
   }
 
   if (issuer) {
-    if (!decodedJWT.payload.iss) {
+    const tokenIssuer =
+      typeof decodedJWT.payload.iss === "string"
+        ? decodedJWT.payload.iss.trim()
+        : "";
+
+    if (!tokenIssuer) {
       result.issuerValid = false;
       result.valid = false;
       result.errors.push("Token is missing required issuer (iss) claim");
       logger.warn("Issuer claim is missing");
-    } else if (decodedJWT.payload.iss !== issuer) {
+    } else if (tokenIssuer !== issuer) {
       result.issuerValid = false;
       result.valid = false;
       result.errors.push(
-        `Token issuer "${decodedJWT.payload.iss}" does not match expected "${issuer}"`,
+        `Token issuer "${tokenIssuer}" does not match expected "${issuer}"`,
       );
-      logger.warn(
-        `Issuer mismatch: expected ${issuer}, got ${decodedJWT.payload.iss}`,
-      );
+      logger.warn(`Issuer mismatch: expected ${issuer}, got ${tokenIssuer}`);
     }
   }
 
@@ -524,10 +614,10 @@ export function validateToken(
     }
   }
 
-  const expectedAuthorizedParty =
+  const normalizedClientId =
     typeof clientId === "string" && clientId.trim() !== ""
       ? clientId.trim()
-      : expectedAudience;
+      : undefined;
   const tokenAzp =
     typeof decodedJWT.payload.azp === "string"
       ? decodedJWT.payload.azp.trim()
@@ -537,12 +627,12 @@ export function validateToken(
     result.azpValid = false;
     result.valid = false;
     result.errors.push(
-      "Token with multiple audiences must include an azp claim",
+      "azp claim is REQUIRED when multiple audiences are present (OIDC Core 3.1.3.7).",
     );
   }
 
-  if (tokenAzp && expectedAuthorizedParty) {
-    if (!timingSafeEqual(tokenAzp, expectedAuthorizedParty)) {
+  if (tokenAzp && normalizedClientId) {
+    if (tokenAzp !== normalizedClientId) {
       result.azpValid = false;
       result.valid = false;
       result.errors.push(
@@ -552,52 +642,80 @@ export function validateToken(
   }
 
   if (nonce) {
-    if (!decodedJWT.payload.nonce) {
+    const tokenNonce =
+      typeof decodedJWT.payload.nonce === "string"
+        ? decodedJWT.payload.nonce
+        : "";
+
+    if (!tokenNonce) {
       result.nonceValid = false;
       result.valid = false;
       result.errors.push("Token is missing required nonce claim");
       logger.warn("Nonce claim is missing");
-    } else if (!timingSafeEqual(decodedJWT.payload.nonce, nonce)) {
+    } else if (tokenNonce.length !== nonce.length) {
       result.nonceValid = false;
       result.valid = false;
       result.errors.push(
-        `Token nonce "${decodedJWT.payload.nonce}" does not match expected "${nonce}"`,
+        `Token nonce "${tokenNonce}" does not match expected "${nonce}"`,
       );
-      logger.warn(
-        `Nonce mismatch: expected ${nonce}, got ${decodedJWT.payload.nonce}`,
+      logger.warn(`Nonce mismatch: expected ${nonce}, got ${tokenNonce}`);
+    } else if (!timingSafeEqual(tokenNonce, nonce)) {
+      result.nonceValid = false;
+      result.valid = false;
+      result.errors.push(
+        `Token nonce "${tokenNonce}" does not match expected "${nonce}"`,
       );
+      logger.warn(`Nonce mismatch: expected ${nonce}, got ${tokenNonce}`);
     }
   }
 
   const nestedClaimPaths: string[] = [];
+  const nestedClaimTraversalState: NestedClaimTraversalState = {
+    keyCount: 0,
+    maxTotalKeys: MAX_TOTAL_NESTED_CLAIM_KEYS,
+  };
+  let nestedClaimTraversalFailed = false;
 
-  if (
-    decodedJWT.payload.profile &&
-    typeof decodedJWT.payload.profile === "object" &&
-    !Array.isArray(decodedJWT.payload.profile)
-  ) {
-    nestedClaimPaths.push(
-      ...collectNestedClaimPaths(
-        decodedJWT.payload.profile as Record<string, unknown>,
-        "profile",
-      ),
+  try {
+    if (
+      decodedJWT.payload.profile &&
+      typeof decodedJWT.payload.profile === "object" &&
+      !Array.isArray(decodedJWT.payload.profile)
+    ) {
+      nestedClaimPaths.push(
+        ...collectNestedClaimPaths(
+          decodedJWT.payload.profile as Record<string, unknown>,
+          "profile",
+          0,
+          nestedClaimTraversalState,
+        ),
+      );
+    }
+
+    if (
+      decodedJWT.payload.address &&
+      typeof decodedJWT.payload.address === "object" &&
+      !Array.isArray(decodedJWT.payload.address)
+    ) {
+      nestedClaimPaths.push(
+        ...collectNestedClaimPaths(
+          decodedJWT.payload.address as Record<string, unknown>,
+          "address",
+          0,
+          nestedClaimTraversalState,
+        ),
+      );
+    }
+  } catch (error) {
+    nestedClaimTraversalFailed = true;
+    result.nestedClaimsTrusted = false;
+    result.valid = false;
+    result.errors.push(
+      error instanceof Error ? error.message : "Nested claim traversal failed",
     );
   }
 
-  if (
-    decodedJWT.payload.address &&
-    typeof decodedJWT.payload.address === "object" &&
-    !Array.isArray(decodedJWT.payload.address)
-  ) {
-    nestedClaimPaths.push(
-      ...collectNestedClaimPaths(
-        decodedJWT.payload.address as Record<string, unknown>,
-        "address",
-      ),
-    );
-  }
-
-  if (nestedClaimPaths.length > 0) {
+  if (!nestedClaimTraversalFailed && nestedClaimPaths.length > 0) {
     const normalizedTrustedPaths = trustedNestedClaimPaths
       .map((path) => path.trim())
       .filter((path) => path.length > 0);
@@ -609,7 +727,7 @@ export function validateToken(
       );
     } else {
       for (const claimPath of nestedClaimPaths) {
-        if (!timingSafeIncludes(normalizedTrustedPaths, claimPath)) {
+        if (!normalizedTrustedPaths.includes(claimPath)) {
           result.nestedClaimsTrusted = false;
           result.valid = false;
           result.errors.push(`Nested claim path is not trusted: ${claimPath}`);
@@ -645,8 +763,9 @@ export function isTokenExpired(
     return false;
   }
 
+  // OIDC time claims are Unix seconds; Date.now() is milliseconds.
   const now = Math.floor(Date.now() / 1000);
-  const expired = decodedJWT.payload.exp < now - clockSkewTolerance;
+  const expired = decodedJWT.payload.exp <= now - clockSkewTolerance;
 
   logger.debug("Token expiration checked", {
     expired,

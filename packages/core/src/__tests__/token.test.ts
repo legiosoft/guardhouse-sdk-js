@@ -115,6 +115,26 @@ describe("token utilities", () => {
     );
   });
 
+  it("requires a mandatory non-empty subject claim", () => {
+    const token = createJWT({
+      iss: "https://auth.example.com",
+      aud: "client-id",
+      exp: Math.floor(Date.now() / 1000) + 300,
+    });
+
+    const decoded = decodeJWT(token);
+    const result = validateToken(decoded, {
+      issuer: "https://auth.example.com",
+      audience: "client-id",
+      signatureVerified: true,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain(
+      "Token is missing mandatory subject (sub) claim.",
+    );
+  });
+
   it("rejects missing nonce when one is expected", () => {
     const token = createJWT({
       sub: "user-1",
@@ -158,6 +178,100 @@ describe("token utilities", () => {
     expect(result.errors).toHaveLength(0);
   });
 
+  it("accepts verification proof objects and rejects mismatched proof metadata", () => {
+    const token = createJWTWithHeader(
+      {
+        sub: "user-1",
+        iss: "https://auth.example.com",
+        aud: "client-id",
+        exp: Math.floor(Date.now() / 1000) + 300,
+      },
+      {
+        alg: "RS256",
+        typ: "JWT",
+        kid: "kid-1",
+      },
+    );
+
+    const decoded = decodeJWT(token);
+    const validResult = validateToken(decoded, {
+      issuer: "https://auth.example.com",
+      audience: "client-id",
+      verifiedSignature: {
+        verified: true,
+        algorithm: "RS256",
+        kid: "kid-1",
+      },
+    });
+
+    expect(validResult.valid).toBe(true);
+
+    const invalidResult = validateToken(decoded, {
+      issuer: "https://auth.example.com",
+      audience: "client-id",
+      verifiedSignature: {
+        verified: true,
+        algorithm: "RS512",
+        kid: "kid-1",
+      },
+    });
+
+    expect(invalidResult.valid).toBe(false);
+    expect(
+      invalidResult.errors.some((error) =>
+        error.includes("verifiedSignature algorithm"),
+      ),
+    ).toBe(true);
+  });
+
+  it("verifies azp against clientId when provided", () => {
+    const token = createJWT({
+      sub: "user-1",
+      iss: "https://auth.example.com",
+      aud: ["client-id", "secondary"],
+      azp: "different-client",
+      exp: Math.floor(Date.now() / 1000) + 300,
+    });
+
+    const decoded = decodeJWT(token);
+    const result = validateToken(decoded, {
+      issuer: "https://auth.example.com",
+      audience: "client-id",
+      clientId: "client-id",
+      signatureVerified: true,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.azpValid).toBe(false);
+    expect(
+      result.errors.some((error) =>
+        error.includes('Token azp "different-client"'),
+      ),
+    ).toBe(true);
+  });
+
+  it("requires azp when multiple audiences are present", () => {
+    const token = createJWT({
+      sub: "user-1",
+      iss: "https://auth.example.com",
+      aud: ["client-id", "secondary"],
+      exp: Math.floor(Date.now() / 1000) + 300,
+    });
+
+    const decoded = decodeJWT(token);
+    const result = validateToken(decoded, {
+      issuer: "https://auth.example.com",
+      audience: "client-id",
+      signatureVerified: true,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.azpValid).toBe(false);
+    expect(result.errors).toContain(
+      "azp claim is REQUIRED when multiple audiences are present (OIDC Core 3.1.3.7).",
+    );
+  });
+
   it("accepts expected audience regardless of array position", () => {
     const token = createJWT({
       sub: "user-1",
@@ -191,6 +305,26 @@ describe("token utilities", () => {
     const result = validateToken(decoded, {
       issuer: "https://auth.example.com",
       audience: "client-id",
+      signatureVerified: true,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.audienceValid).toBe(false);
+    expect(
+      result.errors.some((error) => error.includes("aud claim must be")),
+    ).toBe(true);
+  });
+
+  it("rejects whitespace-only audience strings", () => {
+    const token = createJWT({
+      sub: "user-1",
+      iss: "https://auth.example.com",
+      aud: "   ",
+      exp: Math.floor(Date.now() / 1000) + 300,
+    });
+
+    const decoded = decodeJWT(token);
+    const result = validateToken(decoded, {
       signatureVerified: true,
     });
 
@@ -342,6 +476,38 @@ describe("token utilities", () => {
     ).toBe(true);
   });
 
+  it("rejects b64 critical header parameters as unsupported", () => {
+    const token = createJWTWithHeader(
+      {
+        sub: "user-1",
+        iss: "https://auth.example.com",
+        aud: "client-id",
+        exp: Math.floor(Date.now() / 1000) + 300,
+      },
+      {
+        alg: "RS256",
+        typ: "JWT",
+        crit: ["b64"],
+        b64: false,
+      },
+    );
+
+    const decoded = decodeJWT(token);
+    const result = validateToken(decoded, {
+      issuer: "https://auth.example.com",
+      audience: "client-id",
+      signatureVerified: true,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(
+      result.errors.some(
+        (error) =>
+          error.includes("unsupported parameter") && error.includes("b64"),
+      ),
+    ).toBe(true);
+  });
+
   it("rejects JWTs missing signature part", () => {
     const header = Buffer.from(
       JSON.stringify({ alg: "RS256", typ: "JWT" }),
@@ -484,6 +650,58 @@ describe("token utilities", () => {
 
     expect(result.valid).toBe(false);
     expect(result.authTimeValid).toBe(false);
+  });
+
+  it("rejects iat values that are too far in the future", () => {
+    const token = createJWT({
+      sub: "user-1",
+      iat: Math.floor(Date.now() / 1000) + 120,
+      iss: "https://auth.example.com",
+      aud: "client-id",
+      exp: Math.floor(Date.now() / 1000) + 300,
+    });
+
+    const decoded = decodeJWT(token);
+    const result = validateToken(decoded, {
+      issuer: "https://auth.example.com",
+      audience: "client-id",
+      signatureVerified: true,
+      clockSkewTolerance: 30,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain("Token issued-at time is in the future.");
+  });
+
+  it("rejects tokens with excessive nested claim keys", () => {
+    const profile: Record<string, string> = {};
+    for (let index = 0; index < 101; index += 1) {
+      profile[`claim_${index}`] = `value_${index}`;
+    }
+
+    const token = createJWT({
+      sub: "user-1",
+      iss: "https://auth.example.com",
+      aud: "client-id",
+      profile,
+      exp: Math.floor(Date.now() / 1000) + 300,
+    });
+
+    const decoded = decodeJWT(token);
+    const result = validateToken(decoded, {
+      issuer: "https://auth.example.com",
+      audience: "client-id",
+      signatureVerified: true,
+      allowUntrustedNestedClaims: true,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.nestedClaimsTrusted).toBe(false);
+    expect(
+      result.errors.some((error) =>
+        error.includes("maximum supported key count"),
+      ),
+    ).toBe(true);
   });
 
   it("rejects replayed jti when uniqueness is enforced", () => {
@@ -876,6 +1094,33 @@ describe("token utilities", () => {
     expect(() => isTokenExpired(decoded, -1)).toThrow(
       "clockSkewTolerance must be a non-negative number",
     );
+  });
+
+  it("treats exp at boundary as expired", () => {
+    const nowSpy = jest.spyOn(Date, "now");
+
+    try {
+      nowSpy.mockReturnValue(1_000_000);
+      const currentEpochSeconds = Math.floor(Date.now() / 1000);
+      const token = createJWT({
+        sub: "user-1",
+        exp: currentEpochSeconds,
+      });
+      const decoded = decodeJWT(token);
+
+      expect(isTokenExpired(decoded, 0)).toBe(true);
+
+      const validation = validateToken(decoded, {
+        signatureVerified: true,
+        clockSkewTolerance: 0,
+      });
+
+      expect(validation.valid).toBe(false);
+      expect(validation.expired).toBe(true);
+      expect(validation.errors).toContain("Token has expired");
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it("throws for negative clock skew in getTokenExpiresIn", () => {

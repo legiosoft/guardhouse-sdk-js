@@ -96,6 +96,8 @@ export interface TokenValidationOptions {
   audience?: string;
   clientId?: string;
   nonce?: string;
+  verifiedSignature?: VerifiedSignatureProof;
+  /** @deprecated Prefer verifiedSignature for type-safe verification context. */
   signatureVerified?: boolean;
   trustedJkuOrigins?: string[];
   supportedCriticalHeaders?: string[];
@@ -118,6 +120,13 @@ export interface TokenValidationOptions {
   /** Clock skew tolerance in seconds. */
   clockSkewTolerance?: number;
   debug?: boolean;
+}
+
+export interface VerifiedSignatureProof {
+  verified: true;
+  algorithm: string;
+  kid?: string;
+  keyType?: ExpectedJwkKeyType;
 }
 
 export interface OidcHashValidationOptions {

@@ -7,6 +7,7 @@ export { JtiReplayCache } from "./replay-cache";
 export type {
   DecodedJWT,
   ExpectedJwkKeyType,
+  VerifiedSignatureProof,
   JwkMetadata,
   JwkMetadataValidationOptions,
   JwkMetadataValidationResult,
