@@ -25,6 +25,7 @@ import {
   enforceSecureHttpUrl,
   isLocalDevelopmentHostname,
   sanitizeUrlForLogs,
+  validateAndNormalizeRedirectUri,
 } from "./security";
 
 export interface DPoPProofContext {
@@ -66,6 +67,12 @@ export interface StorageAdapter {
   getItem(key: string): Promise<string | null>;
   setItem(key: string, value: string): Promise<void>;
   removeItem(key: string): Promise<void>;
+}
+
+const ABSOLUTE_URI_PATTERN = /^[A-Za-z][A-Za-z0-9+.-]*:/;
+
+function isAbsoluteUri(value: string): boolean {
+  return ABSOLUTE_URI_PATTERN.test(value);
 }
 
 export interface GuardhouseErrorOptions {
@@ -116,10 +123,11 @@ export class ConfigValidationError extends GuardhouseError {
  */
 export function validateConfig(config: GuardhouseConfig): void {
   const logger = createGuardhouseLogger("Config", config.debug);
+  const hasClientSecret = Boolean(config.clientSecret);
 
   logger.debug("Validating configuration", {
     authority: sanitizeUrlForLogs(config.authority),
-    hasClientSecret: Boolean(config.clientSecret),
+    hasClientSecret,
   });
 
   if (typeof config.authority !== "string" || config.authority.trim() === "") {
@@ -232,6 +240,14 @@ export function validateConfig(config: GuardhouseConfig): void {
           "allowedPostLogoutRedirectUris must contain non-empty strings",
         );
       }
+
+      try {
+        validateAndNormalizeRedirectUri(uri);
+      } catch (error) {
+        throw new ConfigValidationError(
+          `allowedPostLogoutRedirectUris contains an invalid URI: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
   }
 
@@ -240,6 +256,42 @@ export function validateConfig(config: GuardhouseConfig): void {
 
     enforceSecureHttpUrl(url, "Authority");
     enforceNonSpoofableHostname(url, "Authority");
+
+    const endpointConfigs: Array<[string, string | undefined]> = [
+      ["tokenEndpoint", config.tokenEndpoint],
+      ["userInfoEndpoint", config.userInfoEndpoint],
+      ["introspectionEndpoint", config.introspectionEndpoint],
+      ["revocationEndpoint", config.revocationEndpoint],
+    ];
+
+    for (const [endpointName, endpointValue] of endpointConfigs) {
+      if (typeof endpointValue !== "string" || endpointValue.trim() === "") {
+        continue;
+      }
+
+      const normalizedEndpoint = endpointValue.trim();
+      if (!isAbsoluteUri(normalizedEndpoint)) {
+        continue;
+      }
+
+      let endpointUrl: URL;
+      try {
+        endpointUrl = new URL(normalizedEndpoint);
+      } catch {
+        throw new ConfigValidationError(
+          `${endpointName} must be a valid absolute URL`,
+        );
+      }
+
+      try {
+        enforceSecureHttpUrl(endpointUrl, endpointName);
+        enforceNonSpoofableHostname(endpointUrl, endpointName);
+      } catch (error) {
+        throw new ConfigValidationError(
+          `${endpointName} is invalid: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
 
     // SECURITY: Prevent SSRF (Server-Side Request Forgery)
     if (config.clientSecret && !isLocalDevelopmentHostname(url.hostname)) {
@@ -250,7 +302,7 @@ export function validateConfig(config: GuardhouseConfig): void {
 
     logger.debug("Configuration validated successfully", {
       authority: sanitizeUrlForLogs(url.toString()),
-      hasClientSecret: Boolean(config.clientSecret),
+      hasClientSecret,
       requestTimeoutMs: config.requestTimeoutMs,
       discoveryCacheTtlMs: config.discoveryCacheTtlMs,
       allowUnsafeHttpMethods: config.allowUnsafeHttpMethods,
@@ -264,6 +316,7 @@ export function validateConfig(config: GuardhouseConfig): void {
       allowedPostLogoutRedirectUriCount:
         config.allowedPostLogoutRedirectUris?.length ?? 0,
       hasDpopProofFactory: Boolean(config.dpopProofFactory),
+      clientSecretRedacted: hasClientSecret,
     });
   } catch (error) {
     if (error instanceof ConfigValidationError) {
@@ -300,15 +353,33 @@ export function buildUrl(
       throw new GuardhouseError("Path is required", "URL_BUILD_ERROR");
     }
 
-    if (/^https?:\/\//i.test(path)) {
+    const normalizedInputPath = path.trim();
+
+    if (/^https?:\/\//i.test(normalizedInputPath)) {
       throw new GuardhouseError(
         "Path must be relative to the configured authority",
         "URL_BUILD_ERROR",
       );
     }
 
+    if (normalizedInputPath.includes("..")) {
+      throw new GuardhouseError(
+        "Path must not contain directory traversal sequences",
+        "URL_BUILD_ERROR",
+      );
+    }
+
+    if (normalizedInputPath.includes("//")) {
+      throw new GuardhouseError(
+        "Path must not contain repeated slash segments",
+        "URL_BUILD_ERROR",
+      );
+    }
+
     const url = new URL(config.authority);
-    const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+    const normalizedPath = normalizedInputPath.startsWith("/")
+      ? normalizedInputPath
+      : `/${normalizedInputPath}`;
     const basePath = url.pathname.replace(/\/+$/, "");
 
     url.pathname = `${basePath}${normalizedPath}`;
