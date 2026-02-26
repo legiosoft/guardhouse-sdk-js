@@ -31,6 +31,16 @@ import {
 } from "./constants";
 import type { RequestOptions, SessionState, TokenResponse } from "./types";
 
+function trimTrailingForwardSlashes(value: string): string {
+  let end = value.length;
+
+  while (end > 0 && value.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+
+  return end === value.length ? value : value.slice(0, end);
+}
+
 export class GuardhouseClientBase {
   protected config: GuardhouseConfig;
   protected baseURL: string;
@@ -159,7 +169,7 @@ export class GuardhouseClientBase {
     this.silentAuthAttemptCount = 0;
     this.discoveryCache = new Map();
 
-    this.baseURL = config.authority.replace(/\/+$/, "");
+    this.baseURL = trimTrailingForwardSlashes(config.authority);
     this.endpoints = {
       token: config.tokenEndpoint || DEFAULT_ENDPOINTS.token,
       userInfo: config.userInfoEndpoint || DEFAULT_ENDPOINTS.userInfo,
@@ -740,8 +750,8 @@ export class GuardhouseClientBase {
       return false;
     }
 
-    const basePath = baseUrl.pathname.replace(/\/+$/, "");
-    const endpointPath = endpointUrl.pathname.replace(/\/+$/, "");
+    const basePath = trimTrailingForwardSlashes(baseUrl.pathname);
+    const endpointPath = trimTrailingForwardSlashes(endpointUrl.pathname);
 
     if (basePath === "") {
       return true;
