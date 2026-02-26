@@ -1,4 +1,4 @@
-import { MAX_TRACKED_JTI } from "./constants";
+import { MAX_TRACKED_NONCE_AND_JTI } from "./constants";
 
 const consumedJtiSet = new Set<string>();
 const consumedJtiQueue: string[] = [];
@@ -11,7 +11,7 @@ export function consumeJti(jti: string): boolean {
   consumedJtiSet.add(jti);
   consumedJtiQueue.push(jti);
 
-  if (consumedJtiQueue.length > MAX_TRACKED_JTI) {
+  if (consumedJtiQueue.length > MAX_TRACKED_NONCE_AND_JTI) {
     const evicted = consumedJtiQueue.shift();
     if (evicted) {
       consumedJtiSet.delete(evicted);
