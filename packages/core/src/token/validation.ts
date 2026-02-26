@@ -684,7 +684,7 @@ export function validateToken(
     ) {
       nestedClaimPaths.push(
         ...collectNestedClaimPaths(
-          decodedJWT.payload.profile as Record<string, unknown>,
+          decodedJWT.payload.profile,
           "profile",
           0,
           nestedClaimTraversalState,
@@ -699,7 +699,7 @@ export function validateToken(
     ) {
       nestedClaimPaths.push(
         ...collectNestedClaimPaths(
-          decodedJWT.payload.address as Record<string, unknown>,
+          decodedJWT.payload.address,
           "address",
           0,
           nestedClaimTraversalState,

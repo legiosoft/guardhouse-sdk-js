@@ -9,6 +9,7 @@ import {
 import type { OAuthCallbackResult } from "./types";
 
 const MAX_EXPIRES_IN_SECONDS = 2_147_483_647;
+// eslint-disable-next-line no-control-regex -- intentionally blocks control characters in callback URLs
 const URL_BYPASS_CHAR_PATTERN = /[\\\u0000-\u001F\u007F]/g;
 
 type IPv4Octets = [number, number, number, number];

@@ -10,7 +10,10 @@ function jsonResponse(data: unknown, status = 200): Response {
   });
 }
 
-function getCallHeaders(fetchMock: any, callIndex: number): Headers {
+function getCallHeaders(
+  fetchMock: jest.MockedFunction<typeof fetch>,
+  callIndex: number,
+): Headers {
   const requestInit = fetchMock.mock.calls[callIndex]?.[1] as
     | RequestInit
     | undefined;
@@ -302,7 +305,7 @@ describe("GuardhouseClient", () => {
 
     await expect(
       client.fetch("/connect/userinfo", {
-        method: "PUT",
+        method: "PUT" as never,
       }),
     ).rejects.toMatchObject({
       code: "INVALID_HTTP_METHOD",
@@ -330,7 +333,7 @@ describe("GuardhouseClient", () => {
 
     await expect(
       client.fetch("/connect/userinfo", {
-        method: "PUT",
+        method: "PUT" as never,
       }),
     ).rejects.toMatchObject({
       code: "INVALID_HTTP_METHOD",
@@ -2209,7 +2212,7 @@ describe("GuardhouseClient", () => {
 
     expect(() =>
       client.buildHostOnlyCookie("gh_session", "token-value", {
-        domain: ".example.com",
+        domain: ".example.com" as never,
       }),
     ).toThrow("Domain attribute is not allowed");
   });

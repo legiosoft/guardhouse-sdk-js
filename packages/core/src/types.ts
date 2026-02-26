@@ -32,7 +32,7 @@ export interface User {
   email?: string;
   roles?: string[];
   scopes?: string[];
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 export interface TokenResponse {

@@ -11,10 +11,14 @@ export default tseslint.config(
   ...tseslint.configs.recommended,
   {
     files: ["src/**/*.ts"],
+    ignores: ["src/__tests__/**/*.ts"],
     languageOptions: {
+      parserOptions: {
+        projectService: true,
+      },
       globals: {
-        ...globals.browser,
-        ...globals.node,
+        ...globals["shared-node-browser"],
+        Buffer: "readonly",
       },
     },
     rules: {
@@ -22,7 +26,11 @@ export default tseslint.config(
         "error",
         { prefer: "type-imports" },
       ],
-      "@typescript-eslint/no-explicit-any": "off",
+      "@typescript-eslint/no-explicit-any": "error",
+      "@typescript-eslint/no-require-imports": "off",
+      "@typescript-eslint/no-floating-promises": "error",
+      "@typescript-eslint/no-misused-promises": "error",
+      "@typescript-eslint/no-unnecessary-type-assertion": "error",
       "@typescript-eslint/no-unused-vars": [
         "error",
         {
@@ -43,7 +51,7 @@ export default tseslint.config(
       },
     },
     rules: {
-      "@typescript-eslint/no-explicit-any": "off",
+      "@typescript-eslint/no-explicit-any": "error",
       "@typescript-eslint/no-require-imports": "off",
     },
   },

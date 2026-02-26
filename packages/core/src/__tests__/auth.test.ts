@@ -24,9 +24,7 @@ const generateAuthUrl = (options: unknown): string => {
 
 describe("generateAuthUrl", () => {
   it("requires options", () => {
-    expect(() => generateAuthUrl(undefined as any)).toThrow(
-      "options is required",
-    );
+    expect(() => generateAuthUrl(undefined)).toThrow("options is required");
   });
 
   it("requires authority", () => {
@@ -81,7 +79,7 @@ describe("generateAuthUrl", () => {
         redirectUri: "https://app.example.com/callback",
         codeChallenge: "code-challenge",
         nonce: "nonce-value",
-      } as any),
+      }),
     ).toThrow("state is required");
   });
 
@@ -107,7 +105,7 @@ describe("generateAuthUrl", () => {
         redirectUri: "https://app.example.com/callback",
         state: "state-value-123456",
         codeChallenge: "code-challenge",
-        codeChallengeMethod: "plain" as any,
+        codeChallengeMethod: "plain",
         nonce: "nonce-value",
         audience: "https://api.example.com",
       }),
@@ -1303,7 +1301,7 @@ describe("generateAuthUrl", () => {
         audience: "https://api.example.com",
         claims: {
           "<script>": true,
-        } as any,
+        },
       }),
     ).toThrow("claims key is invalid");
   });
