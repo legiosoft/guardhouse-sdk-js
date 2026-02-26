@@ -425,8 +425,9 @@ export function GuardhouseProvider({
         }
 
         const scope = options?.scope || scopes.join(" ");
-        const authUrl = await generateAuthUrl({
+        const authUrl = generateAuthUrl({
           authority,
+          authorizationEndpoint: "/connect/authorize",
           clientId,
           redirectUri,
           responseType: "code",

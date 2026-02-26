@@ -598,14 +598,14 @@ export function GuardhouseProvider({
         const resolvedCryptoAdapter = getCryptoAdapter();
 
         const { codeVerifier, codeChallenge } = await generatePKCE(
-          resolvedCryptoAdapter,
           {
             debug,
           },
+          resolvedCryptoAdapter,
         );
 
-        const state = await generateState(resolvedCryptoAdapter, 32, debug);
-        const nonce = await generateNonce(resolvedCryptoAdapter, 32, debug);
+        const state = await generateState(32, debug, resolvedCryptoAdapter);
+        const nonce = await generateNonce(32, debug, resolvedCryptoAdapter);
 
         // Store temporary PKCE values
         await Promise.all([
@@ -626,8 +626,9 @@ export function GuardhouseProvider({
         }
 
         const scope = options?.scope || scopes.join(" ");
-        const authUrl = await generateAuthUrl({
+        const authUrl = generateAuthUrl({
           authority,
+          authorizationEndpoint: "/connect/authorize",
           clientId,
           redirectUri,
           debug,
@@ -636,7 +637,7 @@ export function GuardhouseProvider({
           state,
           codeChallenge,
           codeChallengeMethod: "S256", // Enforce S256 (no plain text)
-        } as any);
+        });
 
         const result = await openAuthSession(authUrl);
         await handleAuthCallback(result.url);

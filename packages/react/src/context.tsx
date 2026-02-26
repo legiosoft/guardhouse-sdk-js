@@ -722,9 +722,12 @@ export function GuardhouseProvider({
           await storage.removeItem(StorageKeys.APP_STATE);
         }
 
+        const authorizationEndpoint =
+          config.authorizationEndpoint?.trim() || "/connect/authorize";
+
         const authUrl = generateAuthUrl({
           authority: config.authority,
-          authorizationEndpoint: config.authorizationEndpoint,
+          authorizationEndpoint,
           clientId: config.clientId,
           redirectUri: config.redirectUri,
           requestUri: config.requestUri,

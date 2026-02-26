@@ -399,7 +399,8 @@ export class GuardhouseResourceService {
     if (
       introspectionResult.alg &&
       this.options.validAlgorithms &&
-      !this.options.validAlgorithms.includes(introspectionResult.alg)
+      (typeof introspectionResult.alg !== "string" ||
+        !this.options.validAlgorithms.includes(introspectionResult.alg))
     ) {
       throw new Error(`Invalid algorithm: ${introspectionResult.alg}`);
     }

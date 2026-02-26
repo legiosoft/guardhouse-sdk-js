@@ -28,14 +28,73 @@ const mockJwksClient = jest.fn((options) => ({
 /**
  * Mock fetch for HTTP requests
  */
-global.fetch = jest.fn(() =>
-  Promise.resolve({
+function createMockHeaders() {
+  if (typeof Headers === "function") {
+    return new Headers({
+      "Content-Type": "application/json",
+    });
+  }
+
+  return {
+    get: () => null,
+    set: () => undefined,
+    has: () => false,
+    delete: () => undefined,
+  };
+}
+
+function normalizeFetchResponse(response = {}) {
+  const normalized = {
     ok: true,
     status: 200,
     json: () => Promise.resolve({}),
     text: () => Promise.resolve(""),
-  }),
-);
+    headers: createMockHeaders(),
+    ...response,
+  };
+
+  if (!normalized.headers || typeof normalized.headers.get !== "function") {
+    normalized.headers = createMockHeaders();
+  }
+
+  if (typeof normalized.json !== "function") {
+    normalized.json = () => Promise.resolve({});
+  }
+
+  const providedText =
+    typeof normalized.text === "function" ? normalized.text : undefined;
+  normalized.text = async () => {
+    const textValue = providedText ? await providedText() : "";
+    if (typeof textValue === "string" && textValue.length > 0) {
+      return textValue;
+    }
+
+    if (typeof normalized.json === "function") {
+      try {
+        const body = await normalized.json();
+        return typeof body === "string" ? body : JSON.stringify(body);
+      } catch {
+        return "";
+      }
+    }
+
+    return "";
+  };
+
+  return normalized;
+}
+
+const fetchMock = jest.fn(() => Promise.resolve(normalizeFetchResponse()));
+const originalMockResolvedValue = fetchMock.mockResolvedValue.bind(fetchMock);
+const originalMockResolvedValueOnce =
+  fetchMock.mockResolvedValueOnce.bind(fetchMock);
+
+fetchMock.mockResolvedValue = (value) =>
+  originalMockResolvedValue(normalizeFetchResponse(value));
+fetchMock.mockResolvedValueOnce = (value) =>
+  originalMockResolvedValueOnce(normalizeFetchResponse(value));
+
+global.fetch = fetchMock;
 
 /**
  * Setup mocks before tests run
