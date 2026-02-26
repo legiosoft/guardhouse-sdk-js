@@ -60,16 +60,38 @@ interface NodeCryptoLike {
 
 type NodeRequireFunction = (moduleId: string) => unknown;
 
+function hasUsableWebCrypto(): boolean {
+  const webCrypto = globalThis.crypto;
+
+  return Boolean(
+    webCrypto &&
+    typeof webCrypto.getRandomValues === "function" &&
+    webCrypto.subtle &&
+    typeof webCrypto.subtle.digest === "function",
+  );
+}
+
+function getRuntimeRequire(): NodeRequireFunction | null {
+  const runtimeWithRequire = globalThis as typeof globalThis & {
+    require?: unknown;
+  };
+
+  return typeof runtimeWithRequire.require === "function"
+    ? (runtimeWithRequire.require as NodeRequireFunction)
+    : null;
+}
+
 function tryLoadNodeCrypto(): NodeCryptoLike | null {
+  if (hasUsableWebCrypto()) {
+    return null;
+  }
+
+  const dynamicRequire = getRuntimeRequire();
+  if (typeof dynamicRequire !== "function") {
+    return null;
+  }
+
   try {
-    const dynamicRequire = Function(
-      "return typeof require !== 'undefined' ? require : null;",
-    )() as NodeRequireFunction | null;
-
-    if (typeof dynamicRequire !== "function") {
-      return null;
-    }
-
     const loadedCrypto = dynamicRequire(
       "crypto",
     ) as Partial<NodeCryptoLike> | null;

@@ -1,7 +1,7 @@
 import { createGuardhouseLogger } from "../debug";
-import { timingSafeEqual } from "../security";
+import { timingSafeEqual, toUtf8Bytes } from "../security";
 
-import { base64UrlEncodeBytes } from "./base64";
+import { base64UrlDecodeToBytes } from "./base64";
 import { tryLoadNodeCrypto } from "./node-crypto";
 import type {
   DecodedJWT,
@@ -10,19 +10,22 @@ import type {
 } from "./types";
 
 function resolveHashBitLength(algorithm: string): 256 | 384 | 512 | null {
-  if (algorithm === "EdDSA") {
+  const normalizedAlgorithm = algorithm.trim().toUpperCase();
+
+  // RFC 8037: EdDSA maps to SHA-512 for Ed25519/EdDSA hash claim derivation.
+  if (normalizedAlgorithm === "EDDSA") {
     return 512;
   }
 
-  if (algorithm.endsWith("256")) {
+  if (normalizedAlgorithm.endsWith("256")) {
     return 256;
   }
 
-  if (algorithm.endsWith("384")) {
+  if (normalizedAlgorithm.endsWith("384")) {
     return 384;
   }
 
-  if (algorithm.endsWith("512")) {
+  if (normalizedAlgorithm.endsWith("512")) {
     return 512;
   }
 
@@ -34,34 +37,42 @@ async function digestBytes(
   hashBitLength: 256 | 384 | 512,
 ): Promise<Uint8Array> {
   const subtle = globalThis.crypto?.subtle;
-  const data =
-    typeof TextEncoder === "function"
-      ? new TextEncoder().encode(input)
-      : typeof Buffer !== "undefined"
-        ? new Uint8Array(Buffer.from(input, "utf8"))
-        : (() => {
-            throw new Error("UTF-8 encoder is unavailable in this environment");
-          })();
+  const data = toUtf8Bytes(input);
 
   if (subtle) {
-    const digest = await subtle.digest(`SHA-${hashBitLength}`, data);
+    const bufferToHash =
+      data.byteOffset === 0 && data.byteLength === data.buffer.byteLength
+        ? data.buffer
+        : data.slice().buffer;
+    const digestInput = bufferToHash as unknown as Parameters<
+      typeof subtle.digest
+    >[1];
+
+    const digest = await subtle.digest(`SHA-${hashBitLength}`, digestInput);
     return new Uint8Array(digest);
   }
 
   const nodeCrypto = tryLoadNodeCrypto();
   if (nodeCrypto) {
     const hash = nodeCrypto.createHash(`sha${hashBitLength}`);
-    hash.update(Buffer.from(data));
+    hash.update(data);
     return new Uint8Array(hash.digest());
   }
 
   throw new Error("Cryptographic hash function is unavailable");
 }
 
+/**
+ * Computes OIDC at_hash/c_hash bytes from the raw token/code input.
+ *
+ * OIDC defines these values over the ASCII representation of the access token
+ * or authorization code; toUtf8Bytes is safe here because these values should
+ * be URL-safe ASCII by specification.
+ */
 async function computeOidcHashClaim(
   value: string,
   algorithm: string,
-): Promise<string> {
+): Promise<Uint8Array> {
   const hashBitLength = resolveHashBitLength(algorithm);
 
   if (!hashBitLength) {
@@ -71,9 +82,7 @@ async function computeOidcHashClaim(
   }
 
   const digest = await digestBytes(value, hashBitLength);
-  const leftHalf = digest.slice(0, digest.length / 2);
-
-  return base64UrlEncodeBytes(leftHalf);
+  return digest.slice(0, Math.floor(digest.length / 2));
 }
 
 export async function validateOidcHashClaims(
@@ -111,7 +120,29 @@ export async function validateOidcHashClaims(
     } else {
       const expectedAtHash = await computeOidcHashClaim(accessToken, algorithm);
 
-      if (!timingSafeEqual(expectedAtHash, decodedJWT.payload.at_hash)) {
+      let tokenAtHashBytes: Uint8Array;
+      try {
+        tokenAtHashBytes = base64UrlDecodeToBytes(decodedJWT.payload.at_hash);
+      } catch {
+        result.valid = false;
+        result.atHashValid = false;
+        result.errors.push("id_token at_hash claim must be valid Base64URL");
+        tokenAtHashBytes = new Uint8Array(0);
+      }
+
+      if (
+        result.atHashValid &&
+        tokenAtHashBytes.length !== expectedAtHash.length
+      ) {
+        result.valid = false;
+        result.atHashValid = false;
+        result.errors.push("at_hash length mismatch");
+      }
+
+      if (
+        result.atHashValid &&
+        !timingSafeEqual(expectedAtHash, tokenAtHashBytes)
+      ) {
         result.valid = false;
         result.atHashValid = false;
         result.errors.push("at_hash validation failed");
@@ -138,7 +169,29 @@ export async function validateOidcHashClaims(
         algorithm,
       );
 
-      if (!timingSafeEqual(expectedCHash, decodedJWT.payload.c_hash)) {
+      let tokenCHashBytes: Uint8Array;
+      try {
+        tokenCHashBytes = base64UrlDecodeToBytes(decodedJWT.payload.c_hash);
+      } catch {
+        result.valid = false;
+        result.cHashValid = false;
+        result.errors.push("id_token c_hash claim must be valid Base64URL");
+        tokenCHashBytes = new Uint8Array(0);
+      }
+
+      if (
+        result.cHashValid &&
+        tokenCHashBytes.length !== expectedCHash.length
+      ) {
+        result.valid = false;
+        result.cHashValid = false;
+        result.errors.push("c_hash length mismatch");
+      }
+
+      if (
+        result.cHashValid &&
+        !timingSafeEqual(expectedCHash, tokenCHashBytes)
+      ) {
         result.valid = false;
         result.cHashValid = false;
         result.errors.push("c_hash validation failed");

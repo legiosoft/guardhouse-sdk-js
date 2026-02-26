@@ -110,6 +110,9 @@ export interface TokenValidationOptions {
   requirePhishingResistantMfa?: boolean;
   requiredCnfJkt?: string;
   enforceUniqueJti?: boolean;
+  jtiReplayCache?: {
+    consume(jti: string): boolean;
+  };
   trustedNestedClaimPaths?: string[];
   allowUntrustedNestedClaims?: boolean;
   /** Clock skew tolerance in seconds. */

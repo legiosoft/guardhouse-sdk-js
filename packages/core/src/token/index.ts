@@ -2,7 +2,7 @@ export { decodeJWT } from "./decode";
 export { isTokenExpired, getTokenExpiresIn, validateToken } from "./validation";
 export { validateOidcHashClaims } from "./oidc-hash";
 export { validateJwkMetadataForToken } from "./jwk";
-export { resetJtiReplayCache } from "./replay-cache";
+export { JtiReplayCache } from "./replay-cache";
 
 export type {
   DecodedJWT,
@@ -17,3 +17,4 @@ export type {
   TokenValidationOptions,
   TokenValidationResult,
 } from "./types";
+export type { JtiReplayCacheOptions } from "./replay-cache";

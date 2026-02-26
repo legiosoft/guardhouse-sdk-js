@@ -1,4 +1,5 @@
 import { createGuardhouseLogger } from "../debug";
+import { isUnsafeObjectKey } from "../security";
 
 import { base64UrlDecode } from "./base64";
 import {
@@ -9,10 +10,48 @@ import {
 } from "./constants";
 import type { DecodedJWT } from "./types";
 
+function createSafeJsonReviver(
+  target: "header" | "payload",
+): (key: string, value: unknown) => unknown {
+  const malformedMessage = `Malformed JWT ${target}`;
+
+  return (key, value) => {
+    if (key && isUnsafeObjectKey(key)) {
+      throw new Error(malformedMessage);
+    }
+
+    if (
+      key === "" &&
+      (!value || typeof value !== "object" || Array.isArray(value))
+    ) {
+      throw new Error(malformedMessage);
+    }
+
+    return value;
+  };
+}
+
+function isPlainJsonObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function rethrowAsTraversalError(error: unknown): never {
+  if (
+    error instanceof Error &&
+    (error.message.includes("maximum nesting depth") ||
+      error.message.includes("circular references"))
+  ) {
+    throw error;
+  }
+
+  throw new Error("JWT JSON structure is not safely traversable");
+}
+
 function assertJsonDepthWithinLimit(
   value: unknown,
   maxDepth: number,
   currentDepth = 0,
+  seen = new WeakSet<object>(),
 ): void {
   if (currentDepth > maxDepth) {
     throw new Error("JWT JSON structure exceeds maximum nesting depth");
@@ -22,15 +61,35 @@ function assertJsonDepthWithinLimit(
     return;
   }
 
+  if (seen.has(value)) {
+    throw new Error("JWT JSON structure contains circular references");
+  }
+
+  seen.add(value);
+
   if (Array.isArray(value)) {
-    for (const item of value) {
-      assertJsonDepthWithinLimit(item, maxDepth, currentDepth + 1);
+    try {
+      for (const item of value) {
+        assertJsonDepthWithinLimit(item, maxDepth, currentDepth + 1, seen);
+      }
+    } catch (error) {
+      rethrowAsTraversalError(error);
+    } finally {
+      seen.delete(value);
     }
+
     return;
   }
 
-  for (const item of Object.values(value)) {
-    assertJsonDepthWithinLimit(item, maxDepth, currentDepth + 1);
+  try {
+    const entries = Object.values(value);
+    for (const item of entries) {
+      assertJsonDepthWithinLimit(item, maxDepth, currentDepth + 1, seen);
+    }
+  } catch (error) {
+    rethrowAsTraversalError(error);
+  } finally {
+    seen.delete(value);
   }
 }
 
@@ -108,19 +167,42 @@ export function decodeJWT(
   }
 
   try {
-    const header = JSON.parse(base64UrlDecode(headerPart));
-    const payload = JSON.parse(base64UrlDecode(payloadPart));
+    const header = JSON.parse(
+      base64UrlDecode(headerPart),
+      createSafeJsonReviver("header"),
+    );
+    const payload = JSON.parse(
+      base64UrlDecode(payloadPart),
+      createSafeJsonReviver("payload"),
+    );
+
+    if (!isPlainJsonObject(header)) {
+      throw new Error("Malformed JWT header");
+    }
+
+    if (!isPlainJsonObject(payload)) {
+      throw new Error("Malformed JWT payload");
+    }
+
+    const algorithm =
+      typeof header.alg === "string" ? header.alg.trim() : undefined;
+    if (!algorithm || algorithm.toLowerCase() === "none") {
+      throw new Error(
+        'JWT algorithm "none" is not supported for security reasons',
+      );
+    }
+
     assertJsonDepthWithinLimit(header, MAX_JWT_DEPTH);
     assertJsonDepthWithinLimit(payload, MAX_JWT_DEPTH);
 
     logger.debug("JWT decoded", {
-      algorithm: header?.alg,
-      hasSubject: Boolean(payload?.sub),
+      algorithm,
+      hasSubject: typeof payload.sub === "string" && payload.sub.trim() !== "",
     });
 
     return {
-      header,
-      payload,
+      header: header as DecodedJWT["header"],
+      payload: payload as DecodedJWT["payload"],
     };
   } catch (error) {
     logger.error("Token decode failed", {

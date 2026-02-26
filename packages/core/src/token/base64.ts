@@ -46,23 +46,13 @@ function decodeUtf8(bytes: Uint8Array): string {
   throw new Error("UTF-8 decoder runtime not supported in this environment");
 }
 
-export function base64UrlDecode(encoded: string): string {
+function normalizeBase64UrlInput(encoded: string): string {
   if (encoded === "") {
     return "";
   }
 
   if (!BASE64_URL_SEGMENT_PATTERN.test(encoded)) {
     throw new Error("Invalid Base64URL input: unsupported characters");
-  }
-
-  if (typeof Buffer !== "undefined") {
-    try {
-      return Buffer.from(encoded, "base64url").toString("utf8");
-    } catch (error) {
-      throw new Error(
-        `Failed to decode Base64URL: ${error instanceof Error ? error.message : "Unknown error"}`,
-      );
-    }
   }
 
   const base64 = encoded.replace(/-/g, "+").replace(/_/g, "/");
@@ -72,15 +62,40 @@ export function base64UrlDecode(encoded: string): string {
     throw new Error("Invalid Base64URL input length");
   }
 
-  const paddedBase64 =
-    remainder === 0 ? base64 : `${base64}${"=".repeat(4 - remainder)}`;
+  return remainder === 0 ? base64 : `${base64}${"=".repeat(4 - remainder)}`;
+}
+
+export function base64UrlDecodeToBytes(encoded: string): Uint8Array {
+  if (encoded === "") {
+    return new Uint8Array(0);
+  }
+
+  if (!BASE64_URL_SEGMENT_PATTERN.test(encoded)) {
+    throw new Error("Invalid Base64URL input: unsupported characters");
+  }
+
+  if (typeof Buffer !== "undefined") {
+    try {
+      return new Uint8Array(Buffer.from(encoded, "base64url"));
+    } catch (error) {
+      throw new Error(
+        `Failed to decode Base64URL: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
+    }
+  }
+
+  const paddedBase64 = normalizeBase64UrlInput(encoded);
 
   try {
-    const bytes = decodeBase64ToBytes(paddedBase64);
-    return decodeUtf8(bytes);
+    return decodeBase64ToBytes(paddedBase64);
   } catch (error) {
     throw new Error(
       `Failed to decode Base64URL: ${error instanceof Error ? error.message : "Unknown error"}`,
     );
   }
+}
+
+export function base64UrlDecode(encoded: string): string {
+  const bytes = base64UrlDecodeToBytes(encoded);
+  return decodeUtf8(bytes);
 }

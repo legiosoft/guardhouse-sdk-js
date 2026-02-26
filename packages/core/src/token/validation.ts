@@ -5,7 +5,6 @@ import {
   ALLOWED_OIDC_ALGORITHMS,
   PHISHING_RESISTANT_AMR_VALUES,
 } from "./constants";
-import { consumeJti } from "./replay-cache";
 import {
   isAlgorithmCompatibleWithKeyType,
   validateJwkMetadataForToken,
@@ -125,6 +124,7 @@ export function validateToken(
     requirePhishingResistantMfa = false,
     requiredCnfJkt,
     enforceUniqueJti = false,
+    jtiReplayCache,
     trustedNestedClaimPaths = [],
     allowUntrustedNestedClaims = false,
     clockSkewTolerance = DEFAULT_CLOCK_SKEW_TOLERANCE_SECONDS,
@@ -342,6 +342,12 @@ export function validateToken(
   }
 
   if (enforceUniqueJti) {
+    if (!jtiReplayCache) {
+      throw new Error(
+        "jtiReplayCache is required when enforceUniqueJti is enabled",
+      );
+    }
+
     const tokenJti =
       typeof decodedJWT.payload.jti === "string"
         ? decodedJWT.payload.jti.trim()
@@ -351,7 +357,7 @@ export function validateToken(
       result.jtiValid = false;
       result.valid = false;
       result.errors.push("Token is missing required jti claim");
-    } else if (!consumeJti(tokenJti)) {
+    } else if (!jtiReplayCache.consume(tokenJti)) {
       result.jtiValid = false;
       result.valid = false;
       result.errors.push("Token jti has already been used");

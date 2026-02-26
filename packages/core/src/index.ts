@@ -116,7 +116,7 @@ export type { GuardhouseLogger } from "./debug";
 // Token exports
 export {
   decodeJWT,
-  resetJtiReplayCache,
+  JtiReplayCache,
   validateJwkMetadataForToken,
   validateOidcHashClaims,
   validateToken,
@@ -133,6 +133,7 @@ export type {
   ExpectedJwkKeyType,
   OidcHashValidationOptions,
   OidcHashValidationResult,
+  JtiReplayCacheOptions,
   TokenValidationResult,
   TokenValidationOptions,
 } from "./token";

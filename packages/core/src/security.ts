@@ -16,6 +16,8 @@ const PUNYCODE_LABEL_PREFIX = "xn--";
 
 const MAX_SAFE_COMPARE_BYTES = 4096;
 
+type TimingSafeComparable = string | Uint8Array;
+
 export function toUtf8Bytes(value: string): Uint8Array {
   if (typeof TextEncoder === "function") {
     return new TextEncoder().encode(value);
@@ -142,9 +144,16 @@ export function sanitizeUrlForLogs(value: string): string {
   }
 }
 
-export function timingSafeEqual(left: string, right: string): boolean {
-  const leftBytes = toUtf8Bytes(left);
-  const rightBytes = toUtf8Bytes(right);
+function toTimingSafeBytes(value: TimingSafeComparable): Uint8Array {
+  return typeof value === "string" ? toUtf8Bytes(value) : value;
+}
+
+export function timingSafeEqual(
+  left: TimingSafeComparable,
+  right: TimingSafeComparable,
+): boolean {
+  const leftBytes = toTimingSafeBytes(left);
+  const rightBytes = toTimingSafeBytes(right);
 
   if (leftBytes.length !== rightBytes.length) {
     return false;

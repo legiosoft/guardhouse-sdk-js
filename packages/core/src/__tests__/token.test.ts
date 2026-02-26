@@ -2,7 +2,7 @@ import {
   decodeJWT,
   getTokenExpiresIn,
   isTokenExpired,
-  resetJtiReplayCache,
+  JtiReplayCache,
   validateJwkMetadataForToken,
   validateOidcHashClaims,
   validateToken,
@@ -11,6 +11,14 @@ import { base64UrlDecode } from "../token/base64";
 
 function base64UrlEncodeJson(value: unknown): string {
   return Buffer.from(JSON.stringify(value), "utf8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=/g, "");
+}
+
+function base64UrlEncodeRaw(value: string): string {
+  return Buffer.from(value, "utf8")
     .toString("base64")
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
@@ -61,8 +69,10 @@ function createOidcHash(value: string, algorithm: string): string {
 }
 
 describe("token utilities", () => {
+  let jtiReplayCache: JtiReplayCache;
+
   beforeEach(() => {
-    resetJtiReplayCache();
+    jtiReplayCache = new JtiReplayCache();
   });
 
   it("decodes UTF-8 payload values", () => {
@@ -366,6 +376,50 @@ describe("token utilities", () => {
     ).toThrow("invalid Base64URL");
   });
 
+  it("rejects tokens with missing or unsafe JWT alg", () => {
+    const tokenWithNone = createJWTWithHeader(
+      {
+        sub: "user-1",
+      },
+      {
+        alg: "none",
+        typ: "JWT",
+      },
+    );
+
+    expect(() => decodeJWT(tokenWithNone)).toThrow(
+      'JWT algorithm "none" is not supported for security reasons',
+    );
+
+    const tokenWithoutAlg = `${base64UrlEncodeJson({ typ: "JWT" })}.${base64UrlEncodeJson({ sub: "user-1" })}.${base64UrlEncodeRaw("sig")}`;
+
+    expect(() => decodeJWT(tokenWithoutAlg)).toThrow(
+      'JWT algorithm "none" is not supported for security reasons',
+    );
+  });
+
+  it("rejects malformed JWT structures with unsafe object keys", () => {
+    const tokenWithUnsafePayload = `${base64UrlEncodeJson({ alg: "RS256", typ: "JWT" })}.${base64UrlEncodeRaw('{"sub":"user-1","__proto__":{"polluted":true}}')}.${base64UrlEncodeRaw("sig")}`;
+
+    expect(() => decodeJWT(tokenWithUnsafePayload)).toThrow(
+      "Malformed JWT payload",
+    );
+  });
+
+  it("requires parsed JWT header and payload to be JSON objects", () => {
+    const tokenWithStringHeader = `${base64UrlEncodeRaw('"header"')}.${base64UrlEncodeJson({ sub: "user-1" })}.${base64UrlEncodeRaw("sig")}`;
+
+    expect(() => decodeJWT(tokenWithStringHeader)).toThrow(
+      "Malformed JWT header",
+    );
+
+    const tokenWithStringPayload = `${base64UrlEncodeJson({ alg: "RS256", typ: "JWT" })}.${base64UrlEncodeRaw('"payload"')}.${base64UrlEncodeRaw("sig")}`;
+
+    expect(() => decodeJWT(tokenWithStringPayload)).toThrow(
+      "Malformed JWT payload",
+    );
+  });
+
   it("rejects JWT payloads that exceed nesting depth limits", () => {
     const token = createJWT({
       sub: "user-1",
@@ -447,6 +501,7 @@ describe("token utilities", () => {
       audience: "client-id",
       signatureVerified: true,
       enforceUniqueJti: true,
+      jtiReplayCache,
     });
     expect(first.valid).toBe(true);
 
@@ -455,6 +510,7 @@ describe("token utilities", () => {
       audience: "client-id",
       signatureVerified: true,
       enforceUniqueJti: true,
+      jtiReplayCache,
     });
     expect(second.valid).toBe(false);
     expect(second.jtiValid).toBe(false);
@@ -558,6 +614,36 @@ describe("token utilities", () => {
     });
   });
 
+  it("treats idTokenAlg case-insensitively for hash validation", async () => {
+    const algorithm = "RS256";
+    const accessToken = "access-token-123";
+    const token = createJWTWithHeader(
+      {
+        sub: "user-1",
+        at_hash: createOidcHash(accessToken, algorithm),
+        iss: "https://auth.example.com",
+        aud: "client-id",
+        exp: Math.floor(Date.now() / 1000) + 300,
+      },
+      {
+        alg: algorithm,
+        typ: "JWT",
+      },
+    );
+
+    const decoded = decodeJWT(token);
+    await expect(
+      validateOidcHashClaims(decoded, {
+        idTokenAlg: "rs256",
+        accessToken,
+        requireAtHash: true,
+      }),
+    ).resolves.toMatchObject({
+      valid: true,
+      atHashValid: true,
+    });
+  });
+
   it("rejects invalid at_hash values", async () => {
     const token = createJWT({
       sub: "user-1",
@@ -578,6 +664,36 @@ describe("token utilities", () => {
       valid: false,
       atHashValid: false,
     });
+  });
+
+  it("rejects at_hash values with mismatched byte lengths", async () => {
+    const accessToken = "access-token-123";
+    const token = createJWTWithHeader(
+      {
+        sub: "user-1",
+        at_hash: createOidcHash(accessToken, "RS512"),
+        iss: "https://auth.example.com",
+        aud: "client-id",
+        exp: Math.floor(Date.now() / 1000) + 300,
+      },
+      {
+        alg: "RS256",
+        typ: "JWT",
+      },
+    );
+
+    const decoded = decodeJWT(token);
+    const result = await validateOidcHashClaims(decoded, {
+      idTokenAlg: decoded.header.alg,
+      accessToken,
+      requireAtHash: true,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.atHashValid).toBe(false);
+    expect(
+      result.errors.some((error) => error.includes("length mismatch")),
+    ).toBe(true);
   });
 
   it("supports EdDSA through allowedAlgorithms", () => {
