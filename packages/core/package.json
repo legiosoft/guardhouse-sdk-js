@@ -1,6 +1,6 @@
 {
   "name": "@guardhouse/core",
-  "version": "0.1.0-beta.0",
+  "version": "0.1.0-beta.1",
   "description": "Universal JavaScript/TypeScript SDK for OAuth 2.0 with PKCE",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",

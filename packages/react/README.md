@@ -1,16 +1,6 @@
 # @guardhouse/react
 
-Frontend SDK for React 18+ web applications with hooks and protected routes.
-
-## Features
-
-- **Auth Context**: GuardhouseProvider component for managing authentication state
-- **React Hooks**: useAuth hook for accessing user profile and auth methods
-- **Session-Only Storage**: OIDC session + token data is persisted in `sessionStorage`
-- **Debug Mode**: Set `config.debug = true` to trace SDK activity
-- **Protected Routes**: ProtectedRoute component to secure routes
-- **Core Security Policies**: React provider uses `@guardhouse/core` client flows (strict endpoint/origin checks, callback validation, silent-auth safeguards, DPoP/security config support)
-- **React 18 Compatible**: Supports Concurrent Mode and SSR frameworks via client component boundaries
+React SDK for adding Guardhouse/OIDC authentication to React 18+ browser apps.
 
 ## Installation
 
@@ -18,58 +8,141 @@ Frontend SDK for React 18+ web applications with hooks and protected routes.
 npm install @guardhouse/react
 ```
 
-## Usage
+## What You Get
 
-```typescript
-import { GuardhouseProvider, useAuth, ProtectedRoute } from '@guardhouse/react';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+- `GuardhouseProvider` for auth state and callback handling
+- `useAuth()` hook for login, logout, user state, and token access
+- `ProtectedRoute` and `withAuthenticationRequired` route guards
+- Session persistence in `sessionStorage` (not `localStorage`)
 
-function App() {
+## Quick Start
+
+### 1) Wrap your app with `GuardhouseProvider`
+
+```tsx
+import { GuardhouseProvider } from "@guardhouse/react";
+import { BrowserRouter } from "react-router-dom";
+
+export function Root() {
   return (
     <GuardhouseProvider
       config={{
-        authority: 'https://auth.guardhouse.io',
-        clientId: 'your-client-id',
-        audience: 'https://api.guardhouse.io',
-        // Set to true for providers that reject audience
-        // allowAuthorizationWithoutAudience: true,
-        redirectUri: window.location.origin + '/callback',
-        logoutRedirectUri: window.location.origin + '/callback',
-        allowOfflineAccessScope: true,
-        debug: true,
+        authority: "https://auth.example.com",
+        clientId: "your-client-id",
+        audience: "https://api.example.com",
+        redirectUri: `${window.location.origin}/callback`,
+        logoutRedirectUri: `${window.location.origin}/callback`,
       }}
     >
-      <BrowserRouter>
-        <Routes>
-          <Route path="/protected" element={
-            <ProtectedRoute>
-              <ProtectedPage />
-            </ProtectedRoute>
-          } />
-        </Routes>
-      </BrowserRouter>
+      <BrowserRouter>{/* your routes */}</BrowserRouter>
     </GuardhouseProvider>
   );
 }
+```
 
-function ProtectedPage() {
-  const { user, loginWithRedirect, logout } = useAuth();
+### 2) Use `useAuth()` in your UI
+
+```tsx
+import { useAuth } from "@guardhouse/react";
+
+export function AccountPanel() {
+  const { isLoading, isAuthenticated, user, loginWithRedirect, logout } =
+    useAuth();
+
+  if (isLoading) {
+    return <div>Loading...</div>;
+  }
+
+  if (!isAuthenticated) {
+    return <button onClick={() => void loginWithRedirect()}>Sign in</button>;
+  }
 
   return (
     <div>
-      <h1>Hello, {user?.name}</h1>
-      <button onClick={logout}>Logout</button>
+      <div>Signed in as {user?.name ?? user?.sub}</div>
+      <button onClick={() => void logout()}>Sign out</button>
     </div>
   );
 }
 ```
 
-## SSR / Next.js / Remix Notes
+## Route Guards
 
-- `GuardhouseProvider` starts with `isLoading: true` and restores session state from `sessionStorage` in a client-side `useEffect`.
-- This is intentional: the first render is a loading state, then auth state resolves on the client.
-- In SSR frameworks, put `GuardhouseProvider` and `useAuth()` consumers in a client component boundary.
-- Gate auth-dependent UI on `isLoading` before branching on `isAuthenticated`.
+### `ProtectedRoute`
+
+```tsx
+import { ProtectedRoute } from "@guardhouse/react";
+
+<Route
+  path="/settings"
+  element={
+    <ProtectedRoute onRedirecting={() => <div>Redirecting...</div>}>
+      <SettingsPage />
+    </ProtectedRoute>
+  }
+/>;
+```
+
+### `withAuthenticationRequired`
+
+```tsx
+import { withAuthenticationRequired } from "@guardhouse/react";
+
+type BillingProps = {
+  orgId: string;
+};
+
+function BillingPage({ orgId }: BillingProps) {
+  return <div>Billing for {orgId}</div>;
+}
+
+export const ProtectedBillingPage = withAuthenticationRequired<BillingProps>(
+  BillingPage,
+  {
+    returnTo: "/billing",
+    onRedirecting: () => <div>Redirecting...</div>,
+  },
+);
+```
+
+Both guards include React 18 Strict Mode safeguards to avoid duplicate login redirects.
+
+## `useAuth()` API
+
+`useAuth()` returns:
+
+- `isLoading`: `boolean`
+- `isAuthenticated`: `boolean`
+- `user`: OIDC user profile or `null`
+- `error`: auth error message or `null`
+- `loginWithRedirect(options?)`: starts login redirect
+- `logout(options?)`: starts logout redirect
+- `getAccessToken()`: returns a valid access token or `null`
+- `getAccessTokenSilently()`: silent token retrieval/refresh or `null`
+
+## Provider Configuration (Most Used)
+
+| Option                              | Required | Purpose                                         |
+| ----------------------------------- | -------- | ----------------------------------------------- |
+| `authority`                         | Yes      | OIDC issuer base URL                            |
+| `clientId`                          | Yes      | OAuth/OIDC client ID                            |
+| `redirectUri`                       | Yes      | Callback URI registered at your IdP             |
+| `audience`                          | Usually  | API audience for code flow                      |
+| `logoutRedirectUri`                 | No       | Post-logout redirect URI                        |
+| `scope`                             | No       | Defaults to `openid profile email`              |
+| `onRedirectCallback`                | No       | Receives optional `appState` after callback     |
+| `allowAuthorizationWithoutAudience` | No       | Set `true` only for IdPs that reject `audience` |
+| `allowOfflineAccessScope`           | No       | Required if requesting `offline_access`         |
+| `debug`                             | No       | Enables SDK debug logs                          |
+
+For advanced options (timeouts, endpoint overrides, DPoP, hardening flags), use the fields available in `GuardhouseConfig`.
+
+## SSR / Next.js / Remix
+
+- `GuardhouseProvider` and `useAuth()` are client-side APIs (they use browser storage/location).
+- Place auth components behind a client boundary (`"use client"` in Next.js).
+- First render starts with `isLoading: true`, then auth state is restored on the client.
+- Always branch on `isLoading` before rendering auth-required UI.
 
 ```tsx
 "use client";
@@ -77,36 +150,31 @@ function ProtectedPage() {
 import { useAuth } from "@guardhouse/react";
 
 export function AuthGate() {
-  const { isLoading, isAuthenticated, user } = useAuth();
+  const { isLoading, isAuthenticated } = useAuth();
 
   if (isLoading) {
     return <div>Loading...</div>;
   }
 
-  if (!isAuthenticated) {
-    return <div>Please sign in.</div>;
-  }
-
-  return <div>Welcome, {user?.name ?? user?.sub}</div>;
+  return isAuthenticated ? <Dashboard /> : <LoginScreen />;
 }
 ```
 
-## Security Notes
+## Security and Runtime Notes
 
-- The React SDK does not use `localStorage` for tokens or OIDC session persistence.
-- OIDC session data (access token, refresh token, ID token, expiry, user claims, issuer/audience context) is stored in `sessionStorage` only under `gh_oidc_session`.
-- Callback handling and token operations are delegated to `@guardhouse/core` so the same hardened security checks are consistently applied.
-- For IdPs that reject `audience` on `/authorize`, set `allowAuthorizationWithoutAudience: true` and omit `audience`.
-- Token exchange/refresh requests omit `scope` by default for OpenIddict compatibility.
-- Logout defaults `post_logout_redirect_uri` to `redirectUri` when `logoutRedirectUri` is not provided.
-- Logout URL is generated by core and defaults to `/connect/logout`.
+- Tokens/session are stored only in `sessionStorage` under `gh_oidc_session`.
+- The SDK does not use `localStorage` for auth session persistence.
+- Callback handling uses `@guardhouse/core` validation and secure JWT decoding.
+- Concurrent refresh requests are deduplicated to avoid refresh-token rotation races.
+- If your app reads `id_token`, validate signature/claims with a proper JWT/OIDC validation library before trusting claims.
 
-## OpenIddict Compatibility
+## Integration Checklist
 
-- Ensure `redirectUri` exactly matches an allowed redirect URI on the client.
-- Ensure `logoutRedirectUri` (or fallback `redirectUri`) exactly matches an allowed post-logout redirect URI.
-- If your server rejects `audience` on authorization requests, keep `audience` empty and use `allowAuthorizationWithoutAudience: true`.
+- Register exact `redirectUri` and `logoutRedirectUri` in your IdP client settings.
+- If using code flow and your IdP requires it, set a valid `audience`.
+- If requesting `offline_access`, set `allowOfflineAccessScope: true`.
+- Ensure protected pages handle `isLoading` and unauthenticated states explicitly.
 
 ## License
 
-See LICENSE file for details.
+See the repository `LICENSE` file.
