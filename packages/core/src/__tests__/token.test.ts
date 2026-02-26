@@ -222,6 +222,33 @@ describe("token utilities", () => {
     ).toBe(true);
   });
 
+  it("rejects symmetric JWT algorithms by default", () => {
+    const token = createJWTWithHeader(
+      {
+        sub: "user-1",
+        iss: "https://auth.example.com",
+        aud: "client-id",
+        exp: Math.floor(Date.now() / 1000) + 300,
+      },
+      {
+        alg: "HS256",
+        typ: "JWT",
+      },
+    );
+
+    const decoded = decodeJWT(token);
+    const result = validateToken(decoded, {
+      issuer: "https://auth.example.com",
+      audience: "client-id",
+      signatureVerified: true,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((error) => error.includes("not allowed"))).toBe(
+      true,
+    );
+  });
+
   it("rejects unsupported JWT critical headers", () => {
     const token = createJWTWithHeader(
       {
@@ -270,6 +297,37 @@ describe("token utilities", () => {
     expect(() => decodeJWT(`${header}.${payload}.`)).toThrow(
       "must contain a signature part",
     );
+  });
+
+  it("rejects padded Base64URL segments", () => {
+    const validToken = createJWT({
+      sub: "user-1",
+      iss: "https://auth.example.com",
+      aud: "client-id",
+      exp: Math.floor(Date.now() / 1000) + 300,
+    });
+    const [headerPart, payloadPart, signaturePart] = validToken.split(".");
+
+    expect(() =>
+      decodeJWT(`${headerPart}=.${payloadPart}.${signaturePart}`),
+    ).toThrow("invalid Base64URL");
+  });
+
+  it("rejects JWT payloads that exceed nesting depth limits", () => {
+    const token = createJWT({
+      sub: "user-1",
+      nested: {
+        level1: {
+          level2: {
+            level3: {
+              value: "too-deep",
+            },
+          },
+        },
+      },
+    });
+
+    expect(() => decodeJWT(token)).toThrow("maximum nesting depth");
   });
 
   it("rejects oversized JWT payloads", () => {
@@ -368,6 +426,27 @@ describe("token utilities", () => {
 
     expect(result.valid).toBe(false);
     expect(result.amrValid).toBe(false);
+  });
+
+  it("accepts enterprise phishing-resistant AMR values", () => {
+    const token = createJWT({
+      sub: "user-1",
+      amr: ["mfa"],
+      iss: "https://auth.example.com",
+      aud: "client-id",
+      exp: Math.floor(Date.now() / 1000) + 300,
+    });
+
+    const decoded = decodeJWT(token);
+    const result = validateToken(decoded, {
+      issuer: "https://auth.example.com",
+      audience: "client-id",
+      signatureVerified: true,
+      requirePhishingResistantMfa: true,
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.amrValid).toBe(true);
   });
 
   it("enforces cnf.jkt token binding when required", () => {
