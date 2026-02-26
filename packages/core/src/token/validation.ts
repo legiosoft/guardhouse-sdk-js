@@ -1,7 +1,10 @@
 import { createGuardhouseLogger } from "../debug";
 import { timingSafeEqual } from "../security";
 
-import { ALLOWED_ALGORITHMS, PHISHING_RESISTANT_AMR_VALUES } from "./constants";
+import {
+  ALLOWED_OIDC_ALGORITHMS,
+  PHISHING_RESISTANT_AMR_VALUES,
+} from "./constants";
 import { consumeJti } from "./replay-cache";
 import {
   isAlgorithmCompatibleWithKeyType,
@@ -109,7 +112,7 @@ export function validateToken(
   const allowedAlgorithmSet = new Set(
     (allowedAlgorithms && allowedAlgorithms.length > 0
       ? allowedAlgorithms
-      : ALLOWED_ALGORITHMS
+      : ALLOWED_OIDC_ALGORITHMS
     ).map((value) => value.trim()),
   );
 
