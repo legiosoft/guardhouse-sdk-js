@@ -1,3 +1,5 @@
+import { BASE64_URL_SEGMENT_PATTERN } from "./constants";
+
 export function base64UrlEncodeBytes(bytes: Uint8Array): string {
   if (typeof Buffer !== "undefined") {
     return Buffer.from(bytes)
@@ -26,16 +28,10 @@ function decodeBase64ToBytes(base64: string): Uint8Array {
 
   if (typeof atob === "function") {
     const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-
-    for (let index = 0; index < binary.length; index += 1) {
-      bytes[index] = binary.charCodeAt(index);
-    }
-
-    return bytes;
+    return Uint8Array.from(binary, (char) => char.charCodeAt(0));
   }
 
-  throw new Error("Base64 decoder is unavailable in this environment");
+  throw new Error("Base64 decoder runtime not supported in this environment");
 }
 
 function decodeUtf8(bytes: Uint8Array): string {
@@ -47,22 +43,40 @@ function decodeUtf8(bytes: Uint8Array): string {
     return Buffer.from(bytes).toString("utf8");
   }
 
-  let fallback = "";
-  for (const byte of bytes) {
-    fallback += String.fromCharCode(byte);
-  }
-  return fallback;
+  throw new Error("UTF-8 decoder runtime not supported in this environment");
 }
 
 export function base64UrlDecode(encoded: string): string {
-  let base64 = encoded.replace(/-/g, "+").replace(/_/g, "/");
-
-  while (base64.length % 4) {
-    base64 += "=";
+  if (encoded === "") {
+    return "";
   }
 
+  if (!BASE64_URL_SEGMENT_PATTERN.test(encoded)) {
+    throw new Error("Invalid Base64URL input: unsupported characters");
+  }
+
+  if (typeof Buffer !== "undefined") {
+    try {
+      return Buffer.from(encoded, "base64url").toString("utf8");
+    } catch (error) {
+      throw new Error(
+        `Failed to decode Base64URL: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
+    }
+  }
+
+  const base64 = encoded.replace(/-/g, "+").replace(/_/g, "/");
+  const remainder = base64.length % 4;
+
+  if (remainder === 1) {
+    throw new Error("Invalid Base64URL input length");
+  }
+
+  const paddedBase64 =
+    remainder === 0 ? base64 : `${base64}${"=".repeat(4 - remainder)}`;
+
   try {
-    const bytes = decodeBase64ToBytes(base64);
+    const bytes = decodeBase64ToBytes(paddedBase64);
     return decodeUtf8(bytes);
   } catch (error) {
     throw new Error(
