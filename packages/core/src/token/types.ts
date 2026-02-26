@@ -25,7 +25,7 @@ export interface JWTPayload {
   address?: Record<string, unknown>;
   roles?: string[];
   scopes?: string[];
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 export interface JWTHeader {
@@ -112,11 +112,13 @@ export interface TokenValidationOptions {
   enforceUniqueJti?: boolean;
   trustedNestedClaimPaths?: string[];
   allowUntrustedNestedClaims?: boolean;
+  /** Clock skew tolerance in seconds. */
   clockSkewTolerance?: number;
   debug?: boolean;
 }
 
 export interface OidcHashValidationOptions {
+  idTokenAlg: string;
   accessToken?: string;
   authorizationCode?: string;
   requireAtHash?: boolean;

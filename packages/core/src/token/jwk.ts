@@ -1,11 +1,20 @@
-import { timingSafeEqual } from "../security";
-
 import type {
   ExpectedJwkKeyType,
   JwkMetadata,
   JwkMetadataValidationOptions,
   JwkMetadataValidationResult,
 } from "./types";
+
+const RSA_COMPATIBLE_ALGORITHMS = new Set([
+  "RS256",
+  "RS384",
+  "RS512",
+  "PS256",
+  "PS384",
+  "PS512",
+]);
+
+const EC_COMPATIBLE_ALGORITHMS = new Set(["ES256", "ES384", "ES512"]);
 
 function normalizeJwkKeyType(rawKeyType: unknown): ExpectedJwkKeyType | null {
   if (typeof rawKeyType !== "string") {
@@ -34,11 +43,11 @@ export function isAlgorithmCompatibleWithKeyType(
   keyType: ExpectedJwkKeyType,
 ): boolean {
   if (keyType === "RSA") {
-    return algorithm.startsWith("RS");
+    return RSA_COMPATIBLE_ALGORITHMS.has(algorithm);
   }
 
   if (keyType === "EC") {
-    return algorithm.startsWith("ES");
+    return EC_COMPATIBLE_ALGORITHMS.has(algorithm);
   }
 
   if (keyType === "OKP") {
@@ -98,10 +107,7 @@ export function validateJwkMetadataForToken(
       : undefined;
 
   if (normalizedExpectedKid) {
-    if (
-      !normalizedJwkKid ||
-      !timingSafeEqual(normalizedJwkKid, normalizedExpectedKid)
-    ) {
+    if (!normalizedJwkKid || normalizedJwkKid !== normalizedExpectedKid) {
       result.valid = false;
       result.kidValid = false;
       result.errors.push("JWK kid does not match JWT kid");
@@ -138,14 +144,25 @@ export function validateJwkMetadataForToken(
 
   const normalizedUse =
     typeof jwk.use === "string" ? jwk.use.trim().toLowerCase() : "";
+  const hasUse = normalizedUse !== "";
+  const hasKeyOps = jwk.key_ops !== undefined;
+
+  if (!hasUse && !hasKeyOps) {
+    result.valid = false;
+    result.useValid = false;
+    result.keyOpsValid = false;
+    result.errors.push(
+      "JWK is missing both 'use' and 'key_ops' parameters; cannot determine intended purpose.",
+    );
+  }
 
   if (requireUseSig) {
-    if (normalizedUse !== "sig") {
+    if (hasUse && normalizedUse !== "sig") {
       result.valid = false;
       result.useValid = false;
       result.errors.push('JWK use must be "sig" for signature validation');
     }
-  } else if (normalizedUse && normalizedUse !== "sig") {
+  } else if (hasUse && normalizedUse !== "sig") {
     result.valid = false;
     result.useValid = false;
     result.errors.push('JWK use must be "sig" when provided');
@@ -154,10 +171,7 @@ export function validateJwkMetadataForToken(
   const normalizedJwkAlg = typeof jwk.alg === "string" ? jwk.alg.trim() : "";
 
   if (requireAlgMatch) {
-    if (
-      !normalizedJwkAlg ||
-      !timingSafeEqual(normalizedJwkAlg, normalizedTokenAlgorithm)
-    ) {
+    if (!normalizedJwkAlg || normalizedJwkAlg !== normalizedTokenAlgorithm) {
       result.valid = false;
       result.algValid = false;
       result.errors.push(
@@ -166,7 +180,7 @@ export function validateJwkMetadataForToken(
     }
   } else if (
     normalizedJwkAlg &&
-    !timingSafeEqual(normalizedJwkAlg, normalizedTokenAlgorithm)
+    normalizedJwkAlg !== normalizedTokenAlgorithm
   ) {
     result.valid = false;
     result.algValid = false;

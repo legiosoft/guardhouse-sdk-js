@@ -148,6 +148,7 @@ export class GuardhouseClientSession extends GuardhouseClientBase {
         debug: this.config.debug,
       });
       const hashValidation = await validateOidcHashClaims(decodedIdToken, {
+        idTokenAlg: decodedIdToken.header.alg,
         accessToken: callback.accessToken,
         authorizationCode: callback.code,
         requireAtHash: Boolean(callback.accessToken),

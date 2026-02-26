@@ -78,9 +78,10 @@ async function computeOidcHashClaim(
 
 export async function validateOidcHashClaims(
   decodedJWT: DecodedJWT,
-  options: OidcHashValidationOptions = {},
+  options: OidcHashValidationOptions,
 ): Promise<OidcHashValidationResult> {
   const {
+    idTokenAlg,
     accessToken,
     authorizationCode,
     requireAtHash = false,
@@ -96,7 +97,11 @@ export async function validateOidcHashClaims(
     errors: [],
   };
 
-  const algorithm = decodedJWT.header.alg;
+  const algorithm = idTokenAlg.trim();
+
+  if (!algorithm) {
+    throw new Error("idTokenAlg is required for OIDC hash claim validation");
+  }
 
   if (typeof decodedJWT.payload.at_hash === "string") {
     if (!accessToken) {

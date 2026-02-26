@@ -16,6 +16,8 @@ import type {
   TokenValidationResult,
 } from "./types";
 
+const DEFAULT_CLOCK_SKEW_TOLERANCE_SECONDS = 60;
+
 function timingSafeIncludes(candidates: string[], expected: string): boolean {
   let match = false;
 
@@ -26,6 +28,38 @@ function timingSafeIncludes(candidates: string[], expected: string): boolean {
   }
 
   return match;
+}
+
+function normalizeAudienceClaim(aud: unknown): string[] | null {
+  if (aud === undefined) {
+    return [];
+  }
+
+  if (typeof aud === "string") {
+    const normalized = aud.trim();
+    return normalized ? [normalized] : [];
+  }
+
+  if (!Array.isArray(aud)) {
+    return null;
+  }
+
+  const normalizedAudience: string[] = [];
+
+  for (const value of aud) {
+    if (typeof value !== "string") {
+      return null;
+    }
+
+    const normalized = value.trim();
+    if (!normalized) {
+      return null;
+    }
+
+    normalizedAudience.push(normalized);
+  }
+
+  return normalizedAudience;
 }
 
 function collectNestedClaimPaths(
@@ -93,7 +127,7 @@ export function validateToken(
     enforceUniqueJti = false,
     trustedNestedClaimPaths = [],
     allowUntrustedNestedClaims = false,
-    clockSkewTolerance = 30,
+    clockSkewTolerance = DEFAULT_CLOCK_SKEW_TOLERANCE_SECONDS,
     debug,
   } = options;
 
@@ -452,47 +486,48 @@ export function validateToken(
     }
   }
 
-  if (audience) {
-    if (!decodedJWT.payload.aud) {
+  const expectedAudience =
+    typeof audience === "string" ? audience.trim() : undefined;
+  const tokenAudienceArray = normalizeAudienceClaim(decodedJWT.payload.aud);
+  const normalizedAudienceList = tokenAudienceArray ?? [];
+
+  if (tokenAudienceArray === null) {
+    result.audienceValid = false;
+    result.valid = false;
+    result.errors.push(
+      "Token aud claim must be a string or an array of non-empty strings",
+    );
+    logger.warn("Audience claim format is invalid");
+  }
+
+  if (expectedAudience) {
+    if (normalizedAudienceList.length === 0) {
       result.audienceValid = false;
       result.valid = false;
       result.errors.push("Token is missing required audience (aud) claim");
       logger.warn("Audience claim is missing");
-    } else {
-      const audArray = Array.isArray(decodedJWT.payload.aud)
-        ? decodedJWT.payload.aud
-        : [decodedJWT.payload.aud];
-
-      if (!audArray.includes(audience)) {
-        result.audienceValid = false;
-        result.valid = false;
-        result.errors.push(
-          `Token audience does not contain expected "${audience}"`,
-        );
-        logger.warn(
-          `Audience mismatch: expected ${audience}, got ${audArray.join(", ")}`,
-        );
-      }
+    } else if (!normalizedAudienceList.includes(expectedAudience)) {
+      result.audienceValid = false;
+      result.valid = false;
+      result.errors.push(
+        `Token audience does not contain expected "${expectedAudience}"`,
+      );
+      logger.warn(
+        `Audience mismatch: expected ${expectedAudience}, got ${normalizedAudienceList.join(", ")}`,
+      );
     }
   }
 
   const expectedAuthorizedParty =
     typeof clientId === "string" && clientId.trim() !== ""
       ? clientId.trim()
-      : audience;
-
-  const tokenAudience = decodedJWT.payload.aud;
-  const tokenAudienceArray = Array.isArray(tokenAudience)
-    ? tokenAudience
-    : tokenAudience
-      ? [tokenAudience]
-      : [];
+      : expectedAudience;
   const tokenAzp =
     typeof decodedJWT.payload.azp === "string"
       ? decodedJWT.payload.azp.trim()
       : undefined;
 
-  if (tokenAudienceArray.length > 1 && !tokenAzp) {
+  if (normalizedAudienceList.length > 1 && !tokenAzp) {
     result.azpValid = false;
     result.valid = false;
     result.errors.push(
@@ -590,7 +625,7 @@ export function validateToken(
  */
 export function isTokenExpired(
   decodedJWT: DecodedJWT,
-  clockSkewTolerance: number = 30,
+  clockSkewTolerance: number = DEFAULT_CLOCK_SKEW_TOLERANCE_SECONDS,
   debug?: boolean,
 ): boolean {
   if (!Number.isFinite(clockSkewTolerance) || clockSkewTolerance < 0) {
@@ -622,7 +657,7 @@ export function isTokenExpired(
  */
 export function getTokenExpiresIn(
   decodedJWT: DecodedJWT,
-  clockSkewTolerance: number = 30,
+  clockSkewTolerance: number = DEFAULT_CLOCK_SKEW_TOLERANCE_SECONDS,
   debug?: boolean,
 ): number | null {
   if (!Number.isFinite(clockSkewTolerance) || clockSkewTolerance < 0) {

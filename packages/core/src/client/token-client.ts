@@ -78,6 +78,7 @@ export class GuardhouseClientToken extends GuardhouseClientSession {
         debug: this.config.debug,
       });
       const hashValidation = await validateOidcHashClaims(decodedIdToken, {
+        idTokenAlg: decodedIdToken.header.alg,
         accessToken: tokenResponse.access_token,
         authorizationCode: normalizedCode,
         requireAtHash: true,
@@ -182,6 +183,7 @@ export class GuardhouseClientToken extends GuardhouseClientSession {
           debug: this.config.debug,
         });
         const hashValidation = await validateOidcHashClaims(decodedIdToken, {
+          idTokenAlg: decodedIdToken.header.alg,
           accessToken: tokenResponse.access_token,
           requireAtHash: true,
           requireCHash: false,

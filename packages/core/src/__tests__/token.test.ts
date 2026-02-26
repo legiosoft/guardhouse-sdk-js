@@ -148,6 +148,49 @@ describe("token utilities", () => {
     expect(result.errors).toHaveLength(0);
   });
 
+  it("accepts expected audience regardless of array position", () => {
+    const token = createJWT({
+      sub: "user-1",
+      iss: "https://auth.example.com",
+      aud: ["secondary", "client-id"],
+      azp: "client-id",
+      exp: Math.floor(Date.now() / 1000) + 300,
+    });
+
+    const decoded = decodeJWT(token);
+    const result = validateToken(decoded, {
+      issuer: "https://auth.example.com",
+      audience: "client-id",
+      signatureVerified: true,
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.audienceValid).toBe(true);
+  });
+
+  it("rejects malformed audience arrays", () => {
+    const token = createJWT({
+      sub: "user-1",
+      iss: "https://auth.example.com",
+      aud: ["client-id", 42],
+      azp: "client-id",
+      exp: Math.floor(Date.now() / 1000) + 300,
+    });
+
+    const decoded = decodeJWT(token);
+    const result = validateToken(decoded, {
+      issuer: "https://auth.example.com",
+      audience: "client-id",
+      signatureVerified: true,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.audienceValid).toBe(false);
+    expect(
+      result.errors.some((error) => error.includes("aud claim must be")),
+    ).toBe(true);
+  });
+
   it("rejects untrusted jku origins", () => {
     const token = createJWTWithHeader(
       {
@@ -502,6 +545,7 @@ describe("token utilities", () => {
     const decoded = decodeJWT(token);
     await expect(
       validateOidcHashClaims(decoded, {
+        idTokenAlg: decoded.header.alg,
         accessToken,
         authorizationCode,
         requireAtHash: true,
@@ -526,6 +570,7 @@ describe("token utilities", () => {
     const decoded = decodeJWT(token);
     await expect(
       validateOidcHashClaims(decoded, {
+        idTokenAlg: decoded.header.alg,
         accessToken: "access-token-123",
         requireAtHash: true,
       }),
@@ -580,6 +625,61 @@ describe("token utilities", () => {
     expect(result.useValid).toBe(false);
     expect(result.algValid).toBe(false);
     expect(result.keyOpsValid).toBe(false);
+  });
+
+  it("rejects JWK metadata when both use and key_ops are missing", () => {
+    const result = validateJwkMetadataForToken(
+      {
+        kid: "kid-1",
+        kty: "RSA",
+        alg: "RS256",
+      },
+      {
+        tokenAlgorithm: "RS256",
+      },
+    );
+
+    expect(result.valid).toBe(false);
+    expect(result.useValid).toBe(false);
+    expect(result.keyOpsValid).toBe(false);
+    expect(
+      result.errors.some((error) =>
+        error.includes("missing both 'use' and 'key_ops'"),
+      ),
+    ).toBe(true);
+  });
+
+  it("supports RSA-PSS algorithms and enforces case-sensitive JWK alg", () => {
+    const pssResult = validateJwkMetadataForToken(
+      {
+        kid: "kid-1",
+        kty: "RSA",
+        use: "sig",
+        alg: "PS256",
+        key_ops: ["verify"],
+      },
+      {
+        tokenAlgorithm: "PS256",
+      },
+    );
+
+    expect(pssResult.valid).toBe(true);
+
+    const lowercaseAlgResult = validateJwkMetadataForToken(
+      {
+        kid: "kid-1",
+        kty: "RSA",
+        use: "sig",
+        alg: "ps256",
+        key_ops: ["verify"],
+      },
+      {
+        tokenAlgorithm: "PS256",
+      },
+    );
+
+    expect(lowercaseAlgResult.valid).toBe(false);
+    expect(lowercaseAlgResult.algValid).toBe(false);
   });
 
   it("fails token validation when resolved JWK metadata is unsafe", () => {
