@@ -7,6 +7,7 @@ import {
   validateOidcHashClaims,
   validateToken,
 } from "../token";
+import { base64UrlDecode } from "../token/base64";
 
 function base64UrlEncodeJson(value: unknown): string {
   return Buffer.from(JSON.stringify(value), "utf8")
@@ -72,6 +73,15 @@ describe("token utilities", () => {
 
     const decoded = decodeJWT(token);
     expect(decoded.payload.name).toBe("Jöhn 😀");
+  });
+
+  it("decodes empty Base64URL strings safely", () => {
+    expect(base64UrlDecode("")).toBe("");
+  });
+
+  it("rejects invalid Base64URL characters before decoding", () => {
+    expect(() => base64UrlDecode("abc=")).toThrow("Invalid Base64URL input");
+    expect(() => base64UrlDecode("abc+")).toThrow("Invalid Base64URL input");
   });
 
   it("marks token invalid when signature verification is not confirmed", () => {
