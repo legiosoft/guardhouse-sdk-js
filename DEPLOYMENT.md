@@ -75,15 +75,29 @@ npm pack --dry-run -w @guardhouse/core
 npm pack --dry-run -w @guardhouse/react
 ```
 
-For the first beta release, ensure versions are set to `0.1.0-beta.0` (or next beta) in target packages.
+For this release train, set versions to:
 
-## First Beta Publish (Core and React)
+- `@guardhouse/core`: `1.0.0`
+- `@guardhouse/react`: `1.0.0`
+- `@guardhouse/node`: `1.0.0-beta.1` (or next beta)
+- `@guardhouse/react-native`: `1.0.0-beta.1` (or next beta)
+
+## Stable Publish (Core and React)
 
 Publish in dependency order (`core` first):
 
 ```bash
-npm publish -w @guardhouse/core --tag beta --access public
-npm publish -w @guardhouse/react --tag beta --access public
+npm publish -w @guardhouse/core --access public
+npm publish -w @guardhouse/react --access public
+```
+
+## Beta Publish (Node and React Native)
+
+Publish beta packages after stable dependencies are live:
+
+```bash
+npm publish -w @guardhouse/node --tag beta --access public
+npm publish -w @guardhouse/react-native --tag beta --access public
 ```
 
 ## Full Publish Order (All SDKs)
@@ -100,8 +114,12 @@ When publishing all packages, use this order:
 ```bash
 npm view @guardhouse/core version
 npm view @guardhouse/react version
+npm view @guardhouse/node version
+npm view @guardhouse/react-native version
 npm view @guardhouse/core dist-tags
 npm view @guardhouse/react dist-tags
+npm view @guardhouse/node dist-tags
+npm view @guardhouse/react-native dist-tags
 ```
 
 ## CI/CD (GitHub Actions) Example
@@ -123,11 +141,17 @@ Store `NPM_TOKEN` in GitHub Secrets, then configure npm before publish:
 - name: Build
   run: npm run build
 
-- name: Publish core beta
-  run: npm publish -w @guardhouse/core --tag beta --access public
+- name: Publish core stable
+  run: npm publish -w @guardhouse/core --access public
 
-- name: Publish react beta
-  run: npm publish -w @guardhouse/react --tag beta --access public
+- name: Publish react stable
+  run: npm publish -w @guardhouse/react --access public
+
+- name: Publish node beta
+  run: npm publish -w @guardhouse/node --tag beta --access public
+
+- name: Publish react-native beta
+  run: npm publish -w @guardhouse/react-native --tag beta --access public
 ```
 
 ## Common Errors

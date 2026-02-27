@@ -8,6 +8,10 @@ React SDK for adding Guardhouse/OIDC authentication to React 18+ browser apps.
 npm install @guardhouse/react
 ```
 
+## Example Project
+
+- Reference implementation: [`examples/react`](../../examples/react)
+
 ## What You Get
 
 - `GuardhouseProvider` for auth state and callback handling

@@ -1,7 +1,19 @@
 {
   "name": "@guardhouse/core",
-  "version": "0.1.0-beta.1",
+  "version": "1.0.0",
   "description": "Universal JavaScript/TypeScript SDK for OAuth 2.0 with PKCE",
+  "keywords": [
+    "guardhouse",
+    "sdk",
+    "oauth2",
+    "oidc",
+    "pkce",
+    "authentication",
+    "authorization",
+    "security",
+    "jwt",
+    "typescript"
+  ],
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
