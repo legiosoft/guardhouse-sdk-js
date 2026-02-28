@@ -73,8 +73,8 @@ npm ci
 npm run build
 npm pack --dry-run -w @guardhouse/core
 npm pack --dry-run -w @guardhouse/react
-npm pack --dry-run -w @guardhouse/node
-npm pack --dry-run -w @guardhouse/react-native
+npm pack --dry-run -w @guardhouse/node --tag beta
+npm pack --dry-run -w @guardhouse/react-native --tag beta
 ```
 
 For this release train, set versions to:
@@ -100,54 +100,6 @@ Publish beta packages after stable dependencies are live:
 ```bash
 npm publish -w @guardhouse/node --tag beta --access public
 npm publish -w @guardhouse/react-native --tag beta --access public
-```
-
-### Beta Package Features
-
-#### @guardhouse/node (beta)
-
-Server-side SDK for Node.js applications:
-
-- OAuth 2.0 client credentials flow
-- Authorization code exchange (with PKCE)
-- Token introspection and revocation
-- JWT validation utilities
-- Machine-to-machine authentication
-
-Install:
-
-```bash
-npm install @guardhouse/node@beta
-```
-
-#### @guardhouse/react-native (beta)
-
-React Native SDK for mobile applications:
-
-- OAuth 2.0 Authorization Code + PKCE
-- In-app browser auth sessions (InAppBrowser/Expo)
-- Secure token storage (Keychain/Keystore)
-- Passkey/WebAuthn headless authentication
-- Automatic token refresh
-- Deep link callback handling
-- Registration flow with returnUrl support
-
-Install:
-
-```bash
-npm install @guardhouse/react-native@beta
-```
-
-Peer dependencies:
-
-```bash
-npm install react-native-keychain react-native-inappbrowser-reborn
-```
-
-Optional for crypto when Web Crypto unavailable:
-
-```bash
-npm install react-native-quick-crypto
 ```
 
 ## Full Publish Order (All SDKs)
