@@ -1,23 +1,7 @@
-export { GuardhouseClient } from "./core/GuardhouseClient";
-
-export {
-  InAppBrowserAuthAdapter,
-  type BrowserAuthSessionResult,
-  type BrowserSessionOptions,
-  type GuardhouseBrowserAdapter,
-} from "./adapters/BrowserAdapter";
-
-export {
-  ChunkedSecureStore,
-  KeychainStorageAdapter,
-  type GuardhouseStorageAdapter,
-} from "./adapters/StorageAdapter";
-
-export { resolveReactNativeCryptoAdapter } from "./crypto";
-
 export type {
   BrowserLoginOptions,
   ExchangeCodeForTokensOptions,
+  FetchLike,
   GetAccessTokenOptions,
   GuardhouseClientConfig,
   GuardhouseClientEndpoints,
@@ -28,15 +12,16 @@ export type {
   PasskeyAssertionResult,
   PasskeyCredentialDescriptor,
   PasskeyCredentialRequestOptions,
+  PasskeyTransport,
   RefreshTokenOptions,
   RestoreSessionOptions,
+} from "./config";
+export type {
   GuardhouseAuthResult,
   GuardhouseSession,
   GuardhouseTokenResponse,
   RedirectTokenPayload,
-  GuardhouseErrorCode,
-} from "./types/index";
-
+} from "./tokens";
 export {
   GuardhouseAuthError,
   GuardhouseClientError,
@@ -44,4 +29,5 @@ export {
   GuardhouseError,
   GuardhouseNetworkError,
   GuardhouseStorageError,
-} from "./types/index";
+} from "./errors";
+export type { GuardhouseErrorCode } from "./errors";

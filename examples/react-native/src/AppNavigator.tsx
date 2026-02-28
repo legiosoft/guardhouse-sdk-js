@@ -36,7 +36,7 @@ function AppNavigator() {
         <Stack.Screen
           name="Protected"
           component={ProtectedScreen}
-          options={{ title: "Protected Page" }}
+          options={{ title: "Authorized Page" }}
         />
         <Stack.Screen
           name="ApiDemo"

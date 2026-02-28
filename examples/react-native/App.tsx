@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
+import { parseOAuthCallbackUrl } from "@guardhouse/core";
 import {
   GuardhouseClient,
   type GuardhouseSession,
 } from "@guardhouse/react-native";
+import * as Linking from "expo-linking";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { appConfig } from "./src/config";
 import { expoCryptoAdapter } from "./src/cryptoAdapter";
@@ -17,7 +19,17 @@ import {
 import AuthScreen from "./src/screens/AuthScreen";
 import ProtectedScreen from "./src/screens/ProtectedScreen";
 
-type BusyAction = "login" | "register" | "passkey" | "refresh" | "logout";
+type BusyAction =
+  | "login"
+  | "register"
+  | "passkey"
+  | "refresh"
+  | "logout"
+  | "deepLink";
+
+function isAuthCallbackUrl(url: string): boolean {
+  return /(code|access_token|id_token|refresh_token|error)=/.test(url);
+}
 
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -28,10 +40,15 @@ function toErrorMessage(error: unknown): string {
 }
 
 export default function App(): React.JSX.Element {
-  const redirectUri = useMemo(
-    () => resolveExpoRedirectUri(appConfig.redirectUri),
-    [],
-  );
+  const redirectUri = useMemo(() => {
+    const configuredRedirectUri = appConfig.redirectUri.trim();
+
+    if (configuredRedirectUri === "" || configuredRedirectUri === "auto") {
+      return Linking.createURL("callback");
+    }
+
+    return resolveExpoRedirectUri(configuredRedirectUri);
+  }, []);
 
   const client = useMemo(
     () =>
@@ -123,6 +140,83 @@ export default function App(): React.JSX.Element {
     [],
   );
 
+  const handleDeepLink = useCallback(
+    async (incomingUrl: string) => {
+      const parsedIncomingUrl = Linking.parse(incomingUrl);
+
+      if (
+        !incomingUrl ||
+        parsedIncomingUrl.path !== "callback" ||
+        !isAuthCallbackUrl(incomingUrl)
+      ) {
+        return;
+      }
+
+      setBusyAction("deepLink");
+
+      try {
+        const callback = parseOAuthCallbackUrl(incomingUrl);
+
+        if (callback.error) {
+          throw new Error(callback.errorDescription ?? callback.error);
+        }
+
+        if (callback.code) {
+          const authResult = await client.exchangeCodeForTokens(callback.code);
+          setSession(authResult.session);
+          setIsAuthenticated(true);
+          setError(null);
+          return;
+        }
+
+        if (callback.accessToken) {
+          const authResult = await client.applyRedirectTokens({
+            accessToken: callback.accessToken,
+            refreshToken: callback.refreshToken,
+            idToken: callback.idToken,
+            tokenType: callback.tokenType,
+            expiresIn: callback.expiresIn,
+            scope: callback.scope,
+          });
+
+          setSession(authResult.session);
+          setIsAuthenticated(true);
+          setError(null);
+          return;
+        }
+
+        throw new Error(
+          "Deep link callback did not include an authorization code or tokens.",
+        );
+      } catch (deepLinkError) {
+        setError(toErrorMessage(deepLinkError));
+      } finally {
+        setBusyAction((currentAction) =>
+          currentAction === "deepLink" ? null : currentAction,
+        );
+      }
+    },
+    [client],
+  );
+
+  useEffect(() => {
+    const subscription = Linking.addEventListener("url", ({ url }) => {
+      void handleDeepLink(url);
+    });
+
+    void Linking.getInitialURL().then((initialUrl) => {
+      if (!initialUrl) {
+        return;
+      }
+
+      void handleDeepLink(initialUrl);
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [handleDeepLink]);
+
   const handleLogin = useCallback(() => {
     void runAction("login", async () => {
       const result = await client.loginWithBrowser({
@@ -187,7 +281,7 @@ export default function App(): React.JSX.Element {
         <ProtectedScreen
           session={session}
           isBusy={busyAction !== null}
-          busyAction={busyAction}
+          busyAction={busyAction === "deepLink" ? null : busyAction}
           error={error}
           onRefresh={handleRefresh}
           onLogout={handleLogout}
@@ -195,7 +289,7 @@ export default function App(): React.JSX.Element {
       ) : (
         <AuthScreen
           isBusy={busyAction !== null}
-          busyAction={busyAction}
+          busyAction={busyAction === "deepLink" ? null : busyAction}
           error={error}
           redirectUri={redirectUri}
           onLogin={handleLogin}

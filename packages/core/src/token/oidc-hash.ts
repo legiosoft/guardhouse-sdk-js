@@ -1,5 +1,6 @@
 import { createGuardhouseLogger } from "../debug";
 import { timingSafeEqual, toUtf8Bytes } from "../security";
+import { getCryptoAdapter } from "../crypto";
 
 import { base64UrlDecodeToBytes } from "./base64";
 import { tryLoadNodeCrypto } from "./node-crypto";
@@ -57,6 +58,15 @@ async function digestBytes(
     const hash = nodeCrypto.createHash(`sha${hashBitLength}`);
     hash.update(data);
     return new Uint8Array(hash.digest());
+  }
+
+  if (hashBitLength === 256) {
+    try {
+      const adapter = await getCryptoAdapter();
+      return await adapter.sha256(data);
+    } catch {
+      // Keep the public error message stable below.
+    }
   }
 
   throw new Error("Cryptographic hash function is unavailable");

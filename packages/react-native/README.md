@@ -1,69 +1,34 @@
 # @guardhouse/react-native
 
-A production-grade, audit-ready React Native SDK that implements OAuth 2.0 Authorization Code Flow with PKCE for mobile applications.
-
-## Features
-
-- **Secure Authentication**: OAuth 2.0 Authorization Code Flow with PKCE (S256)
-- **Secure Storage**: Hardware-backed Keychain storage for tokens
-- **Secure Browser**: InAppBrowser for isolated authentication sessions
-- **Deep Linking**: Full support for deep link callbacks
-- **Type-Safe**: Fully typed with TypeScript
-- **Auto-Refresh**: Automatic token refresh when expired
-- **Security-Focused**: OWASP MASVS compliant, audit-ready
-
-## Security Architecture
-
-This SDK is designed with security as the top priority:
-
-### OWASP MASVS Compliance
-
-- **M1 - Secure Storage**: Uses `react-native-keychain` for hardware-backed storage
-- **M2 - Secure Authentication**: Uses `InAppBrowser` for secure browser sessions
-- **M3 - Secure Communication**: Enforces TLS, strict SSL verification
-- **M5 - Cryptography**: Uses `@guardhouse/core` for PKCE generation with S256
-- **M7 - Code Quality**: Fully typed, comprehensive error handling
-
-### Security Features
-
-- **State Validation**: Strict CSRF protection with state parameter validation
-- **Token Security**: JWT validation with algorithm whitelisting (RS256, HS256, etc.)
-- **Deep Link Sanitization**: Sanitizes all incoming URLs before processing
-- **Log Redaction**: Automatically redacts tokens and secrets from logs
-- **CSPRNG**: Uses cryptographically secure random number generation
+React Native SDK for Guardhouse OAuth 2.0 Authorization Code + PKCE, passkey authentication, and secure token lifecycle.
 
 ## Installation
 
 ```bash
-npm install @guardhouse/react-native react-native react
+npm install @guardhouse/react-native
 ```
 
-### Dependencies
+### Peer dependencies
 
-The SDK includes the following vetted dependencies:
+- `react >=18.0.0`
+- `react-native >=0.70.0`
+- `react-native-quick-crypto >=0.7.0` (optional, if Web Crypto is unavailable)
 
-- `@guardhouse/core` - Shared PKCE, URL construction, and API client logic
-- `react-native-inappbrowser-reborn` - Secure browser sessions
-- `react-native-keychain` - Hardware-backed secure storage
-- `jwt-decode` - JWT decoding and validation
-- `react-native-quick-crypto` (optional) - Native SHA-256/random bytes provider when Web Crypto is unavailable
+### Required native modules
 
-### Crypto Provider Setup
-
-PKCE needs native SHA-256 and secure random bytes.
-
-- If your React Native runtime already exposes Web Crypto (`globalThis.crypto.subtle` + `getRandomValues`), no extra setup is needed.
-- Otherwise, install `react-native-quick-crypto` and follow its setup instructions.
+- `react-native-keychain` – secure token storage
+- `react-native-inappbrowser-reborn` – in-app browser auth sessions
 
 ```bash
-npm install react-native-quick-crypto
+npm install react-native-keychain react-native-inappbrowser-reborn
+cd ios && pod install
 ```
 
-## iOS Setup
+## Platform setup
 
-### 1. Configure Deep Links
+### iOS
 
-In your `ios/YourProject/Info.plist`, add:
+1. Add URL scheme to `ios/YourApp/Info.plist`:
 
 ```xml
 <key>CFBundleURLTypes</key>
@@ -77,36 +42,17 @@ In your `ios/YourProject/Info.plist`, add:
 </array>
 ```
 
-### 2. Update Podfile
-
-Add the following to your `ios/Podfile`:
+2. Add to `ios/Podfile`:
 
 ```ruby
 pod 'RNInAppBrowser', :path => '../node_modules/react-native-inappbrowser-reborn'
 ```
 
-Then run:
+3. Run `pod install`.
 
-```bash
-cd ios && pod install && cd ..
-```
+### Android
 
-### 3. Associated Domains (Optional)
-
-For SSO and credential autofill, add associated domains to your Apple Developer account and update `Info.plist`:
-
-```xml
-<key>com.apple.developer.associated-domains</key>
-<array>
-  <string>webcredentials:https://your-domain.com</string>
-</array>
-```
-
-## Android Setup
-
-### 1. Configure Deep Links
-
-In `android/app/src/main/AndroidManifest.xml`, add the intent filter to your main activity:
+1. Add intent filter to `android/app/src/main/AndroidManifest.xml`:
 
 ```xml
 <intent-filter>
@@ -119,9 +65,7 @@ In `android/app/src/main/AndroidManifest.xml`, add the intent filter to your mai
 </intent-filter>
 ```
 
-### 2. Configure Launch Mode (IMPORTANT!)
-
-To prevent task hijacking attacks, set `launchMode="singleTask"` in your main activity:
+2. Set `launchMode="singleTask"` on your main activity (required to prevent task hijacking):
 
 ```xml
 <activity
@@ -130,280 +74,264 @@ To prevent task hijacking attacks, set `launchMode="singleTask"` in your main ac
   ...>
 ```
 
-**Security Note**: This is critical for preventing malicious apps from hijacking the redirect intent. See OWASP M-STG-RES-008 for details.
+## Quick start
 
-### 3. Add to build.gradle
+```tsx
+import {
+  GuardhouseClient,
+  KeychainStorageAdapter,
+} from "@guardhouse/react-native";
 
-In `android/app/build.gradle`, ensure the following dependencies:
+const client = new GuardhouseClient({
+  authority: "https://your-guardhouse-domain.com",
+  clientId: "your-client-id",
+  redirectUri: "com.yourapp://callback",
+  scope: "openid profile offline_access",
+  refreshTokenStorage: new KeychainStorageAdapter(),
+  browser: yourBrowserAdapter, // see Adapters section
+});
+```
 
-```gradle
-dependencies {
-  // ... other dependencies
-  implementation 'com.facebook.react:react-native:+'
+### Login
+
+```tsx
+const result = await client.loginWithBrowser({
+  ephemeralSession: true,
+});
+
+console.log(result.session.accessToken);
+```
+
+### Restore session on app launch
+
+```tsx
+const restored = await client.restoreSession();
+
+if (restored?.session) {
+  // User is authenticated
 }
 ```
 
-## Usage
-
-### Basic Setup
-
-Wrap your app with the `GuardhouseProvider`:
+### Get access token (auto-refresh)
 
 ```tsx
-import React from "react";
-import { GuardhouseProvider } from "@guardhouse/react-native";
-import App from "./App";
-
-const index = () => {
-  return (
-    <GuardhouseProvider
-      authority="https://your-guardhouse-domain.com"
-      clientId="your-client-id"
-      redirectUri="com.yourapp://callback"
-      scopes={["openid", "profile", "offline_access"]}
-      debug={true}
-    >
-      <App />
-    </GuardhouseProvider>
-  );
-};
-
-export default index;
+const token = await client.getAccessToken();
 ```
 
-### Using the Hook
+### Logout
 
 ```tsx
-import React from "react";
-import { View, Button, Text } from "react-native";
-import { useAuth } from "@guardhouse/react-native";
+await client.logout({
+  revoke: true,
+  revokeRefreshToken: true,
+});
+```
 
-const MyComponent = () => {
-  const { user, login, logout, getAccessToken, isAuthenticated, isLoading } =
-    useAuth();
+## Registration with returnUrl
 
-  const handleLogin = async () => {
-    await login();
-  };
+If your registration endpoint expects a `returnUrl` query parameter, configure it like:
 
-  const handleLogout = async () => {
-    await logout();
-  };
+```ts
+endpoints: {
+  registration: "/account/signup?returnUrl=",
+}
+```
 
-  const handleApiCall = async () => {
-    const token = await getAccessToken();
-    if (token) {
-      // Make authenticated API call
-      const response = await fetch("https://api.example.com/data", {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-      // Handle response...
+The SDK will inject the generated authorize URL into `returnUrl` and keep the flow inside the auth session (returns to your app, not Safari).
+
+## Passkey login (headless WebAuthn)
+
+Provide a passkey adapter that wraps a native WebAuthn library (e.g., `react-native-passkey`):
+
+```ts
+import type { GuardhousePasskeyAdapter } from "@guardhouse/react-native";
+
+const passkeyAdapter: GuardhousePasskeyAdapter = {
+  name: "MyPasskeyAdapter",
+  async get(options) {
+    // call native passkey library and return assertion
+    return nativePasskeyGet(options);
+  },
+};
+
+const client = new GuardhouseClient({
+  // ...
+  passkey: passkeyAdapter,
+});
+
+const result = await client.loginWithPasskey();
+```
+
+## Adapters
+
+### Browser adapter
+
+Implements `GuardhouseBrowserAdapter`:
+
+```ts
+interface GuardhouseBrowserAdapter {
+  name?: string;
+  openAuthSession(
+    authorizationUrl: string,
+    redirectUri: string,
+    options?: { ephemeralSession?: boolean; timeoutMs?: number },
+  ): Promise<{ url: string }>;
+}
+```
+
+Default: `InAppBrowserAuthAdapter` (uses `react-native-inappbrowser-reborn`).
+
+For Expo, use `expo-web-browser`:
+
+```ts
+import * as WebBrowser from "expo-web-browser";
+
+export const expoBrowserAdapter = {
+  name: "ExpoBrowserAdapter",
+  async openAuthSession(authorizationUrl, redirectUri, options) {
+    const result = await WebBrowser.openAuthSessionAsync(
+      authorizationUrl,
+      redirectUri,
+      { preferEphemeralSession: options?.ephemeralSession ?? true },
+    );
+
+    if (result.type === "success" && result.url) {
+      return { url: result.url };
     }
-  };
 
-  if (isLoading) {
-    return <Text>Loading...</Text>;
+    throw new Error(result.type === "cancel" ? "Cancelled" : "Auth failed");
+  },
+};
+```
+
+### Storage adapters
+
+- `KeychainStorageAdapter` – uses `react-native-keychain` (default for production)
+- `ChunkedSecureStore` – wraps any adapter to split large values
+- Provide your own `GuardhouseStorageAdapter` for Expo Go or custom runtimes
+
+```ts
+interface GuardhouseStorageAdapter {
+  getItem(key: string): Promise<string | null>;
+  setItem(key: string, value: string): Promise<void>;
+  removeItem(key: string): Promise<void>;
+}
+```
+
+### Crypto adapter
+
+PKCE requires SHA-256 and secure random. If your React Native runtime provides `globalThis.crypto.subtle`, no extra setup is needed. Otherwise, install `react-native-quick-crypto` and provide a `CryptoAdapter`:
+
+```ts
+import type { CryptoAdapter } from "@guardhouse/core";
+
+const cryptoAdapter: CryptoAdapter = {
+  async sha256(data) {
+    // return Uint8Array hash
+  },
+  async randomBytes(count) {
+    // return Uint8Array
+  },
+};
+
+const client = new GuardhouseClient({
+  // ...
+  cryptoAdapter,
+});
+```
+
+## API
+
+### `GuardhouseClient`
+
+#### Constructor
+
+```ts
+new GuardhouseClient(config: GuardhouseClientConfig)
+```
+
+#### Methods
+
+- `loginWithBrowser(options?)` – OAuth browser login
+- `registerWithBrowser(options?)` – OAuth browser registration
+- `loginWithPasskey(options?)` – headless WebAuthn login
+- `exchangeCodeForTokens(code, options?)` – exchange auth code
+- `applyRedirectTokens(payload)` – apply tokens from deep link
+- `refreshToken(options?)` – refresh access token
+- `restoreSession(options?)` – restore and optionally refresh
+- `getSession()` – get current session
+- `getAccessToken(options?)` – get access token (auto-refresh)
+- `logout(options?)` – logout and optionally revoke tokens
+
+### Types
+
+```ts
+interface GuardhouseClientConfig {
+  authority: string;
+  clientId: string;
+  redirectUri: string;
+  scope?: string;
+  audience?: string;
+  cryptoAdapter?: CryptoAdapter;
+  refreshTokenStorage?: GuardhouseStorageAdapter;
+  sessionStorage?: GuardhouseStorageAdapter;
+  browser?: GuardhouseBrowserAdapter;
+  passkey?: GuardhousePasskeyAdapter;
+  fetch?: FetchLike;
+  defaultEphemeralSession?: boolean;
+  userInfoOnLogin?: boolean;
+  endpoints?: Partial<GuardhouseClientEndpoints>;
+  chunkSize?: number;
+}
+
+interface GuardhouseSession {
+  accessToken: string;
+  refreshToken?: string;
+  idToken?: string;
+  tokenType: string;
+  scope?: string;
+  expiresAt: number;
+  user: User | null;
+}
+
+interface GuardhouseAuthResult {
+  session: GuardhouseSession;
+  tokenResponse: GuardhouseTokenResponse;
+  user: User | null;
+  appState?: Record<string, unknown>;
+}
+```
+
+## Error handling
+
+All errors extend `GuardhouseError`:
+
+- `GuardhouseAuthError` – authentication/protocol errors
+- `GuardhouseNetworkError` – HTTP/network failures
+- `GuardhouseStorageError` – storage layer failures
+- `GuardhouseConfigurationError` – config errors
+
+```ts
+import { GuardhouseAuthError } from "@guardhouse/react-native";
+
+try {
+  await client.loginWithBrowser();
+} catch (error) {
+  if (error instanceof GuardhouseAuthError) {
+    console.log(error.code, error.message, error.statusCode);
   }
-
-  return (
-    <View>
-      {isAuthenticated ? (
-        <>
-          <Text>Welcome, {user?.name || user?.sub}</Text>
-          <Button title="API Call" onPress={handleApiCall} />
-          <Button title="Logout" onPress={handleLogout} />
-        </>
-      ) : (
-        <Button title="Login" onPress={handleLogin} />
-      )}
-    </View>
-  );
-};
-
-export default MyComponent;
+}
 ```
 
-### Accessing User Information
+## Security notes
 
-The `useAuth` hook provides access to the authenticated user:
-
-```tsx
-const { user } = useAuth();
-
-console.log(user?.sub); // Subject ID
-console.log(user?.name); // User's name
-console.log(user?.email); // User's email
-console.log(user?.roles); // User's roles
-```
-
-### Custom Login Options
-
-You can pass custom options to the login method:
-
-```tsx
-const login = () => {
-  useAuth().login({
-    appState: { returnTo: "com.yourapp://dashboard" },
-    prompt: "login", // Force login prompt
-    scope: "openid profile email", // Override default scopes
-  });
-};
-```
-
-### Logout Options
-
-```tsx
-const logout = () => {
-  useAuth().logout({
-    returnTo: "com.yourapp://welcome", // Redirect after logout
-  });
-};
-```
-
-## API Reference
-
-### GuardhouseProvider
-
-Props:
-
-- `authority` (string, required): Guardhouse domain (e.g., `https://your-domain.com`)
-- `clientId` (string, required): Your application's client ID
-- `redirectUri` (string, required): Deep link URI for callbacks (e.g., `com.myapp://callback`)
-- `scopes` (string[], optional): Default scopes (default: `['openid', 'profile', 'offline_access']`)
-- `cryptoAdapter` (CryptoAdapter, optional): Custom native crypto provider for PKCE
-- `debug` (boolean, optional): Enables verbose SDK logs when true
-- `children` (ReactNode, required): Your app components
-
-### useAuth
-
-Returns an object with:
-
-- `user` (User | null): The authenticated user profile
-- `accessToken` (string | null): The current access token
-- `isAuthenticated` (boolean): Whether the user is authenticated
-- `isLoading` (boolean): Whether authentication is in progress
-- `error` (string | null): Error message if authentication failed
-- `login(options?: LoginOptions)`: Initiate authentication flow
-- `logout(options?: LogoutOptions)`: Log out and clear session
-- `getAccessToken()`: Get access token, auto-refreshing if expired
-
-### LoginOptions
-
-- `appState?: AppState`: Application state to restore after login
-- `prompt?: string`: Prompt mode ('none', 'login', 'consent', 'select_account')
-- `scope?: string`: Custom scopes for this login
-- `audience?: string`: Target audience
-
-### LogoutOptions
-
-- `returnTo?: string`: Redirect URI after logout
-- `federated?: boolean`: Enable federated logout
-
-## Security Best Practices
-
-### 1. Deep Link Configuration
-
-Always configure deep links correctly:
-
-- **iOS**: Add schemes to `Info.plist`
-- **Android**: Add intent filters to `AndroidManifest.xml`
-- **Android**: Use `android:launchMode="singleTask"` (CRITICAL)
-
-### 2. Token Storage
-
-The SDK automatically uses secure storage:
-
-- Uses `react-native-keychain` for hardware-backed storage
-- Tokens are encrypted and stored in the iOS Keychain or Android Keystore
-- Never use AsyncStorage or SharedPreferences for tokens
-
-### 3. HTTPS Enforcement
-
-The SDK enforces HTTPS for all communication:
-
-- Authority URL must use HTTPS
-- Token endpoint uses HTTPS
-- All API calls should use HTTPS
-
-### 4. Error Handling
-
-Always handle authentication errors:
-
-```tsx
-const { error, isAuthenticated } = useAuth();
-
-useEffect(() => {
-  if (error) {
-    console.error("Auth error:", error);
-    // Show error to user or redirect to login
-  }
-}, [error]);
-```
-
-### 5. Token Refresh
-
-The SDK automatically refreshes tokens when expired:
-
-- Call `getAccessToken()` before each API call
-- The method handles refresh automatically
-- If refresh fails, the session is cleared
-
-## Troubleshooting
-
-### Deep Links Not Working
-
-**iOS**:
-
-- Check `Info.plist` for correct URL scheme
-- Restart Xcode after changes
-- Test with: `xcrun simctl openurl booted "com.yourapp://callback"`
-
-**Android**:
-
-- Check `AndroidManifest.xml` for intent filter
-- Verify `launchMode="singleTask"` is set
-- Test with: `adb shell am start -W -a android.intent.action.VIEW -d "com.yourapp://callback"`
-
-### Keychain Issues
-
-**iOS**:
-
-- Ensure Keychain Sharing is enabled in capabilities
-- Check that the app has proper entitlements
-
-**Android**:
-
-- Verify Keychain permissions in `AndroidManifest.xml`
-
-### InAppBrowser Issues
-
-**iOS**:
-
-- Ensure `SFSafariViewController` is available (iOS 9+)
-- Check that `ephemeralWebSession: false` is used for SSO
-
-**Android**:
-
-- Ensure Chrome Custom Tabs is available
-- Verify that Chrome is installed on the device
-
-## Audit Checklist
-
-When auditing this implementation:
-
-- [ ] Tokens stored in Keychain/Keystore (not AsyncStorage/SharedPreferences)
-- [ ] InAppBrowser used for authentication (not Linking.openURL)
-- [ ] PKCE with S256 enforced
-- [ ] State parameter validation implemented
-- [ ] JWT algorithm whitelisting (RS256/HS256)
-- [ ] CSPRNG for state/nonce generation
-- [ ] TLS enforcement
-- [ ] Deep link sanitization
-- [ ] Log redaction for tokens/secrets
-- [ ] Android launchMode="singleTask" configured
+- Tokens stored in iOS Keychain / Android Keystore (via `react-native-keychain`)
+- No AsyncStorage/SharedPreferences fallback
+- PKCE with S256 enforced
+- State parameter CSRF protection
+- Deep link sanitization and strict redirect URI matching
+- Android `launchMode="singleTask"` prevents task hijacking
 
 ## License
 
-MIT
+Apache-2.0

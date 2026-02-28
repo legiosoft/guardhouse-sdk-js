@@ -69,7 +69,7 @@ const audience = GH_AUDIENCE?.trim() || undefined;
 const authorizationEndpoint =
   GH_AUTHORIZATION_ENDPOINT?.trim() || "/connect/authorize";
 const registrationEndpoint =
-  GH_REGISTRATION_ENDPOINT?.trim() || "/account/signup";
+  GH_REGISTRATION_ENDPOINT?.trim() || "/account/signup?returnUrl=";
 const tokenEndpoint = GH_TOKEN_ENDPOINT?.trim() || "/connect/token";
 const revocationEndpoint =
   GH_REVOCATION_ENDPOINT?.trim() || "/connect/revocation";

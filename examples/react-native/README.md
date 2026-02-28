@@ -1,18 +1,17 @@
-# Expo React Native Example
+# React Native Example
 
-This example app demonstrates `@guardhouse/react-native` in an Expo SDK 54+ project with OAuth 2.0 Authorization Code + PKCE, secure storage, and API calls.
+This example demonstrates `@guardhouse/react-native` with a direct `GuardhouseClient` integration (no provider/hook wrapper).
 
-`src/cryptoAdapter.ts` is copy-ready and shows how to provide Expo native crypto to `GuardhouseProvider` via `cryptoAdapter`.
+It includes:
 
-## Features
+- OAuth Authorization Code + PKCE login
+- Browser registration flow with `returnUrl` handoff
+- Passkey login
+- Refresh/logout
+- Deep-link callback handling
+- Expo browser + secure storage adapters
 
-- Login/logout with Guardhouse
-- Token storage in secure storage (via SDK)
-- Protected screen and API demo screen
-- Environment-based config via `.env`
-- Expo development workflow (`expo run:*` + Metro)
-
-## Setup
+## Quick start
 
 1. Copy env template:
 
@@ -20,15 +19,18 @@ This example app demonstrates `@guardhouse/react-native` in an Expo SDK 54+ proj
 cp .env.example .env
 ```
 
-2. Fill `.env` with your test identity server values:
+2. Fill `.env` with your Guardhouse values.
+
+Minimum values:
 
 ```env
-GH_AUTHORITY=https://your-test-identity-server
+GH_AUTHORITY=https://your-guardhouse-domain.com
 GH_CLIENT_ID=your-client-id
 GH_REDIRECT_URI=com.example.guardhouse://callback
-GH_SCOPE=openid profile email offline_access
-GH_API_BASE_URL_ANDROID=http://10.0.2.2:3001
-GH_API_BASE_URL_IOS=http://localhost:3001
+GH_AUTHORIZATION_ENDPOINT=/connect/authorize
+GH_REGISTRATION_ENDPOINT=/account/signup?returnUrl=
+GH_TOKEN_ENDPOINT=/connect/token
+GH_REVOCATION_ENDPOINT=/connect/revocation
 ```
 
 3. Install dependencies:
@@ -37,78 +39,59 @@ GH_API_BASE_URL_IOS=http://localhost:3001
 npm install
 ```
 
-The example intentionally includes all SDK runtime deps needed when using local `file:` packages in a monorepo (`@guardhouse/core`, `@noble/hashes`, `jwt-decode`, `react-native-keychain`, `react-native-inappbrowser-reborn`, `expo-dev-client`).
-
-4. Verify TypeScript:
+4. Typecheck:
 
 ```bash
 npm run typecheck
 ```
 
-## Run
-
-This example uses native modules (`react-native-keychain`, `react-native-inappbrowser-reborn`), so use an Expo development build (not Expo Go).
-
-If Expo Go prompts for Motion/Fitness permissions, that prompt is from Expo Go tooling and not required by this app. Run with a dev build (`npm run android` / `npm run ios`) to avoid Expo Go-specific behavior.
+5. Run:
 
 ```bash
 npm start
 ```
 
-Then in another terminal:
+## Registration `returnUrl` behavior
 
-- `npm run android`
-- `npm run ios`
+The example and SDK are configured so registration can start at:
 
-On first run, Expo will generate native projects via prebuild.
+`/account/signup?returnUrl=`
 
-## Copy-ready crypto setup
+The SDK detects the `returnUrl` query key and injects a full authorize URL into it. This keeps the flow inside the auth session and returns to your app deep link callback instead of leaving users in Safari.
 
-The example passes a native crypto adapter to the SDK:
+## Redirect URI modes
 
-- `examples/react-native/src/cryptoAdapter.ts`
-- `examples/react-native/App.tsx`
+- `GH_REDIRECT_URI=auto`
+  - Useful for Expo Go while iterating.
+- `GH_REDIRECT_URI=com.example.guardhouse://callback`
+  - Recommended for dev builds / production-style testing.
 
-This is the recommended pattern for Expo apps.
+Your app scheme is configured in `app.json`:
 
-## Optional explicit prebuild
+- `examples/react-native/app.json`
 
-```bash
-npm run prebuild
-```
+If you change the redirect URI scheme, update both `GH_REDIRECT_URI` and `app.json` to match.
 
-## Important platform config
+## Important runtime notes
 
-- **Android**: Expo prebuild creates native files. Confirm deep-link intent filters for your redirect URI if you customize package/scheme.
-- **iOS**: Expo prebuild creates native files. Confirm URL scheme if you customize bundle ID/scheme.
-
-Use the same scheme/host as `GH_REDIRECT_URI`.
+- Browser auth uses `examples/react-native/src/expoWebBrowserAdapter.ts` (`openAuthSessionAsync`).
+- Token/session storage adapters are wired in `examples/react-native/App.tsx`.
+- Main app flow is in `examples/react-native/App.tsx`.
 
 ## Troubleshooting
 
-- If login does nothing, check the error banner on the home screen.
-- If you see `Cannot read property 'setGenericPassswordForOptions' of null`, Keychain native module failed to initialize. The SDK now falls back to Expo SecureStore in this example. Rebuild the native app after dependency/plugin changes:
+- If registration/login opens external Safari and does not return:
+  - Ensure `GH_REGISTRATION_ENDPOINT` includes `?returnUrl=`.
+  - Ensure `GH_REDIRECT_URI` is registered and matches app scheme.
+  - Restart Metro with cache clear:
 
 ```bash
-npm run prebuild
-npm run ios
+npx expo start -c
 ```
 
-- If you see `SHA-256 is not available`, rebuild SDK packages and clear Metro cache:
+- If you changed local SDK/core code, rebuild from repo root before running example:
 
 ```bash
-cd ../../
 npm run build -w @guardhouse/core
 npm run build -w @guardhouse/react-native
-cd examples/react-native
-npm start -- --clear
 ```
-
-- If login browser does not open, make sure you are running a development build (`npm run ios` / `npm run android`) and not Expo Go.
-
-## API demo
-
-- Android emulator should use `GH_API_BASE_URL_ANDROID` (`10.0.2.2` for localhost).
-- iOS simulator should use `GH_API_BASE_URL_IOS` (`localhost` for local API).
-
-Run `examples/node` server to test protected API calls.

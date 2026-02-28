@@ -16,6 +16,19 @@
  */
 
 import type { CryptoAdapter, User as CoreUser } from "@guardhouse/core";
+import type { SessionStorageAdapter } from "./utils/storage";
+
+export interface AuthSessionResult {
+  url: string;
+}
+
+export interface AuthSessionAdapter {
+  name?: string;
+  openAuth: (
+    authorizationUrl: string,
+    redirectUri: string,
+  ) => Promise<AuthSessionResult>;
+}
 
 export interface GuardhouseConfig {
   authority: string;
@@ -28,6 +41,14 @@ export interface GuardhouseConfig {
   responseType?: string;
   logoutRedirectUri?: string;
   requireBiometrics?: boolean;
+  jwksUri?: string;
+  requiredAcrValues?: string[];
+  requiredAmrValues?: string[];
+  requireWebAuthn?: boolean;
+  requirePhishingResistantMfa?: boolean;
+  storageAdapter?: SessionStorageAdapter;
+  authSessionAdapter?: AuthSessionAdapter;
+  allowInsecureIdTokenValidation?: boolean;
 }
 
 export interface AppState {

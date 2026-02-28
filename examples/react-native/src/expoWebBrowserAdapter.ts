@@ -35,9 +35,12 @@ export const expoWebBrowserAdapter: GuardhouseBrowserAdapter = {
       authorizationUrl,
       callbackUri,
       {
-        preferEphemeralSession: options?.ephemeralSession ?? false,
+        preferEphemeralSession: options?.ephemeralSession ?? true,
         createTask: false,
         showInRecents: true,
+        presentationStyle: WebBrowser.WebBrowserPresentationStyle.FORM_SHEET,
+        toolbarColor: "#F2F2F7",
+        controlsColor: "#007AFF",
       },
     );
 

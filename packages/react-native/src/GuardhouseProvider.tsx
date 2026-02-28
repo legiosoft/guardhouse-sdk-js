@@ -45,29 +45,46 @@ import { Linking } from "react-native";
 import InAppBrowser from "react-native-inappbrowser-reborn";
 import * as GuardhouseCore from "@guardhouse/core";
 import {
-  decodeJWT,
   generateAuthUrl,
   generateNonce,
   generatePKCE,
   generateState,
-  validateToken,
 } from "@guardhouse/core";
 import type { CryptoAdapter, User as CoreUser } from "@guardhouse/core";
 import type {
   AuthState,
+  AuthSessionAdapter,
   TokenData,
   LoginOptions,
   LogoutOptions,
 } from "./types";
-import type { SessionData } from "./utils/storage";
+import type { SessionData, SessionStorageAdapter } from "./utils/storage";
 import {
   SecureStorage,
   PromiseLock,
   isTokenExpired,
   STORAGE_KEYS,
 } from "./utils/storage";
+import {
+  createRedirectUriDescriptor,
+  IdTokenValidator,
+  matchesRedirectUri,
+} from "./utils/idToken";
 import { createReactNativeLogger } from "./debug";
 import { resolveReactNativeCryptoAdapter } from "./crypto";
+
+function mapIdTokenPayloadToUser(payload: Record<string, unknown>): CoreUser {
+  const subject = typeof payload.sub === "string" ? payload.sub.trim() : "";
+
+  if (!subject) {
+    throw new Error("ID token payload is missing subject (sub) claim");
+  }
+
+  return {
+    ...(payload as CoreUser),
+    sub: subject,
+  };
+}
 
 interface AuthContextValue extends AuthState {
   login: (options?: LoginOptions) => Promise<void>;
@@ -85,6 +102,14 @@ interface GuardhouseProviderProps {
   scopes?: string[];
   cryptoAdapter?: CryptoAdapter;
   requireBiometrics?: boolean;
+  jwksUri?: string;
+  requiredAcrValues?: string[];
+  requiredAmrValues?: string[];
+  requireWebAuthn?: boolean;
+  requirePhishingResistantMfa?: boolean;
+  storageAdapter?: SessionStorageAdapter;
+  authSessionAdapter?: AuthSessionAdapter;
+  allowInsecureIdTokenValidation?: boolean;
   debug?: boolean;
   children: ReactNode;
 }
@@ -96,6 +121,14 @@ export function GuardhouseProvider({
   scopes = ["openid", "profile", "offline_access"],
   cryptoAdapter,
   requireBiometrics = false,
+  jwksUri,
+  requiredAcrValues,
+  requiredAmrValues,
+  requireWebAuthn = false,
+  requirePhishingResistantMfa = false,
+  storageAdapter,
+  authSessionAdapter,
+  allowInsecureIdTokenValidation = false,
   debug = false,
   children,
 }: GuardhouseProviderProps) {
@@ -108,16 +141,48 @@ export function GuardhouseProvider({
 
   const [accessToken, setAccessToken] = useState<string | null>(null);
 
-  const storage = useMemo(
-    () => new SecureStorage(requireBiometrics, debug),
-    [requireBiometrics, debug],
-  );
+  const storage = useMemo<SessionStorageAdapter>(() => {
+    if (storageAdapter) {
+      return storageAdapter;
+    }
+
+    return new SecureStorage(requireBiometrics, debug);
+  }, [storageAdapter, requireBiometrics, debug]);
   const logger = useMemo(
     () => createReactNativeLogger("Provider", debug),
     [debug],
   );
   const refreshLock = useRef(new PromiseLock(debug));
   const cryptoAdapterRef = useRef<CryptoAdapter | null>(null);
+  const redirectUriDescriptor = useMemo(
+    () => createRedirectUriDescriptor(redirectUri),
+    [redirectUri],
+  );
+  const idTokenValidator = useMemo(
+    () =>
+      new IdTokenValidator({
+        authority,
+        clientId,
+        jwksUri,
+        requiredAcrValues,
+        requiredAmrValues,
+        requireWebAuthn,
+        requirePhishingResistantMfa,
+        allowInsecureIdTokenValidation,
+        debug,
+      }),
+    [
+      authority,
+      clientId,
+      jwksUri,
+      requiredAcrValues,
+      requiredAmrValues,
+      requireWebAuthn,
+      requirePhishingResistantMfa,
+      allowInsecureIdTokenValidation,
+      debug,
+    ],
+  );
 
   const getCryptoAdapter = useCallback((): CryptoAdapter => {
     if (cryptoAdapter) {
@@ -238,7 +303,7 @@ export function GuardhouseProvider({
 
       // Session is valid, restore state
       setAccessToken(session.accessToken);
-      handleSuccess(session.user, {
+      handleSuccess(session.user as CoreUser, {
         access_token: session.accessToken,
         refresh_token: session.refreshToken,
         id_token: session.idToken,
@@ -292,8 +357,6 @@ export function GuardhouseProvider({
         "InAppBrowser unavailable; falling back to external browser deep link flow",
       );
 
-      const redirectPrefix = redirectUri;
-
       return new Promise((resolve, reject) => {
         let settled = false;
 
@@ -336,11 +399,13 @@ export function GuardhouseProvider({
         };
 
         const subscription = Linking.addEventListener("url", ({ url }) => {
-          if (!url.startsWith(redirectPrefix)) {
+          if (!matchesRedirectUri(url, redirectUriDescriptor)) {
             logger.debug(
               "Ignoring unrelated deep link while waiting for auth",
               {
-                redirectPrefix,
+                expectedProtocol: redirectUriDescriptor.protocol,
+                expectedHost: redirectUriDescriptor.hostname,
+                expectedPath: redirectUriDescriptor.pathname,
               },
             );
             return;
@@ -363,7 +428,7 @@ export function GuardhouseProvider({
         });
       });
     },
-    [redirectUri, logger],
+    [logger, redirectUriDescriptor],
   );
 
   const openAuthSession = useCallback(
@@ -371,7 +436,45 @@ export function GuardhouseProvider({
       logger.info("Opening auth session");
 
       try {
-        const inAppBrowserAvailable = await InAppBrowser.isAvailable();
+        if (authSessionAdapter) {
+          logger.debug("Opening auth session with custom adapter", {
+            adapterName: authSessionAdapter.name || "custom",
+          });
+
+          const adapterResult = await authSessionAdapter.openAuth(
+            url,
+            redirectUri,
+          );
+
+          if (!adapterResult || typeof adapterResult.url !== "string") {
+            throw new Error(
+              "Custom auth session adapter returned an invalid response",
+            );
+          }
+
+          if (!matchesRedirectUri(adapterResult.url, redirectUriDescriptor)) {
+            throw new Error(
+              "Authentication callback URL does not match the configured redirect URI",
+            );
+          }
+
+          return { url: adapterResult.url };
+        }
+
+        let inAppBrowserAvailable = false;
+
+        try {
+          inAppBrowserAvailable = await InAppBrowser.isAvailable();
+        } catch (inAppBrowserError) {
+          logger.warn(
+            "InAppBrowser module unavailable; using external browser deep link flow",
+            {
+              error: String(inAppBrowserError),
+            },
+          );
+
+          return openExternalAuthSession(url);
+        }
 
         if (!inAppBrowserAvailable) {
           return openExternalAuthSession(url);
@@ -394,6 +497,12 @@ export function GuardhouseProvider({
         }
 
         if (result.type === "success" && result.url) {
+          if (!matchesRedirectUri(result.url, redirectUriDescriptor)) {
+            throw new Error(
+              "Authentication callback URL does not match the configured redirect URI",
+            );
+          }
+
           return { url: result.url };
         }
 
@@ -403,7 +512,13 @@ export function GuardhouseProvider({
         throw error;
       }
     },
-    [redirectUri, logger, openExternalAuthSession],
+    [
+      authSessionAdapter,
+      redirectUri,
+      logger,
+      openExternalAuthSession,
+      redirectUriDescriptor,
+    ],
   );
 
   /**
@@ -415,8 +530,16 @@ export function GuardhouseProvider({
    */
   const handleAuthCallback = useCallback(
     async (callbackUrl: string): Promise<void> => {
+      let sessionEstablished = false;
+
       try {
         handleLoading();
+
+        if (!matchesRedirectUri(callbackUrl, redirectUriDescriptor)) {
+          throw new Error(
+            "Authentication callback URL does not match the configured redirect URI",
+          );
+        }
 
         logger.debug("Handling OAuth callback", {
           callbackOrigin: new URL(callbackUrl).origin,
@@ -493,35 +616,56 @@ export function GuardhouseProvider({
           hasIdToken: Boolean(tokenData.id_token),
         });
 
-        if (tokenData.id_token && nonce) {
-          const decodedIdToken = decodeJWT(tokenData.id_token);
-          const validation = validateToken(decodedIdToken, {
-            issuer: authority,
-            audience: clientId,
-            nonce,
-          });
-
-          if (!validation.valid) {
-            throw new Error(
-              `ID token validation failed: ${validation.errors.join(", ")}`,
-            );
-          }
+        if (!tokenData.id_token) {
+          throw new Error(
+            "Token response did not include id_token; cannot establish a verified OIDC session",
+          );
         }
+
+        if (!nonce) {
+          throw new Error("Nonce not found in secure storage");
+        }
+
+        const decodedIdToken = await idTokenValidator.validate(
+          tokenData.id_token,
+          nonce,
+        );
 
         const expiresAt = Math.floor(Date.now() / 1000) + tokenData.expires_in;
 
-        // Save session data to secure storage
+        // Resolve user profile
         const userResponse = await fetch(`${authority}/connect/userinfo`, {
           headers: {
             Authorization: `Bearer ${tokenData.access_token}`,
           },
         });
 
-        if (!userResponse.ok) {
-          logger.warn("Failed to fetch user info");
-        }
+        let userData: CoreUser;
 
-        const userData = await userResponse.json();
+        if (userResponse.ok) {
+          userData = (await userResponse.json()) as CoreUser;
+
+          if (
+            typeof decodedIdToken.payload.sub === "string" &&
+            decodedIdToken.payload.sub.trim() !== "" &&
+            userData.sub !== decodedIdToken.payload.sub
+          ) {
+            throw new Error(
+              "UserInfo response subject does not match verified ID token subject",
+            );
+          }
+        } else {
+          const errorText = await userResponse.text();
+          logger.warn(
+            "UserInfo request failed; falling back to ID token claims",
+            {
+              status: userResponse.status,
+              error: errorText,
+            },
+          );
+
+          userData = mapIdTokenPayloadToUser(decodedIdToken.payload);
+        }
 
         const sessionData: SessionData = {
           accessToken: tokenData.access_token,
@@ -538,42 +682,57 @@ export function GuardhouseProvider({
         });
 
         handleSuccess(userData, tokenData);
+        sessionEstablished = true;
 
         // Handle app state (returnTo after login)
         const appStateStr = await storage.getItem(STORAGE_KEYS.APP_STATE);
         if (appStateStr) {
           await storage.removeItem(STORAGE_KEYS.APP_STATE);
 
-          const appState = JSON.parse(appStateStr);
-          if (appState?.returnTo) {
-            logger.debug("Handling post-login app state redirect", {
-              returnTo: appState.returnTo,
-            });
-            const returnUrl = new URL(appState.returnTo);
-            if (await Linking.canOpenURL(returnUrl.toString())) {
-              await Linking.openURL(returnUrl.toString());
+          try {
+            const appState = JSON.parse(appStateStr);
+            if (appState?.returnTo) {
+              logger.debug("Handling post-login app state redirect", {
+                returnTo: appState.returnTo,
+              });
+              const returnUrl = new URL(appState.returnTo);
+              if (await Linking.canOpenURL(returnUrl.toString())) {
+                await Linking.openURL(returnUrl.toString());
+              }
             }
+          } catch (appStateError) {
+            logger.warn(
+              "Invalid app state payload; skipping returnTo redirect",
+              {
+                error: String(appStateError),
+              },
+            );
           }
         }
       } catch (error) {
         logger.error("Auth callback handling failed", {
           error: String(error),
         });
-        handleError(
-          error instanceof Error ? error.message : "Unknown error occurred",
-        );
-        await clearAuthState();
+
+        if (!sessionEstablished) {
+          handleError(
+            error instanceof Error ? error.message : "Unknown error occurred",
+          );
+          await clearAuthState();
+        }
       }
     },
     [
       authority,
       clientId,
       redirectUri,
+      redirectUriDescriptor,
       storage,
       handleLoading,
       handleError,
       handleSuccess,
       clearAuthState,
+      idTokenValidator,
       logger,
     ],
   );
@@ -634,7 +793,12 @@ export function GuardhouseProvider({
           debug,
           responseType: "code",
           scope,
+          audience: options?.audience,
+          allowAuthorizationWithoutAudience: true,
+          allowOfflineAccessScope: true,
           state,
+          nonce,
+          prompt: options?.prompt,
           codeChallenge,
           codeChallengeMethod: "S256", // Enforce S256 (no plain text)
         });
@@ -800,6 +964,10 @@ export function GuardhouseProvider({
         const newExpiresAt =
           Math.floor(Date.now() / 1000) + tokenData.expires_in;
 
+        if (tokenData.id_token) {
+          await idTokenValidator.validate(tokenData.id_token);
+        }
+
         // Save new tokens to secure storage
         await storage.saveSession({
           accessToken: tokenData.access_token,
@@ -832,7 +1000,15 @@ export function GuardhouseProvider({
         return null;
       }
     });
-  }, [authority, clientId, storage, clearAuthState, debug, logger]);
+  }, [
+    authority,
+    clientId,
+    storage,
+    clearAuthState,
+    debug,
+    idTokenValidator,
+    logger,
+  ]);
 
   const contextValue: AuthContextValue = {
     ...state,

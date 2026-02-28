@@ -6,14 +6,13 @@ import {
   TouchableOpacity,
   ScrollView,
   ActivityIndicator,
-  Alert,
   Platform,
+  TextInput,
 } from "react-native";
-import { useAuth } from "@guardhouse/react-native";
 import { appConfig } from "../config";
 
 function ApiDemoScreen({ navigation }: any) {
-  const { getAccessToken, user } = useAuth();
+  const [accessToken, setAccessToken] = useState("");
   const [result, setResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -24,15 +23,13 @@ function ApiDemoScreen({ navigation }: any) {
     setResult(null);
 
     try {
-      const token = await getAccessToken();
-
-      if (!token) {
+      if (accessToken.trim() === "") {
         throw new Error("No access token available");
       }
 
       const response = await fetch(`${appConfig.apiBaseUrl}/protected`, {
         headers: {
-          Authorization: `Bearer ${token}`,
+          Authorization: `Bearer ${accessToken.trim()}`,
         },
       });
 
@@ -44,10 +41,6 @@ function ApiDemoScreen({ navigation }: any) {
       setResult(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
-      Alert.alert(
-        "Error",
-        err instanceof Error ? err.message : "Unknown error",
-      );
     } finally {
       setLoading(false);
     }
@@ -58,42 +51,51 @@ function ApiDemoScreen({ navigation }: any) {
       <View style={styles.content}>
         <Text style={styles.title}>API Demo</Text>
 
-        {user ? (
-          <>
-            <Text style={styles.subtitle}>
-              Test authentication by calling a protected API endpoint.
+        <Text style={styles.subtitle}>
+          Paste an access token from the main App.tsx flow and call the
+          protected endpoint manually.
+        </Text>
+
+        <View style={styles.tokenInputContainer}>
+          <Text style={styles.tokenLabel}>Access Token</Text>
+          <TextInput
+            style={styles.tokenInput}
+            value={accessToken}
+            onChangeText={setAccessToken}
+            autoCapitalize="none"
+            autoCorrect={false}
+            placeholder="Paste access token"
+            placeholderTextColor="#666"
+            multiline
+          />
+        </View>
+
+        <TouchableOpacity
+          style={[styles.button, loading && styles.buttonDisabled]}
+          onPress={fetchProtectedData}
+          disabled={loading}
+        >
+          {loading ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Text style={styles.buttonText}>Fetch Protected Data</Text>
+          )}
+        </TouchableOpacity>
+
+        {error && (
+          <View style={styles.errorContainer}>
+            <Text style={styles.errorTitle}>Error:</Text>
+            <Text style={styles.errorText}>{error}</Text>
+          </View>
+        )}
+
+        {result && (
+          <View style={styles.resultContainer}>
+            <Text style={styles.resultTitle}>Response:</Text>
+            <Text style={styles.resultText}>
+              {JSON.stringify(result, null, 2)}
             </Text>
-
-            <TouchableOpacity
-              style={[styles.button, loading && styles.buttonDisabled]}
-              onPress={fetchProtectedData}
-              disabled={loading}
-            >
-              {loading ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <Text style={styles.buttonText}>Fetch Protected Data</Text>
-              )}
-            </TouchableOpacity>
-
-            {error && (
-              <View style={styles.errorContainer}>
-                <Text style={styles.errorTitle}>Error:</Text>
-                <Text style={styles.errorText}>{error}</Text>
-              </View>
-            )}
-
-            {result && (
-              <View style={styles.resultContainer}>
-                <Text style={styles.resultTitle}>Response:</Text>
-                <Text style={styles.resultText}>
-                  {JSON.stringify(result, null, 2)}
-                </Text>
-              </View>
-            )}
-          </>
-        ) : (
-          <Text style={styles.subtitle}>Please log in to use API demo.</Text>
+          </View>
         )}
 
         <TouchableOpacity
@@ -129,6 +131,24 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: "#888",
     marginBottom: 20,
+  },
+  tokenInputContainer: {
+    backgroundColor: "#1a1a1a",
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#333",
+    padding: 12,
+    marginBottom: 12,
+  },
+  tokenLabel: {
+    fontSize: 12,
+    color: "#888",
+    marginBottom: 6,
+  },
+  tokenInput: {
+    color: "#ddd",
+    fontSize: 12,
+    fontFamily: "monospace",
   },
   button: {
     backgroundColor: "#646cff",
