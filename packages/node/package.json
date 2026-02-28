@@ -13,7 +13,10 @@
     "oidc",
     "jwt",
     "authentication",
-    "authorization"
+    "authorization",
+    "jwks",
+    "api",
+    "rest"
   ],
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -47,8 +50,7 @@
   "dependencies": {
     "@guardhouse/core": "1.0.0",
     "jsonwebtoken": "9.0.2",
-    "jwks-rsa": "3.1.0",
-    "react-native": "0.75.5"
+    "jwks-rsa": "3.1.0"
   },
   "peerDependencies": {
     "express": "^4.22.1"
