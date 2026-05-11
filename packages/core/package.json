@@ -1,6 +1,6 @@
 {
   "name": "@guardhouse/core",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Universal JavaScript/TypeScript SDK for OAuth 2.0 with PKCE",
   "keywords": [
     "guardhouse",

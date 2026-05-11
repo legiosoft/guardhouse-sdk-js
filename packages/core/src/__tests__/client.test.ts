@@ -1,5 +1,6 @@
 import { GuardhouseClient } from "../client";
 import { GuardhouseError } from "../config";
+import { generateState } from "../pkce";
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -1759,15 +1760,30 @@ describe("GuardhouseClient", () => {
 
     expect(() =>
       client.buildLogoutUrl({
-        state: "invalid_state",
+        state: "invalid.state",
       }),
-    ).toThrow("letters, numbers, and hyphens");
+    ).toThrow("letters, numbers, hyphens, and underscores");
 
     expect(() =>
       client.buildLogoutUrl({
         state: "a".repeat(129),
       }),
     ).toThrow("1-128 characters");
+  });
+
+  it("accepts SDK-generated Base64URL logout state values", async () => {
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+
+    const generatedState = await generateState(18);
+    const logoutUrl = client.buildLogoutUrl({
+      state: generatedState,
+    });
+
+    const parsed = new URL(logoutUrl);
+    expect(parsed.searchParams.get("state")).toBe(generatedState);
   });
 
   it("rejects id_token_hint on non-HTTPS authorities", () => {

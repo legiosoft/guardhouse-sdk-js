@@ -1,6 +1,6 @@
 {
   "name": "@guardhouse/react-native",
-  "version": "1.0.0-beta.1",
+  "version": "1.0.0-beta.2",
   "description": "React Native SDK for Guardhouse OAuth PKCE, passkey auth, and secure token lifecycle",
   "keywords": [
     "guardhouse",
@@ -54,7 +54,7 @@
     "format": "prettier --write \"src/**/*.{ts,tsx,md,json}\""
   },
   "dependencies": {
-    "@guardhouse/core": "1.0.0",
+    "@guardhouse/core": "1.0.1",
     "jwt-decode": "^4.0.0",
     "react-native-inappbrowser-reborn": "^3.7.0",
     "react-native-keychain": "^10.0.0",

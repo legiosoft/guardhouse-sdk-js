@@ -1,6 +1,6 @@
 {
   "name": "@guardhouse/react",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Frontend SDK for React 18+ with hooks and protected routes",
   "keywords": [
     "guardhouse",
@@ -42,7 +42,7 @@
     "format": "prettier --write \"src/**/*.{ts,tsx,md,json}\""
   },
   "dependencies": {
-    "@guardhouse/core": "1.0.0"
+    "@guardhouse/core": "1.0.1"
   },
   "peerDependencies": {
     "react": ">=18.0.0"

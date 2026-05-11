@@ -37,6 +37,7 @@ const FORBIDDEN_REDIRECT_URI_CHARS = new Set([
   "\r",
   "\n",
 ]);
+const LOGOUT_STATE_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 export class GuardhouseClientAdvanced extends GuardhouseClientToken {
   private readonly discoveryCacheContext = new Map<
@@ -316,12 +317,11 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
         "state",
       );
 
-      if (
-        normalizedState.length > 128 ||
-        !/^[A-Za-z0-9-]+$/.test(normalizedState)
-      ) {
+      // Align logout state validation with the SDK's Base64URL-safe state
+      // generation while still enforcing a strict, URI-safe allowlist.
+      if (normalizedState.length > 128 || !LOGOUT_STATE_PATTERN.test(normalizedState)) {
         throw new GuardhouseError(
-          "state must be 1-128 characters and contain only letters, numbers, and hyphens",
+          "state must be 1-128 characters and contain only letters, numbers, hyphens, and underscores",
           "INVALID_REQUEST",
         );
       }
