@@ -80,6 +80,11 @@ body {
   color: #fff;
 }
 
+.card h3 {
+  margin-top: 0;
+  color: #fff;
+}
+
 .button {
   background: #646cff;
   color: white;
@@ -134,6 +139,84 @@ body {
   word-break: break-all;
 }
 
+.profile-header {
+  display: flex;
+  gap: 1.5rem;
+  align-items: center;
+  margin-bottom: 2rem;
+}
+
+.profile-avatar {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #646cff, #4f46e5);
+  color: #fff;
+  font-size: 2rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.avatar-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.profile-summary {
+  min-width: 0;
+}
+
+.profile-summary h2 {
+  margin-bottom: 0.5rem;
+}
+
+.profile-name {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #fff;
+}
+
+.profile-subtitle {
+  margin: 0.35rem 0 0;
+  color: #aaa;
+}
+
+.claims-section {
+  margin-top: 2rem;
+}
+
+.claims-list {
+  display: grid;
+  gap: 1rem;
+}
+
+.claim-row {
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #242424;
+  padding: 1rem;
+}
+
+.claim-key {
+  color: #888;
+  font-size: 0.875rem;
+  margin-bottom: 0.5rem;
+}
+
+.claim-value {
+  margin: 0;
+  color: #fff;
+  font-family: monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .error {
   background: #2a0a0a;
   border: 1px solid #a00;
@@ -167,5 +250,25 @@ body {
   }
   100% {
     transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 640px) {
+  .header-content,
+  .profile-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .nav-links {
+    flex-wrap: wrap;
+  }
+
+  .container {
+    padding: 1rem;
+  }
+
+  .card {
+    padding: 1.25rem;
   }
 }

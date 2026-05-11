@@ -6,10 +6,14 @@ const runtimeOrigin =
 
 const authority =
   import.meta.env.VITE_AUTHORITY?.trim() || "https://auth.example.com";
+const normalizedAuthority = authority.replace(/\/+$/, "");
 const clientId = import.meta.env.VITE_CLIENT_ID?.trim() || "your-client-id";
 const redirectUri = import.meta.env.VITE_REDIRECT_URI?.trim() || runtimeOrigin;
 const postLogoutRedirectUri =
   import.meta.env.VITE_POST_LOGOUT_REDIRECT_URI?.trim() || redirectUri;
+const userInfoEndpoint =
+  import.meta.env.VITE_USERINFO_ENDPOINT?.trim() ||
+  `${normalizedAuthority}/connect/userinfo`;
 const apiServerUrl = (
   import.meta.env.VITE_API_SERVER_URL?.trim() ||
   import.meta.env.VITE_API_BASE_URL?.trim() ||
@@ -34,6 +38,7 @@ export const appConfig = {
   clientId,
   redirectUri,
   postLogoutRedirectUri,
+  userInfoEndpoint,
   scope,
   audience,
   allowAuthorizationWithoutAudience,

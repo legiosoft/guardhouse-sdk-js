@@ -30,6 +30,7 @@ export interface User {
   sub: string;
   name?: string;
   email?: string;
+  picture?: string;
   roles?: string[];
   scopes?: string[];
   [key: string]: unknown;

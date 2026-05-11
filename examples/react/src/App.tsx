@@ -10,6 +10,45 @@ import type { AppState } from "@guardhouse/react";
 import { useEffect, useMemo, useState } from "react";
 import { appConfig } from "./config";
 
+type ProfileUser = {
+  sub: string;
+  name?: string;
+  email?: string;
+  picture?: string;
+  roles?: string[];
+  scopes?: string[];
+  [key: string]: unknown;
+};
+
+function getInitials(user: ProfileUser | null | undefined) {
+  const name = typeof user?.name === "string" ? user.name.trim() : "";
+  const email = typeof user?.email === "string" ? user.email.trim() : "";
+  const source = name || email || "User";
+
+  return source
+    .split(/[\s@._-]+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? "")
+    .join("");
+}
+
+function formatUserField(value: unknown) {
+  if (value == null || value === "") {
+    return "N/A";
+  }
+
+  if (Array.isArray(value)) {
+    return value.length > 0 ? value.join(", ") : "N/A";
+  }
+
+  if (typeof value === "object") {
+    return JSON.stringify(value, null, 2);
+  }
+
+  return String(value);
+}
+
 function Home() {
   const { user, isAuthenticated, isLoading, error, loginWithRedirect, logout } =
     useAuth();
@@ -161,6 +200,189 @@ function ProtectedPage() {
   );
 }
 
+function UserInfoPage() {
+  const {
+    user,
+    isAuthenticated,
+    isLoading,
+    error,
+    loginWithRedirect,
+    getAccessToken,
+  } = useAuth();
+  const [profile, setProfile] = useState<ProfileUser | null>(null);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [isProfileLoading, setIsProfileLoading] = useState(false);
+
+  useEffect(() => {
+    if (!isAuthenticated || !user) {
+      setProfile(null);
+      setProfileError(null);
+      setIsProfileLoading(false);
+      return;
+    }
+
+    let isMounted = true;
+
+    const loadProfile = async () => {
+      setIsProfileLoading(true);
+      setProfileError(null);
+
+      try {
+        const token = await getAccessToken();
+
+        if (!token) {
+          throw new Error("No access token available");
+        }
+
+        const response = await fetch(appConfig.userInfoEndpoint, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: "application/json",
+          },
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const data = (await response.json()) as ProfileUser;
+
+        if (!data.sub) {
+          throw new Error("UserInfo response does not include subject");
+        }
+
+        if (isMounted) {
+          setProfile(data);
+        }
+      } catch (err) {
+        if (isMounted) {
+          setProfile(null);
+          setProfileError(
+            err instanceof Error ? err.message : "Failed to load user info",
+          );
+        }
+      } finally {
+        if (isMounted) {
+          setIsProfileLoading(false);
+        }
+      }
+    };
+
+    void loadProfile();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [getAccessToken, isAuthenticated, user]);
+
+  if (isLoading) {
+    return (
+      <div className="loading">
+        <div className="spinner"></div>
+        Loading...
+      </div>
+    );
+  }
+
+  if (!isAuthenticated || !user) {
+    return (
+      <div className="card">
+        <h2>User Info</h2>
+        <p>You need to log in to view your profile information.</p>
+        <button
+          className="button"
+          onClick={() =>
+            void loginWithRedirect({
+              appState: { returnTo: "/userinfo" },
+              scope: appConfig.scope,
+              audience: appConfig.audience,
+            })
+          }
+        >
+          Login
+        </button>
+      </div>
+    );
+  }
+
+  const displayedUser = profile ?? user;
+  const primaryFields = [
+    ["Subject", displayedUser.sub],
+    ["Name", displayedUser.name],
+    ["Email", displayedUser.email],
+    ["Roles", displayedUser.roles],
+    ["Scopes", displayedUser.scopes],
+  ] as const;
+
+  const extraFields = Object.entries(displayedUser).filter(
+    ([key]) =>
+      !["sub", "name", "email", "roles", "scopes", "picture"].includes(key),
+  );
+
+  const avatarUrl =
+    typeof displayedUser.picture === "string" ? displayedUser.picture : null;
+
+  return (
+    <div className="card">
+      <div className="profile-header">
+        <div className="profile-avatar">
+          {avatarUrl ? (
+            <img src={avatarUrl} alt="User avatar" className="avatar-image" />
+          ) : (
+            <span>{getInitials(user)}</span>
+          )}
+        </div>
+
+        <div className="profile-summary">
+          <h2>User Info</h2>
+          <p className="profile-name">
+            {displayedUser.name || displayedUser.email || displayedUser.sub}
+          </p>
+          <p className="profile-subtitle">
+            Profile data is loaded from the identity server UserInfo endpoint.
+          </p>
+        </div>
+      </div>
+
+      {(error || profileError) && (
+        <div className="error">
+          <strong>Error:</strong> {profileError || error}
+        </div>
+      )}
+
+      {isProfileLoading && (
+        <div className="loading">
+          <div className="spinner"></div>
+          Loading user info...
+        </div>
+      )}
+
+      <div className="info-grid">
+        {primaryFields.map(([label, value]) => (
+          <div className="info-item" key={label}>
+            <div className="info-label">{label}</div>
+            <div className="info-value">{formatUserField(value)}</div>
+          </div>
+        ))}
+      </div>
+
+      {extraFields.length > 0 && (
+        <div className="claims-section">
+          <h3>Additional Claims</h3>
+          <div className="claims-list">
+            {extraFields.map(([key, value]) => (
+              <div className="claim-row" key={key}>
+                <div className="claim-key">{key}</div>
+                <pre className="claim-value">{formatUserField(value)}</pre>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ApiDemo() {
   const { getAccessToken, user } = useAuth();
   const [result, setResult] = useState<unknown>(null);
@@ -308,6 +530,7 @@ function App() {
       authority: appConfig.authority,
       clientId: appConfig.clientId,
       redirectUri: appConfig.redirectUri,
+      userInfoEndpoint: appConfig.userInfoEndpoint,
       scope: appConfig.scope,
       audience: appConfig.audience,
       allowAuthorizationWithoutAudience:
@@ -330,6 +553,7 @@ function App() {
             <nav className="nav-links">
               <Link to="/">Home</Link>
               <Link to="/protected">Protected</Link>
+              <Link to="/userinfo">User Info</Link>
               <Link to="/api">API Demo</Link>
             </nav>
           </div>
@@ -340,6 +564,7 @@ function App() {
             <Route path="/" element={<Home />} />
             <Route path="/callback" element={<CallbackPage />} />
             <Route path="/protected" element={<ProtectedPage />} />
+            <Route path="/userinfo" element={<UserInfoPage />} />
             <Route path="/api" element={<ApiDemo />} />
           </Routes>
         </div>
