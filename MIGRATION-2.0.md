@@ -351,6 +351,22 @@ token must not be reused.
 OAuth-only exchanges and refreshes reject an unexpected ID token. Refresh scope
 may narrow but must not escalate beyond the previously granted scope.
 
+Core refresh methods now accept additive typed `scope` and `audience` options.
+To request a scope, supply `grantedScope` as the previous grant and `scope` as its
+desired subset. Reserved fields remain blocked in `requestParameters`. If the
+response omits scope after an explicit request, Core returns and caches the sent
+scope; existing Core calls without these fields retain their previous behavior.
+The audience extension does not change ID-token audience verification.
+
+Native now sends its effective scope on every refresh: the override, or the
+saved grant when the override is absent/blank. This also preserves narrowed
+scopes on later automatic refreshes and cold starts. It uses the new Core fields
+for scope/audience, so release and install compatible Core/Native versions
+together. Concurrent Native refreshes with different scope options or audience
+reject with `REFRESH_OPERATION_CONFLICT`; callers should await the active refresh
+before retrying. Identical options still share one refresh operation. No retry
+is automatically performed, and signature/identity validation stays unchanged.
+
 ## Discovery-Driven PAR, Registration, and Logout
 
 PAR, dynamic client registration, and logout no longer fall back to hardcoded

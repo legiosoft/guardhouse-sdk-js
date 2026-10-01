@@ -126,7 +126,13 @@ export type AuthorizationCodeExchangeResult =
     };
 
 export interface RefreshOAuthTokenOptions {
+  /** Previously granted scope. Required when requesting an explicit scope. */
   grantedScope?: string;
+  /** Scope to request; may keep or narrow grantedScope, never expand it. */
+  scope?: string;
+  /** Optional token-endpoint audience extension, not an ID-token audience override. */
+  audience?: string;
+  /** Extension parameters only; reserved protocol fields cannot be overridden here. */
   requestParameters?: Record<string, string>;
 }
 

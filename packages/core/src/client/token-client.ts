@@ -216,7 +216,8 @@ export class GuardhouseClientToken extends GuardhouseClientSession {
     refreshToken: string,
     params: Record<string, string> = {},
     validationContext?: IdTokenValidationContext,
-    requestedScopeOverride?: string,
+    grantedScope?: string,
+    requestOptions: Pick<RefreshOAuthTokenOptions, "scope" | "audience"> = {},
   ): Promise<{ tokens: TokenResponse; idToken?: VerifiedIdToken }> {
     const normalizedRefreshToken = this.requireNonEmptyString(
       refreshToken,
@@ -229,6 +230,39 @@ export class GuardhouseClientToken extends GuardhouseClientSession {
         "INVALID_REQUEST",
       );
     }
+
+    // Reserved protocol fields enter through typed options, never extensions.
+    const protocolParams: Record<string, string> = {};
+    for (const name of ["scope", "audience"] as const) {
+      if (requestOptions[name] === undefined) continue;
+      const value = this.requireNonEmptyString(requestOptions[name], name);
+      if (value.length > MAX_TOKEN_PARAM_VALUE_LENGTH) {
+        throw new GuardhouseError(
+          `${name} exceeds maximum allowed length (${MAX_TOKEN_PARAM_VALUE_LENGTH})`,
+          "INVALID_REQUEST",
+        );
+      }
+      protocolParams[name] = value;
+    }
+    if (protocolParams.scope !== undefined) {
+      const granted = this.parseRequestedScope(grantedScope);
+      if (granted.size === 0) {
+        throw new GuardhouseError(
+          "grantedScope is required when requesting a refresh scope",
+          "INVALID_REQUEST",
+        );
+      }
+      const requested = this.parseRequestedScope(protocolParams.scope);
+      if ([...requested].some((scope) => !granted.has(scope))) {
+        throw new GuardhouseError(
+          "Refresh scope exceeds the previously granted scope",
+          "SCOPE_ESCALATION_DETECTED",
+        );
+      }
+      protocolParams.scope = [...requested].join(" ");
+    }
+    const effectiveScope =
+      protocolParams.scope ?? grantedScope ?? this.config.scope;
 
     const { safeParams, blockedKeys } = this.sanitizeTokenBodyParams(params);
 
@@ -250,11 +284,13 @@ export class GuardhouseClientToken extends GuardhouseClientSession {
     for (const key of Object.keys(safeParams).sort()) {
       body.set(key, safeParams[key]);
     }
+    for (const [key, value] of Object.entries(protocolParams))
+      body.set(key, value);
 
     const operationKey = this.createRefreshOperationKey(
       body,
       validationContext,
-      requestedScopeOverride ?? this.config.scope,
+      effectiveScope,
     );
     const activeRefreshOperation = this.activeRefreshOperation;
 
@@ -273,7 +309,7 @@ export class GuardhouseClientToken extends GuardhouseClientSession {
     const sessionOperationGeneration = this.captureSessionOperation();
     const refreshPromise = this.executeRefreshTokenRequest(
       body,
-      requestedScopeOverride ?? this.config.scope,
+      effectiveScope,
       validationContext,
       sessionOperationGeneration,
     );
@@ -317,7 +353,13 @@ export class GuardhouseClientToken extends GuardhouseClientSession {
         },
         body: body.toString(),
       });
-      const tokenResponse = this.decodeTokenResponse(response.data);
+      const decodedTokens = this.decodeTokenResponse(response.data);
+      // RFC 6749 section 5.1: omitted response scope equals the requested scope.
+      const sentScope = body.get("scope");
+      const tokenResponse =
+        decodedTokens.scope === undefined && sentScope !== null
+          ? { ...decodedTokens, scope: sentScope }
+          : decodedTokens;
       this.assertNoScopeEscalation(requestedScope, tokenResponse.scope);
 
       let replacementIdToken: VerifiedIdToken | undefined;
@@ -425,6 +467,7 @@ export class GuardhouseClientToken extends GuardhouseClientSession {
       options.requestParameters ?? {},
       undefined,
       options.grantedScope,
+      options,
     );
     if (result.tokens.id_token) {
       throw new GuardhouseError(
@@ -470,6 +513,7 @@ export class GuardhouseClientToken extends GuardhouseClientSession {
       options.requestParameters ?? {},
       context,
       options.grantedScope,
+      options,
     );
     if (result.idToken) {
       return {

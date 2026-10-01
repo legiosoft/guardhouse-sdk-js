@@ -130,6 +130,22 @@ async function exercisePublicFlow(): Promise<void> {
   const refreshed = await client.refreshOidcSession("refresh-token", {
     previousIdToken: "signed-id-token",
   });
+  await client.refreshOidcSession("refresh-token", {
+    previousIdToken: "signed-id-token",
+    grantedScope: "openid profile offline_access",
+    scope: "openid offline_access",
+    audience: "urn:api",
+  });
+  await client.refreshOAuthToken("refresh-token", {
+    grantedScope: "read write",
+    scope: "read",
+    audience: "urn:api",
+    requestParameters: { extension: "value" },
+  });
+  await client.refreshOAuthToken("refresh-token", {
+    // @ts-expect-error A refresh scope must be a string, not a list.
+    scope: ["read"],
+  });
   const restored: RestoredOidcSession = await client.restoreOidcSession(
     "access-token",
     { idToken: "signed-id-token", requiredAmrValues: ["passkey"] },

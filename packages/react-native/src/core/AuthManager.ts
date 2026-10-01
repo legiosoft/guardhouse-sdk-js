@@ -348,6 +348,7 @@ export class AuthManager {
   private sessionCache: SessionCacheData | null = null;
   private refreshTokenCache: string | null = null;
   private refreshPromise: Promise<GuardhouseAuthResult> | null = null;
+  private refreshRequestKey: string | null = null;
 
   constructor(config: AuthManagerConfig) {
     this.issuer = canonicalizeIssuer(config.authority);
@@ -449,7 +450,14 @@ export class AuthManager {
   async refreshToken(
     options: RefreshTokenOptions = {},
   ): Promise<GuardhouseAuthResult> {
-    return this.withRefreshLock(async () => {
+    const scopeOverride = trimToUndefined(options.scope);
+    const audience = this.resolveAudience(options.audience);
+    const requestKey = JSON.stringify([
+      scopeOverride ? [...this.scopeSet(scopeOverride)].sort() : null,
+      audience ?? null,
+    ]);
+
+    return this.withRefreshLock(requestKey, async () => {
       const currentSession = await this.loadStoredSession();
       const refreshToken = await this.getStoredRefreshToken();
 
@@ -464,10 +472,12 @@ export class AuthManager {
       // A missing runtime dependency must not consume/rotate a refresh token.
       if (currentSession.kind === "oidc") assertOidcCryptoAvailable();
       const grantedScope = currentSession.scope ?? this.defaultScope;
-      const requestedScope = trimToUndefined(options.scope) ?? grantedScope;
+      const requestedScope = [
+        ...this.scopeSet(scopeOverride ?? grantedScope),
+      ].join(" ");
       this.assertScopeNotEscalated(grantedScope, requestedScope);
-      const audience = this.resolveAudience(options.audience);
-      const requestParameters = audience ? { audience } : undefined;
+      // Keep later automatic refreshes bound to the saved, possibly narrowed scope.
+      const refreshOptions = { grantedScope, scope: requestedScope, audience };
       let tokenRefreshCompleted = false;
 
       try {
@@ -476,8 +486,7 @@ export class AuthManager {
             refreshToken,
             {
               previousIdToken: currentSession.idToken,
-              grantedScope: requestedScope,
-              requestParameters,
+              ...refreshOptions,
               requiredAcrValues: this.requiredAcrValues,
               requiredAmrValues: this.requiredAmrValues,
             },
@@ -517,10 +526,10 @@ export class AuthManager {
           });
         }
 
-        const tokens = await this.coreClient.refreshOAuthToken(refreshToken, {
-          grantedScope: requestedScope,
-          requestParameters,
-        });
+        const tokens = await this.coreClient.refreshOAuthToken(
+          refreshToken,
+          refreshOptions,
+        );
         tokenRefreshCompleted = true;
 
         return await this.persistAuthResult(tokens, {
@@ -1325,13 +1334,24 @@ export class AuthManager {
   }
 
   private withRefreshLock(
+    requestKey: string,
     action: () => Promise<GuardhouseAuthResult>,
   ): Promise<GuardhouseAuthResult> {
     if (this.refreshPromise) {
+      if (this.refreshRequestKey !== requestKey) {
+        return Promise.reject(
+          new GuardhouseAuthError(
+            "A token refresh with different scope or audience options is already in progress; retry after it completes",
+            "REFRESH_OPERATION_CONFLICT",
+          ),
+        );
+      }
       return this.refreshPromise;
     }
+    this.refreshRequestKey = requestKey;
     this.refreshPromise = action().finally(() => {
       this.refreshPromise = null;
+      this.refreshRequestKey = null;
     });
     return this.refreshPromise;
   }

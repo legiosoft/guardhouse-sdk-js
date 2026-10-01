@@ -120,6 +120,27 @@ if (restored?.session) {
 const token = await client.getAccessToken();
 ```
 
+### Refresh with a narrower scope
+
+For a session granted `read write`, request only `read`:
+
+```tsx
+const result = await client.refreshToken({ scope: "read" });
+```
+
+An override may only keep or narrow the saved session's scope. Native sends the
+effective scope to the token endpoint and validates the response against it.
+Omitted or blank overrides use the saved scope, including on automatic refresh
+and after restarting the app; broader config defaults do not restore dropped
+permissions. If the response omits `scope`, the requested scope is saved.
+`allowScopeNarrowing` still controls server-selected reductions beyond the request.
+
+Concurrent calls with matching scope options and audience share one refresh.
+Different options reject with `REFRESH_OPERATION_CONFLICT`; await the active
+refresh before retrying. An explicit scope and an omitted scope are distinct
+options even if they currently resolve to the same scopes. No automatic replay
+of a potentially consumed refresh token is added.
+
 ### Logout
 
 ```tsx

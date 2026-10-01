@@ -108,6 +108,29 @@ Common methods:
 - `registerClient(metadata, initialAccessToken)`
 - `buildHostOnlyCookie(name, value, options?)`
 
+### Refresh scope
+
+Use typed `scope` and `audience` options on `refreshOAuthToken` or
+`refreshOidcSession`; both remain blocked in the extension-only
+`requestParameters` object. An explicit `scope` requires the previously granted
+`grantedScope` and may only keep or narrow it. `audience` is a token-endpoint
+extension, not an override of the expected ID-token audience.
+
+```ts
+const tokens = await client.refreshOAuthToken(refreshToken, {
+  grantedScope: "read write",
+  scope: "read",
+});
+```
+
+If the response omits `scope`, an explicitly sent scope is reflected in the
+returned tokens and saved session, per RFC 6749 section 5.1. A response granting
+more than requested is rejected. `allowScopeNarrowing` still governs whether the
+server may grant fewer scopes than requested. Calls without the new typed fields
+keep their previous request/response behavior. Typed scope/audience values must
+be nonempty strings of at most 4096 characters; invalid values reject rather
+than silently disappear from the request.
+
 ### Auth + PKCE Utilities
 
 - Application login flows use `createAuthorizationRequest()` so PKCE, state,

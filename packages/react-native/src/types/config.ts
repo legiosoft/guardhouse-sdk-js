@@ -101,6 +101,7 @@ export interface LoginWithPasskeyOptions {
  * Refresh token request options.
  */
 export interface RefreshTokenOptions {
+  /** Defaults to the saved session scope; an override may only keep or narrow it. */
   scope?: string;
   audience?: string;
 }
