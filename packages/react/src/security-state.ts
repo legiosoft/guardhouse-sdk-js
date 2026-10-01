@@ -189,6 +189,7 @@ export function buildRefreshedOidcSession(
     accessToken: tokenResponse.access_token,
     refreshToken: tokenResponse.refresh_token || sessionData.refreshToken,
     idToken: tokenResponse.id_token ?? sessionData.idToken,
+    idTokenCurrent: Boolean(tokenResponse.id_token),
     tokenType: tokenResponse.token_type,
     scope: tokenResponse.scope || sessionData.scope,
     identity,
@@ -479,6 +480,8 @@ export function parseStoredOidcSession(
     !Number.isFinite(candidate["expiresAt"]) ||
     typeof candidate["idToken"] !== "string" ||
     candidate["idToken"].trim() === "" ||
+    (candidate["idTokenCurrent"] !== undefined &&
+      typeof candidate["idTokenCurrent"] !== "boolean") ||
     typeof candidate["scope"] !== "string" ||
     candidate["scope"].trim() === "" ||
     !isStoredIdentity(identity, expectedIssuer, expectedClientId) ||
@@ -500,6 +503,7 @@ export function parseStoredOidcSession(
     expiresAt: candidate["expiresAt"],
     refreshToken: optionalNonEmptyString(candidate["refreshToken"]),
     idToken: candidate["idToken"],
+    idTokenCurrent: candidate["idTokenCurrent"] as boolean | undefined,
     scope: candidate["scope"],
     identity,
     oidc: {

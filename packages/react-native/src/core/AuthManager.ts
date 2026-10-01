@@ -925,8 +925,12 @@ export class AuthManager {
   ): Promise<GuardhouseAuthResult> {
     let user: CoreUser | null = null;
     if (record.kind === "oidc") {
-      if (!record.idTokenCurrent) {
+      if (
+        !record.idTokenCurrent ||
+        record.identity.expiresAt <= Math.floor(Date.now() / 1000)
+      ) {
         if (
+          !record.idTokenCurrent &&
           this.sessionCache?.record === record &&
           this.sessionCache.user !== null
         ) {
@@ -938,27 +942,45 @@ export class AuthManager {
           );
           return this.buildAuthResultFromSession(session);
         }
-        throw new GuardhouseAuthError(
-          "The stored ID token is historical identity evidence, not a current credential",
-          "TOKEN_REQUEST_FAILED",
+        const restored = await this.coreClient.restoreOidcSession(
+          record.accessToken,
+          {
+            idToken: record.idToken,
+            requiredAcrValues: this.requiredAcrValues,
+            requiredAmrValues: this.requiredAmrValues,
+          },
+        );
+        if (!identityEquals(restored.identity, record.identity)) {
+          throw new GuardhouseAuthError(
+            "Stored identity metadata does not match the signed ID token",
+            "TOKEN_REQUEST_FAILED",
+          );
+        }
+        user = freezeUser(
+          this.userInfoOnLogin
+            ? { ...restored.userInfo, sub: restored.identity.subject }
+            : { sub: restored.identity.subject },
+        );
+        // Never expose an expired raw ID token as a current credential.
+        record = Object.freeze({ ...record, idTokenCurrent: false });
+      } else {
+        const verified = await this.coreClient.verifyIdToken(record.idToken, {
+          purpose: "session",
+          requiredAcrValues: this.requiredAcrValues,
+          requiredAmrValues: this.requiredAmrValues,
+        });
+        if (!identityEquals(verified.identity, record.identity)) {
+          throw new GuardhouseAuthError(
+            "Stored identity metadata does not match the signed ID token",
+            "TOKEN_REQUEST_FAILED",
+          );
+        }
+        user = await this.resolveAuthenticatedUser(
+          record.accessToken,
+          verified.identity,
+          verified.payload,
         );
       }
-      const verified = await this.coreClient.verifyIdToken(record.idToken, {
-        purpose: "session",
-        requiredAcrValues: this.requiredAcrValues,
-        requiredAmrValues: this.requiredAmrValues,
-      });
-      if (!identityEquals(verified.identity, record.identity)) {
-        throw new GuardhouseAuthError(
-          "Stored identity metadata does not match the signed ID token",
-          "TOKEN_REQUEST_FAILED",
-        );
-      }
-      user = await this.resolveAuthenticatedUser(
-        record.accessToken,
-        verified.identity,
-        verified.payload,
-      );
     }
 
     const refreshToken = await this.getStoredRefreshToken();

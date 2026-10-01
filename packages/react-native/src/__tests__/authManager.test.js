@@ -101,6 +101,7 @@ function createCoreClient(overrides = {}) {
     validateOAuthCallback: jest.fn(),
     exchangeAuthorizationCode: jest.fn(),
     refreshOidcSession: jest.fn(),
+    restoreOidcSession: jest.fn(),
     refreshOAuthToken: jest.fn(),
     verifyIdToken: jest.fn(),
     getUserInfo: jest.fn(),
@@ -116,6 +117,7 @@ function createManager({
   sessionStorage = new MemoryStorage(),
   refreshTokenStorage = new MemoryStorage(),
   configuredClientId = clientId,
+  userInfoOnLogin = true,
 } = {}) {
   return {
     manager: new AuthManager({
@@ -125,7 +127,7 @@ function createManager({
       defaultScope: "openid profile offline_access",
       defaultAudience: undefined,
       defaultEphemeralSession: true,
-      userInfoOnLogin: true,
+      userInfoOnLogin,
       registrationEndpoint: `${issuer}/account/signup`,
       requiredAcrValues: [],
       requiredAmrValues: [],
@@ -370,6 +372,141 @@ describe("React Native Core v2 auth integration", () => {
     expect(sessionStorage.values.size).toBe(2);
     expect(refreshTokenStorage.values.size).toBe(2);
   });
+
+  it.each([true, false])(
+    "restores historical sessions on cold start (userInfoOnLogin=%s)",
+    async (userInfoOnLogin) => {
+      const identity = createIdentity();
+      const first = createManager();
+      await seedOidcSession(first.manager, first.coreClient, identity);
+      first.coreClient.refreshOidcSession.mockResolvedValueOnce({
+        identityStatus: "historical",
+        identity,
+        tokens: {
+          access_token: "refreshed-access",
+          refresh_token: "rotated-refresh",
+          token_type: "Bearer",
+          expires_in: 3600,
+          scope: "openid profile offline_access",
+        },
+      });
+      first.coreClient.getUserInfo.mockResolvedValueOnce({
+        sub: identity.subject,
+        roles: ["old-role"],
+      });
+      await first.manager.refreshToken();
+
+      const cold = createManager({
+        sessionStorage: first.sessionStorage,
+        refreshTokenStorage: first.refreshTokenStorage,
+        userInfoOnLogin,
+      });
+      cold.coreClient.restoreOidcSession.mockResolvedValueOnce({
+        identity,
+        userInfo: { sub: identity.subject, roles: ["reader"] },
+      });
+      const result = await cold.manager.restoreSession();
+      expect(cold.coreClient.restoreOidcSession).toHaveBeenCalledWith(
+        "refreshed-access",
+        {
+          idToken: "initial-signed-id-token",
+          requiredAcrValues: [],
+          requiredAmrValues: [],
+        },
+      );
+      expect(cold.coreClient.refreshOidcSession).not.toHaveBeenCalled();
+      expect(result.session.idToken).toBeUndefined();
+      expect(result.tokenResponse.id_token).toBeUndefined();
+      expect(result.user).toEqual(
+        userInfoOnLogin
+          ? { sub: identity.subject, roles: ["reader"] }
+          : { sub: identity.subject },
+      );
+      expect(await cold.manager.getAccessToken()).toBe("refreshed-access");
+      expect(cold.coreClient.restoreOidcSession).toHaveBeenCalledTimes(1);
+      expect(first.sessionStorage.values.size).toBe(1);
+      expect(first.refreshTokenStorage.values.size).toBe(1);
+
+      cold.coreClient.refreshOidcSession.mockResolvedValueOnce({
+        identityStatus: "historical",
+        identity,
+        tokens: {
+          access_token: "next-access",
+          refresh_token: "next-refresh",
+          token_type: "Bearer",
+          expires_in: 3600,
+          scope: "openid profile offline_access",
+        },
+      });
+      cold.coreClient.getUserInfo.mockResolvedValueOnce({
+        sub: identity.subject,
+      });
+      await cold.manager.refreshToken();
+      expect(cold.coreClient.refreshOidcSession).toHaveBeenCalledWith(
+        "rotated-refresh",
+        expect.objectContaining({
+          previousIdToken: "initial-signed-id-token",
+        }),
+      );
+      expect(
+        Array.from(first.refreshTokenStorage.values.values())[0],
+      ).toContain("next-refresh");
+    },
+  );
+
+  it.each(["restoreSession", "getSession", "getAccessToken"])(
+    "uses online historical restoration in %s when a current ID token has since expired",
+    async (method) => {
+      const identity = {
+        ...createIdentity(),
+        expiresAt: Math.floor(Date.now() / 1000) - 120,
+      };
+      const first = createManager();
+      await seedOidcSession(first.manager, first.coreClient, identity);
+      const cold = createManager({
+        sessionStorage: first.sessionStorage,
+        refreshTokenStorage: first.refreshTokenStorage,
+      });
+      cold.coreClient.restoreOidcSession.mockResolvedValueOnce({
+        identity,
+        userInfo: { sub: identity.subject },
+      });
+      const result = await cold.manager[method]();
+      expect(result).not.toBeNull();
+      expect(cold.coreClient.verifyIdToken).not.toHaveBeenCalled();
+      expect(cold.coreClient.restoreOidcSession).toHaveBeenCalledTimes(1);
+      expect((await cold.manager.getSession()).idToken).toBeUndefined();
+    },
+  );
+
+  it.each(["identity mismatch", "verification failure"])(
+    "rejects historical restoration on %s",
+    async (failure) => {
+      const identity = {
+        ...createIdentity(),
+        expiresAt: Math.floor(Date.now() / 1000) - 120,
+      };
+      const first = createManager();
+      await seedOidcSession(first.manager, first.coreClient, identity);
+      const cold = createManager({
+        sessionStorage: first.sessionStorage,
+        refreshTokenStorage: first.refreshTokenStorage,
+      });
+      if (failure === "identity mismatch") {
+        cold.coreClient.restoreOidcSession.mockResolvedValueOnce({
+          identity: { ...identity, nonce: "modified" },
+          userInfo: { sub: identity.subject },
+        });
+      } else {
+        cold.coreClient.restoreOidcSession.mockRejectedValueOnce(
+          new Error("Signature or UserInfo rejected"),
+        );
+      }
+      await expect(cold.manager.restoreSession()).rejects.toThrow();
+      expect(first.sessionStorage.values.size).toBe(0);
+      expect(first.refreshTokenStorage.values.size).toBe(0);
+    },
+  );
 
   it("rejects competing browser transactions", async () => {
     const transaction = {

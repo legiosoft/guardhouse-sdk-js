@@ -272,6 +272,26 @@ if (oidcRefresh.identityStatus === "current") {
 ```
 
 An authorization-code request containing `openid` must return an ID token.
+When refresh omits `id_token`, React and React Native can restore the session
+after a reload or cold start while its access token is still valid. Core's
+additive `restoreOidcSession(accessToken, { idToken, requiredAcrValues,
+requiredAmrValues })` API re-verifies the old token's signature, issuer, client,
+temporal consistency and assurance requirements, then requires a successful
+UserInfo response with the same subject. It returns historical identity evidence
+and fresh UserInfo, not a current ID token, and does not rotate refresh tokens or
+write Core session state. Ordinary `verifyIdToken(..., { purpose: "session" })`
+continues to reject expired tokens.
+
+Historical restoration requires online UserInfo validation; old ID-token claims
+and serialized user/role data are not restored as current profile information.
+Native also performs this validation when `userInfoOnLogin: false`, but returns
+only the subject in that case. Its same-instance historical session cache remains
+available. Current-token login and restoration keep their existing behavior.
+React adds an optional `idTokenCurrent` flag to v3 records; earlier v3 records
+remain readable, and expired ID tokens follow the historical restoration path.
+Storage namespaces and the v3 schema version are unchanged. Existing handling of
+transient restoration errors is not changed by this fix.
+
 OAuth-only exchanges and refreshes reject an unexpected ID token. Refresh scope
 may narrow but must not escalate beyond the previously granted scope.
 

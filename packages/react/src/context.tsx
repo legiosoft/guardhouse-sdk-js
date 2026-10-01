@@ -467,6 +467,27 @@ export function GuardhouseProvider({
 
   const verifySessionIdentity = useCallback(
     async (sessionData: OidcSessionData): Promise<CoreUser> => {
+      // Stored metadata only selects the verification path. The signed token
+      // and live UserInfo must still agree before any user is authenticated.
+      if (
+        sessionData.idTokenCurrent === false ||
+        sessionData.identity.expiresAt <= Math.floor(Date.now() / 1000)
+      ) {
+        const restored = await client.restoreOidcSession(
+          sessionData.accessToken,
+          {
+            idToken: sessionData.idToken,
+            requiredAcrValues: config.requiredAcrValues,
+            requiredAmrValues: config.requiredAmrValues,
+          },
+        );
+        if (!oidcIdentitiesEqual(restored.identity, sessionData.identity)) {
+          throw new Error(
+            "Stored OIDC identity does not match the signed ID token",
+          );
+        }
+        return snapshotAuthenticatedUser(restored.userInfo);
+      }
       const verified = await client.verifyIdToken(sessionData.idToken, {
         purpose: "session",
         requiredAcrValues: config.requiredAcrValues,
@@ -924,6 +945,7 @@ export function GuardhouseProvider({
           expiresAt: Math.floor(Date.now() / 1000) + tokenData.expires_in,
           refreshToken: tokenData.refresh_token,
           idToken: tokenData.id_token!,
+          idTokenCurrent: true,
           scope: tokenData.scope || transaction.requestedScope,
           identity: verifiedIdToken.identity,
           oidc: {

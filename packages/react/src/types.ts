@@ -73,6 +73,8 @@ export interface OidcSessionData {
   expiresAt: number;
   refreshToken?: string;
   idToken: string;
+  /** False after refresh omits an ID token. Absent in earlier v3 records. */
+  idTokenCurrent?: boolean;
   scope: string;
   identity: OidcIdentityMetadata;
   oidc: {

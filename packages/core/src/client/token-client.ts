@@ -28,6 +28,8 @@ import type {
   RefreshOAuthTokenOptions,
   RefreshOidcSessionOptions,
   RefreshOidcSessionResult,
+  RestoreOidcSessionOptions,
+  RestoredOidcSession,
   TokenResponse,
   UserInfoResponse,
 } from "./types";
@@ -482,6 +484,34 @@ export class GuardhouseClientToken extends GuardhouseClientSession {
       tokens: result.tokens,
       identity: previousIdentity,
     };
+  }
+
+  /**
+   * Rebuild historical identity evidence from a signed ID token and confirm the
+   * access token online through subject-bound UserInfo. Does not rotate tokens,
+   * write session state, or expose old ID-token claims as a current credential.
+   */
+  async restoreOidcSession(
+    accessToken: string,
+    options: RestoreOidcSessionOptions,
+  ): Promise<RestoredOidcSession> {
+    const token = this.requireNonEmptyString(accessToken, "accessToken");
+    if (!options || typeof options !== "object") {
+      throw new GuardhouseError(
+        "OIDC restoration options are required",
+        "INVALID_REQUEST",
+      );
+    }
+    const idToken = this.requireNonEmptyString(options.idToken, "idToken");
+    const identity = await verifyHistoricalIdTokenIdentity(idToken, {
+      authority: this.issuer,
+      clientId: this.config.clientId,
+      cacheTtlMs: this.discoveryCacheTtlMs,
+      requiredAcrValues: options.requiredAcrValues,
+      requiredAmrValues: options.requiredAmrValues,
+    });
+    const userInfo = await this.getUserInfo(token, identity);
+    return Object.freeze({ identity, userInfo });
   }
 
   async getUserInfo(

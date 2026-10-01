@@ -528,6 +528,7 @@ describe("verified OIDC identity", () => {
       ...session,
       accessToken: "new-access-token",
       refreshToken: "new-refresh-token",
+      idTokenCurrent: false,
       expiresAt: 4_600,
     });
   });

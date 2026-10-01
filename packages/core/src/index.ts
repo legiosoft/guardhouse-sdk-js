@@ -58,6 +58,8 @@ export type {
   RefreshOAuthTokenOptions,
   RefreshOidcSessionOptions,
   RefreshOidcSessionResult,
+  RestoreOidcSessionOptions,
+  RestoredOidcSession,
   SecureCookieOptions,
   OAuthSessionState,
   OidcSessionState,

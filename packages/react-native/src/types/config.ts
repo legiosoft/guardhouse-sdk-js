@@ -173,6 +173,10 @@ export interface GuardhouseClientConfig extends Omit<
   passkey?: GuardhousePasskeyAdapter;
   fetch?: FetchLike;
   defaultEphemeralSession?: boolean;
+  /**
+   * Include UserInfo in the authenticated user. Historical cold restoration
+   * still validates the access token through UserInfo when false, returning sub only.
+   */
   userInfoOnLogin?: boolean;
   /** Exact, case-sensitive accepted ACR values. */
   requiredAcrValues?: readonly string[];

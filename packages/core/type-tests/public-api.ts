@@ -6,6 +6,7 @@ import {
   type IntrospectionResponse,
   type OidcIdentity,
   type OidcIdentityMetadata,
+  type RestoredOidcSession,
   type VerifiedIdToken,
 } from "@guardhouse/core";
 
@@ -129,6 +130,17 @@ async function exercisePublicFlow(): Promise<void> {
   const refreshed = await client.refreshOidcSession("refresh-token", {
     previousIdToken: "signed-id-token",
   });
+  const restored: RestoredOidcSession = await client.restoreOidcSession(
+    "access-token",
+    { idToken: "signed-id-token", requiredAmrValues: ["passkey"] },
+  );
+  // @ts-expect-error Online restoration does not make an old ID token current.
+  const restoredCurrentIdentity: OidcIdentity = restored.identity;
+  // @ts-expect-error Historical restoration never exposes a verified ID token.
+  const restoredIdToken: VerifiedIdToken = restored.idToken;
+  void restored.userInfo.sub;
+  void restoredCurrentIdentity;
+  void restoredIdToken;
   if (refreshed.identityStatus === "historical") {
     // @ts-expect-error Historical evidence is not a current identity credential.
     const currentIdentity: OidcIdentity = refreshed.identity;

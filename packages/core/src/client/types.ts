@@ -150,6 +150,18 @@ export type RefreshOidcSessionResult =
       readonly idToken?: undefined;
     };
 
+export interface RestoreOidcSessionOptions {
+  idToken: string;
+  requiredAcrValues?: readonly string[];
+  requiredAmrValues?: readonly string[];
+}
+
+/** Online restoration evidence, never a current ID-token credential. */
+export interface RestoredOidcSession {
+  readonly identity: HistoricalOidcIdentity;
+  readonly userInfo: UserInfoResponse;
+}
+
 export interface ClientCredentialsTokenOptions {
   scope?: string;
   resource?: string | readonly string[];
