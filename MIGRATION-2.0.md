@@ -168,6 +168,15 @@ evidence:
 Never cast deserialized `OidcIdentityMetadata` to an evidence type. Reverify the
 signed ID token with the appropriate purpose instead.
 
+Identity metadata describes the current signed token exactly. When a refresh ID
+token omits `nonce` or `auth_time`, the corresponding metadata value is `null`;
+it is not copied from an older token. The verifier retains the original
+continuity constraints privately when live identity evidence is passed through
+successive refresh verifications. Those constraints are not serialized claims
+and cannot be recreated by casting a stored object to an evidence type.
+After a cold start, fresh evidence is established from the stored signed token;
+private refresh history is not recovered from serialized metadata.
+
 Choose an explicit verification purpose:
 
 ```ts

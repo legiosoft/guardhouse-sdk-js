@@ -15,6 +15,12 @@ interface SigningFixture {
 }
 
 const SESSION_CONTEXT = { purpose: "session" } as const;
+const REFRESH_CLAIM_CASES = [
+  ["both omitted", false, false],
+  ["nonce omitted", false, true],
+  ["auth_time omitted", true, false],
+  ["both repeated", true, true],
+] as const;
 
 function jsonResponse(data: unknown): Response {
   return new Response(JSON.stringify(data), {
@@ -576,7 +582,7 @@ describe("OidcIdTokenVerifier", () => {
         purpose: "refresh",
         previousIdentity: previous.identity,
       }),
-    ).resolves.toMatchObject({ identity: { authTime: now } });
+    ).resolves.toMatchObject({ identity: { authTime: null } });
 
     await expect(
       verifier.verify(changed, {
@@ -586,7 +592,7 @@ describe("OidcIdTokenVerifier", () => {
     ).rejects.toThrow("refresh identity continuity check failed");
   });
 
-  it("retains an omitted refresh nonce and rejects replacement or introduction", async () => {
+  it("leaves an omitted refresh nonce absent and rejects replacement or introduction", async () => {
     const fixture = await createSigningFixture("key-1");
     const fetcher = createMetadataFetch([[fixture.publicJwk]]);
     const verifier = createVerifier(fetcher);
@@ -600,7 +606,7 @@ describe("OidcIdTokenVerifier", () => {
         purpose: "refresh",
         previousIdentity: previous.identity,
       }),
-    ).resolves.toMatchObject({ identity: { nonce: "original-nonce" } });
+    ).resolves.toMatchObject({ identity: { nonce: null } });
     await expect(
       verifier.verify(await signIdToken(fixture, { nonce: "new-nonce" }), {
         purpose: "refresh",
@@ -637,6 +643,146 @@ describe("OidcIdTokenVerifier", () => {
       }),
     ).rejects.toThrow("refresh identity continuity check failed");
   });
+
+  it.each(REFRESH_CLAIM_CASES)(
+    "returns the same signed identity for refresh and restore with %s",
+    async (_name, keepNonce, keepAuthTime) => {
+      const fixture = await createSigningFixture("key-1");
+      const verifier = createVerifier(
+        createMetadataFetch([[fixture.publicJwk]]),
+      );
+      const authTime = Math.floor(Date.now() / 1000) - 60;
+      const original = await verifier.verify(
+        await signIdToken(fixture, {
+          nonce: "original-nonce",
+          auth_time: authTime,
+        }),
+        { purpose: "authorization_code", nonce: "original-nonce" },
+      );
+      const raw = await signIdToken(fixture, {
+        ...(keepNonce ? { nonce: "original-nonce" } : {}),
+        ...(keepAuthTime ? { auth_time: authTime } : {}),
+      });
+      const refreshed = await verifier.verify(raw, {
+        purpose: "refresh",
+        previousIdentity: original.identity,
+      });
+      const restored = await verifier.verify(raw, SESSION_CONTEXT);
+
+      expect(refreshed.identity).toEqual(restored.identity);
+      expect(JSON.parse(JSON.stringify(refreshed.identity))).toEqual(
+        restored.identity,
+      );
+      expect(refreshed.identity).toMatchObject({
+        nonce: keepNonce ? "original-nonce" : null,
+        authTime: keepAuthTime ? authTime : null,
+      });
+      expect(Object.isFrozen(refreshed.identity)).toBe(true);
+
+      // The public snapshot must stay literal without losing the original
+      // continuity constraints when another verified refresh omits the claims.
+      const next = await verifier.verify(await signIdToken(fixture), {
+        purpose: "refresh",
+        previousIdentity: refreshed.identity,
+      });
+      await expect(
+        verifier.verify(
+          await signIdToken(fixture, {
+            nonce: "original-nonce",
+            auth_time: authTime,
+          }),
+          { purpose: "refresh", previousIdentity: next.identity },
+        ),
+      ).resolves.toMatchObject({
+        identity: { nonce: "original-nonce", authTime },
+      });
+      for (const changed of [
+        { nonce: "another-nonce" },
+        { auth_time: authTime - 1 },
+        { sub: "another-user" },
+      ]) {
+        await expect(
+          verifier.verify(await signIdToken(fixture, changed), {
+            purpose: "refresh",
+            previousIdentity: next.identity,
+          }),
+        ).rejects.toThrow("refresh identity continuity check failed");
+      }
+    },
+  );
+
+  it.each(REFRESH_CLAIM_CASES)(
+    "restores a real refreshed Core session with %s",
+    async (_name, keepNonce, keepAuthTime) => {
+      const fixture = await createSigningFixture("key-1");
+      // Use the exact same issuer in configuration, discovery and signed tokens.
+      const authority = "https://auth.example.com/";
+      const authTime = Math.floor(Date.now() / 1000) - 60;
+      const original = await signIdToken(fixture, {
+        iss: authority,
+        nonce: "original-nonce",
+        auth_time: authTime,
+      });
+      const replacement = await signIdToken(fixture, {
+        iss: authority,
+        ...(keepNonce ? { nonce: "original-nonce" } : {}),
+        ...(keepAuthTime ? { auth_time: authTime } : {}),
+      });
+      jest.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith("/.well-known/openid-configuration")) {
+          return jsonResponse({
+            issuer: authority,
+            jwks_uri: `${authority}jwks`,
+            id_token_signing_alg_values_supported: ["RS256"],
+          });
+        }
+        if (url.endsWith("/jwks")) {
+          return jsonResponse({ keys: [fixture.publicJwk] });
+        }
+        if (url.endsWith("/connect/token")) {
+          return jsonResponse({
+            access_token: "new-access",
+            refresh_token: "rotated-refresh",
+            token_type: "Bearer",
+            expires_in: 3600,
+            id_token: replacement,
+            scope: "openid profile",
+          });
+        }
+        throw new Error(`Unexpected test request: ${url}`);
+      });
+      const values = new Map<string, string>();
+      const storage = {
+        getItem: async (key: string) => values.get(key) ?? null,
+        setItem: async (key: string, value: string) => {
+          values.set(key, value);
+        },
+        removeItem: async (key: string) => {
+          values.delete(key);
+        },
+      };
+      const config = { authority, clientId: "client-id", storage };
+      const client = new GuardhouseClient(config);
+      const result = await client.refreshOidcSession("initial-refresh", {
+        previousIdToken: original,
+        grantedScope: "openid profile",
+      });
+      const expected = {
+        kind: "oidc",
+        idToken: replacement,
+        accessToken: "new-access",
+        hasRefreshToken: true,
+        identity: result.identity,
+      };
+
+      expect(await client.getSessionState()).toMatchObject(expected);
+      expect(
+        await new GuardhouseClient(config).getSessionState(),
+      ).toMatchObject(expected);
+      expect(values.size).toBe(1);
+    },
+  );
 
   it("rejects structurally forged identity evidence before token verification", async () => {
     const fixture = await createSigningFixture("key-1");

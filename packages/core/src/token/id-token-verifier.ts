@@ -51,7 +51,7 @@ interface AuthenticationRequirements {
   readonly requiredAmrValues?: readonly string[];
 }
 
-/** Serializable identity fields recovered from a verified ID token. */
+/** Serializable identity fields of this verified ID token, without inherited claims. */
 export interface OidcIdentityMetadata {
   readonly issuer: string;
   readonly clientId: string;
@@ -68,9 +68,18 @@ export interface OidcIdentityMetadata {
 }
 
 const VERIFIED_OIDC_IDENTITY: unique symbol = Symbol("VerifiedOidcIdentity");
+interface VerifiedIdentityContext {
+  readonly status: "current" | "historical";
+  readonly nonce: string | null;
+  readonly authTime: number | null;
+}
+
+// Original refresh constraints are private evidence, not claims of every token
+// in the chain. Keeping them outside the serializable snapshot lets a token be
+// restored from its signature without inventing claims that it did not contain.
 const verifiedOidcIdentityEvidence = new WeakMap<
   object,
-  "current" | "historical"
+  VerifiedIdentityContext
 >();
 
 /** Current, signature- and claim-verified OIDC identity evidence. */
@@ -173,14 +182,27 @@ export function isOidcIdentityEvidence(
   value: unknown,
 ): value is OidcIdentityEvidence {
   if (!isRecord(value)) return false;
-  const evidenceStatus = verifiedOidcIdentityEvidence.get(value);
+  const evidence = verifiedOidcIdentityEvidence.get(value);
+  return evidence?.status === "current" || evidence?.status === "historical";
+}
 
-  return evidenceStatus === "current" || evidenceStatus === "historical";
+function getVerifiedIdentityContext(
+  identity: OidcIdentityEvidence,
+): VerifiedIdentityContext {
+  const context = verifiedOidcIdentityEvidence.get(identity);
+  if (!context) {
+    throw new GuardhouseError(
+      "previousIdentity must be genuine verified OIDC identity evidence",
+      "OIDC_CONFIGURATION_ERROR",
+    );
+  }
+  return context;
 }
 
 function createOidcIdentityEvidence<TStatus extends "current" | "historical">(
   metadata: OidcIdentityMetadata,
   status: TStatus,
+  continuity: Pick<OidcIdentityMetadata, "nonce" | "authTime"> = metadata,
 ): TStatus extends "current" ? OidcIdentity : HistoricalOidcIdentity {
   const identity = {
     ...metadata,
@@ -195,7 +217,14 @@ function createOidcIdentityEvidence<TStatus extends "current" | "historical">(
     configurable: false,
     writable: false,
   });
-  verifiedOidcIdentityEvidence.set(identity, status);
+  verifiedOidcIdentityEvidence.set(
+    identity,
+    Object.freeze({
+      status,
+      nonce: continuity.nonce,
+      authTime: continuity.authTime,
+    }),
+  );
 
   return Object.freeze(identity) as TStatus extends "current"
     ? OidcIdentity
@@ -723,7 +752,7 @@ async function validateGuardhouseIdTokenClaims(
     now,
   );
 
-  let identity: OidcIdentityMetadata = Object.freeze({
+  const identity: OidcIdentityMetadata = Object.freeze({
     issuer: tokenIssuer,
     clientId,
     subject,
@@ -774,6 +803,7 @@ async function validateGuardhouseIdTokenClaims(
     }
   } else if (context.purpose === "refresh") {
     const previous = context.previousIdentity;
+    const previousContext = getVerifiedIdentityContext(previous);
     const previousAudiences = [...previous.audiences].sort();
     const currentAudiences = [...identity.audiences].sort();
     if (
@@ -785,17 +815,12 @@ async function validateGuardhouseIdTokenClaims(
         (audience, index) => audience !== currentAudiences[index],
       ) ||
       previous.authorizedParty !== identity.authorizedParty ||
-      (identity.nonce !== null && identity.nonce !== previous.nonce) ||
-      (identity.authTime !== null && identity.authTime !== previous.authTime)
+      (identity.nonce !== null && identity.nonce !== previousContext.nonce) ||
+      (identity.authTime !== null &&
+        identity.authTime !== previousContext.authTime)
     ) {
       failValidation("refresh identity continuity check failed");
     }
-
-    identity = Object.freeze({
-      ...identity,
-      nonce: identity.nonce ?? previous.nonce,
-      authTime: identity.authTime ?? previous.authTime,
-    });
   }
 
   return identity;
@@ -929,7 +954,13 @@ export class OidcIdTokenVerifier {
       [VERIFIED_ID_TOKEN]: true as const,
       header: frozenHeader,
       payload: frozenPayload,
-      identity: createOidcIdentityEvidence(identity, "current"),
+      identity: createOidcIdentityEvidence(
+        identity,
+        "current",
+        contextSnapshot.purpose === "refresh"
+          ? getVerifiedIdentityContext(contextSnapshot.previousIdentity)
+          : identity,
+      ),
     });
   }
 
