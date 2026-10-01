@@ -69,19 +69,17 @@ export function compactRecord(
 }
 
 /**
- * Validates and normalizes authority URL.
+ * Validates authority without rewriting the protocol issuer identifier.
  */
 export function sanitizeAuthority(authority: string): string {
-  const parsed = new URL(authority);
-  parsed.hash = "";
-  parsed.search = "";
-  parsed.pathname = parsed.pathname.replace(/\/+$/, "");
-
-  if (parsed.pathname === "") {
-    parsed.pathname = "/";
+  const issuer = authority.trim();
+  const parsed = new URL(issuer);
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new GuardhouseConfigurationError(
+      "Authority must not contain credentials, a query, or a fragment",
+    );
   }
-
-  return parsed.toString();
+  return issuer;
 }
 
 /**
@@ -95,7 +93,10 @@ export function resolveEndpoint(authority: string, endpoint: string): string {
   }
 
   try {
-    return new URL(normalizedEndpoint, authority).toString();
+    // Keep the existing endpoint resolution behavior separate from issuer trust.
+    const endpointBase = new URL(authority);
+    endpointBase.pathname = endpointBase.pathname.replace(/\/+$/, "") || "/";
+    return new URL(normalizedEndpoint, endpointBase).toString();
   } catch (error) {
     throw new GuardhouseConfigurationError(
       `Invalid endpoint URL: ${toErrorMessage(error)}`,

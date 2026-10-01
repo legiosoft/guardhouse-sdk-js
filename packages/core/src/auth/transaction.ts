@@ -63,8 +63,11 @@ export function restoreAuthorizationTransaction(
     }
   }
 
-  const issuer = canonicalizeIssuer(value["issuer"] as string);
-  if (issuer !== canonicalizeIssuer(expected.issuer)) {
+  const issuer = value["issuer"] as string;
+  // URL parsing validates syntax. Issuer trust uses exact string comparison.
+  canonicalizeIssuer(issuer);
+  canonicalizeIssuer(expected.issuer);
+  if (issuer !== expected.issuer) {
     throw new Error("Authorization transaction issuer does not match this client");
   }
 

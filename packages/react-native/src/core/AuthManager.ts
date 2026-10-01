@@ -324,6 +324,7 @@ export function parseTokenResponsePayload(
  */
 export class AuthManager {
   private readonly issuer: string;
+  private readonly protocolIssuer: string;
   private readonly clientId: string;
   private readonly redirectUri: string;
   private readonly defaultScope: string;
@@ -349,6 +350,7 @@ export class AuthManager {
 
   constructor(config: AuthManagerConfig) {
     this.issuer = canonicalizeIssuer(config.authority);
+    this.protocolIssuer = config.authority.trim();
     this.clientId = config.clientId.trim();
     this.redirectUri = config.redirectUri;
     this.defaultScope = config.defaultScope;
@@ -1080,7 +1082,7 @@ export class AuthManager {
     const identity = parseStoredIdentity(value.identity);
     if (
       !identity ||
-      identity.issuer !== this.issuer ||
+      identity.issuer !== this.protocolIssuer ||
       identity.clientId !== this.clientId ||
       typeof value.idToken !== "string" ||
       value.idToken.trim() === "" ||

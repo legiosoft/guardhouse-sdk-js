@@ -39,7 +39,7 @@ const { ProtectedRoute } = require("../ProtectedRoute");
 const { SessionStorageAdapter } = require("../utils");
 
 const baseConfig = {
-  authority: "https://auth.test",
+  authority: "https://auth.test/",
   clientId: "client-a",
   redirectUri: "https://app.test/callback",
   audiencePolicy: "oidc-optional",

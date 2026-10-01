@@ -452,7 +452,7 @@ export class GuardhouseClientToken extends GuardhouseClientSession {
     const previousIdentity = await verifyHistoricalIdTokenIdentity(
       previousIdToken,
       {
-        authority: this.issuer,
+        authority: this.protocolIssuer,
         clientId: this.config.clientId,
         cacheTtlMs: this.discoveryCacheTtlMs,
         requiredAcrValues: options.requiredAcrValues,
@@ -504,7 +504,7 @@ export class GuardhouseClientToken extends GuardhouseClientSession {
     }
     const idToken = this.requireNonEmptyString(options.idToken, "idToken");
     const identity = await verifyHistoricalIdTokenIdentity(idToken, {
-      authority: this.issuer,
+      authority: this.protocolIssuer,
       clientId: this.config.clientId,
       cacheTtlMs: this.discoveryCacheTtlMs,
       requiredAcrValues: options.requiredAcrValues,
@@ -521,7 +521,7 @@ export class GuardhouseClientToken extends GuardhouseClientSession {
     const normalizedToken = this.requireNonEmptyString(token, "token");
     if (
       !isOidcIdentityEvidence(identity) ||
-      identity.issuer !== this.issuer ||
+      identity.issuer !== this.protocolIssuer ||
       identity.clientId !== this.config.clientId.trim() ||
       typeof identity.subject !== "string" ||
       identity.subject === ""

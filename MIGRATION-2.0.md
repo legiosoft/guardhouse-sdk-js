@@ -27,6 +27,36 @@ Do not mix React v2 with Core v1. Existing browser sessions and pending login
 records are not compatible with the new schemas; the SDK discards them and the
 user must authenticate again.
 
+## Exact Issuer Identifiers
+
+Set `authority` to the exact `issuer` advertised by the server's OpenID
+configuration, including any trailing slash. For example, both
+`https://auth.example.com` and `https://auth.example.com/` work when the
+configuration, discovery metadata and signed `iss` all use the same value.
+They are not interchangeable issuer identifiers. This follows
+[OIDC Discovery validation](https://openid.net/specs/openid-connect-discovery-1_0.html#ProviderConfigurationValidation)
+and [authorization response issuer validation](https://www.rfc-editor.org/rfc/rfc9207.html#section-2.4).
+
+Core now preserves that identifier for discovery, authorization transactions,
+callback checks, ID-token verification, refresh, historical restoration and
+UserInfo identity binding. React and Native preserve it when restoring signed
+identity metadata. The cryptographic verifier's exact comparison is unchanged.
+`validateFrontChannelLogoutRequest` also compares and returns the exact issuer;
+callers must pass the server's exact identifier as `expectedIssuer`.
+
+Storage namespace normalization and schema versions are unchanged. The exported
+`canonicalizeIssuer` remains a URL-normalization helper for storage, not a way to
+compare protocol identities. Core/Native session envelope `issuer` fields retain
+their namespace value; verified `identity.issuer` retains the signed value.
+
+Earlier beta configurations or pending transactions that depended on silently
+adding/removing a slash, lowercasing a host or removing a default port must be
+aligned with the server and may require a new login. Do not rewrite signed claims
+or stored identity metadata to make them match. Native now rejects authority
+URLs containing credentials, a query or a fragment rather than silently removing
+parts of the URL. Native relative endpoint resolution retains its previous
+behavior independently of issuer comparison.
+
 ## Core API Replacements
 
 | Removed or changed API                                                                                                    | v2 replacement                                                                                                                             |

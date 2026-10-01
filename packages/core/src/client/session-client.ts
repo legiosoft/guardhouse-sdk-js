@@ -224,7 +224,7 @@ export class GuardhouseClientSession extends GuardhouseClientBase {
   ): Promise<VerifiedIdToken> {
     if (!this.idTokenVerifier) {
       this.idTokenVerifier = new OidcIdTokenVerifier({
-        authority: this.issuer,
+        authority: this.protocolIssuer,
         clientId: this.config.clientId,
         cacheTtlMs: this.discoveryCacheTtlMs,
       });
@@ -254,7 +254,7 @@ export class GuardhouseClientSession extends GuardhouseClientBase {
   restoreAuthorizationTransaction(value: unknown): AuthorizationTransaction {
     try {
       return restoreTransaction(value, {
-        issuer: this.issuer,
+        issuer: this.protocolIssuer,
         clientId: this.config.clientId,
       });
     } catch (error) {
@@ -564,7 +564,7 @@ export class GuardhouseClientSession extends GuardhouseClientBase {
         }
         const identityRecord = identity as Record<string, unknown>;
         if (
-          identityRecord["issuer"] !== this.issuer ||
+          identityRecord["issuer"] !== this.protocolIssuer ||
           identityRecord["clientId"] !== this.config.clientId.trim() ||
           typeof identityRecord["subject"] !== "string" ||
           !Array.isArray(identityRecord["audiences"]) ||
@@ -937,7 +937,9 @@ export class GuardhouseClientSession extends GuardhouseClientBase {
     if (callback.iss) {
       let callbackIssuer: string;
       try {
-        callbackIssuer = canonicalizeIssuer(callback.iss);
+        // Parse only to validate the URL; do not normalize the protocol value.
+        canonicalizeIssuer(callback.iss);
+        callbackIssuer = callback.iss;
       } catch (error) {
         throw new GuardhouseError(
           "OAuth callback issuer is invalid",

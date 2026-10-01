@@ -277,7 +277,7 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
     const createdAt = Date.now();
     const transaction: AuthorizationTransaction = Object.freeze({
       version: 2,
-      issuer: this.issuer,
+      issuer: this.protocolIssuer,
       clientId: this.config.clientId.trim(),
       redirectUri,
       state,
@@ -303,7 +303,7 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
 
     const authorizationUrl = new URL(
       generateAuthUrl({
-        authority: this.issuer,
+        authority: this.protocolIssuer,
         authorizationEndpoint,
         clientId: this.config.clientId,
         redirectUri,
@@ -793,7 +793,7 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
     const authorityUrl = new URL(this.baseURL);
     const cacheKey = discoveryUrl.toString();
     const cacheContext = {
-      authority: this.issuer,
+      authority: this.protocolIssuer,
       clientId: this.config.clientId,
     };
 
@@ -838,9 +838,7 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
     this.assertTrustedDiscoveryMetadata(discoveryData, authorityUrl);
 
     const issuer = discoveryData["issuer"];
-    const normalizedIssuer =
-      typeof issuer === "string" ? new URL(issuer).href : "";
-    if (normalizedIssuer !== this.issuer) {
+    if (issuer !== this.protocolIssuer) {
       throw new GuardhouseError(
         "Discovery issuer must exactly match configured authority",
         "ISSUER_AUTHORITY_MISMATCH",

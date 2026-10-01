@@ -129,7 +129,7 @@ class GuardhouseClient extends LegacyClientBase {
     const state = String(transactionOrState);
     const transaction = {
       version: 2,
-      issuer: this.issuer,
+      issuer: this.protocolIssuer,
       clientId: this.config.clientId,
       redirectUri: redirectUrl.toString(),
       state,
@@ -202,7 +202,7 @@ function createAuthorizationTransaction(
   const now = Date.now();
   return {
     version: 2,
-    issuer: "https://auth.example.com/",
+    issuer: "https://auth.example.com",
     clientId: "public-client",
     redirectUri: "https://app.example.com/callback",
     state: "state-value-123456",
@@ -2224,7 +2224,7 @@ describe("GuardhouseClient", () => {
       .fn()
       .mockResolvedValueOnce(
         jsonResponse({
-          issuer: "https://auth.example.com/",
+          issuer: "https://auth.example.com",
           registration_endpoint: "https://auth.example.com/connect/register",
         }),
       )
@@ -2582,7 +2582,7 @@ describe("GuardhouseClient", () => {
     }
   });
 
-  it("normalizes the issuer root slash but preserves path differences", async () => {
+  it("rejects discovery metadata for a different issuer path", async () => {
     const fetchMock = jest.fn().mockResolvedValue(
       jsonResponse({
         issuer: "https://auth.example.com/tenant/",
@@ -2907,7 +2907,7 @@ describe("GuardhouseClient", () => {
       .fn()
       .mockResolvedValueOnce(
         jsonResponse({
-          issuer: "https://auth.example.com/",
+          issuer: "https://auth.example.com",
           registration_endpoint: "https://auth.example.com/connect/register",
         }),
       )
@@ -2960,7 +2960,7 @@ describe("GuardhouseClient", () => {
       .fn()
       .mockResolvedValueOnce(
         jsonResponse({
-          issuer: "https://auth.example.com/",
+          issuer: "https://auth.example.com",
           authorization_endpoint: "https://auth.example.com/connect/authorize",
           pushed_authorization_request_endpoint:
             "https://auth.example.com/connect/par",
@@ -3003,7 +3003,7 @@ describe("GuardhouseClient", () => {
       .fn()
       .mockResolvedValueOnce(
         jsonResponse({
-          issuer: "https://auth.example.com/",
+          issuer: "https://auth.example.com",
           authorization_endpoint: "https://auth.example.com/connect/authorize",
           pushed_authorization_request_endpoint:
             "https://auth.example.com/connect/par",

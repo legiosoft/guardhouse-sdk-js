@@ -924,7 +924,7 @@ describe("generateAuthUrl", () => {
       },
     );
 
-    expect(result.issuer).toBe("https://auth.example.com/");
+    expect(result.issuer).toBe("https://auth.example.com");
     expect(result.sessionId).toBe("session-123");
   });
 

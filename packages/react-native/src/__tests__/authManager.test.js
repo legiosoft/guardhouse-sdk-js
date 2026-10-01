@@ -23,6 +23,7 @@ const {
 } = require("../core/AuthManager");
 const { GuardhouseClient } = require("../core/GuardhouseClient");
 const { GuardhouseError: CoreError } = require("@guardhouse/core");
+const { sanitizeAuthority, resolveEndpoint } = require("../utils/url");
 
 class MemoryStorage {
   constructor() {
@@ -121,11 +122,12 @@ function createManager({
   sessionStorage = new MemoryStorage(),
   refreshTokenStorage = new MemoryStorage(),
   configuredClientId = clientId,
+  authority = issuer,
   userInfoOnLogin = true,
 } = {}) {
   return {
     manager: new AuthManager({
-      authority: issuer,
+      authority,
       clientId: configuredClientId,
       redirectUri: "com.example.app://callback",
       defaultScope: "openid profile offline_access",
@@ -153,6 +155,75 @@ function createManager({
 }
 
 describe("React Native Core v2 auth integration", () => {
+  it.each([
+    "https://auth.example.com",
+    "https://auth.example.com/",
+    "https://auth.example.com/tenant",
+    "https://auth.example.com/tenant/",
+  ])(
+    "retains exact issuer and restores a Native session (%s)",
+    async (authority) => {
+      expect(sanitizeAuthority(authority)).toBe(authority);
+      const identity = { ...createIdentity(), issuer: authority };
+      const first = createManager({ authority });
+      await seedOidcSession(first.manager, first.coreClient, identity);
+      const cold = createManager({
+        authority,
+        sessionStorage: first.sessionStorage,
+        refreshTokenStorage: first.refreshTokenStorage,
+      });
+      cold.coreClient.verifyIdToken.mockResolvedValue(
+        createVerifiedIdToken(identity),
+      );
+      cold.coreClient.getUserInfo.mockResolvedValue({ sub: identity.subject });
+      await expect(cold.manager.restoreSession()).resolves.toMatchObject({
+        session: { identity: { issuer: authority } },
+      });
+      expect([...first.sessionStorage.values.keys()]).toEqual([
+        `gh:v3:${encodeURIComponent(new URL(authority).href)}:${clientId}:session`,
+      ]);
+    },
+  );
+
+  it.each(["https://auth.example.com", "https://auth.example.com/"])(
+    "rejects another exact issuer in the same Native storage namespace (%s)",
+    async (authority) => {
+      const first = createManager({ authority });
+      await seedOidcSession(first.manager, first.coreClient, {
+        ...createIdentity(),
+        issuer: authority,
+      });
+      const cold = createManager({
+        authority: authority.endsWith("/")
+          ? authority.slice(0, -1)
+          : authority + "/",
+        sessionStorage: first.sessionStorage,
+        refreshTokenStorage: first.refreshTokenStorage,
+      });
+      await expect(cold.manager.restoreSession()).resolves.toBeNull();
+      expect(cold.coreClient.verifyIdToken).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    "https://auth.example.com?tenant=one",
+    "https://auth.example.com#fragment",
+    "https://user:pass@auth.example.com",
+  ])(
+    "rejects invalid Native authority rather than rewriting it (%s)",
+    (authority) => {
+      expect(() => sanitizeAuthority(authority)).toThrow(
+        "Authority must not contain",
+      );
+    },
+  );
+
+  it("preserves existing relative Native endpoint resolution", () => {
+    expect(
+      resolveEndpoint("https://auth.example.com/tenant/", "connect/token"),
+    ).toBe("https://auth.example.com/connect/token");
+  });
+
   it("rejects malformed passkey token responses instead of coercing JSON", () => {
     expect(() =>
       parseTokenResponsePayload({

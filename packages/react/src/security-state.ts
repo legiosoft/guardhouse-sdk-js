@@ -369,11 +369,12 @@ export function getIssuerIdentifier(authority: string): string {
   ) {
     throw new Error("authority must be a canonical HTTPS issuer URL");
   }
-  return parsed.href;
+  // Preserve the protocol identifier; URL normalization is only for storage keys.
+  return authority.trim();
 }
 
 function storageNamespace(authority: string, clientId: string): string {
-  return `${encodeURIComponent(getIssuerIdentifier(authority))}:${encodeURIComponent(
+  return `${encodeURIComponent(new URL(getIssuerIdentifier(authority)).href)}:${encodeURIComponent(
     clientId,
   )}`;
 }

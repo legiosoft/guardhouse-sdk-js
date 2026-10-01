@@ -132,6 +132,8 @@ export class GuardhouseClientBase {
   protected config: GuardhouseConfig;
   protected baseURL: string;
   protected issuer: string;
+  // Protocol comparisons must not use the URL-normalized storage namespace.
+  protected protocolIssuer: string;
   protected logger: ReturnType<typeof createGuardhouseLogger>;
   protected requestTimeoutMs: number | null;
   protected discoveryCacheTtlMs: number;
@@ -254,6 +256,7 @@ export class GuardhouseClientBase {
     this.maxSilentAuthAttempts =
       config.maxSilentAuthAttempts ?? DEFAULT_MAX_SILENT_AUTH_ATTEMPTS;
     this.issuer = canonicalizeIssuer(config.authority);
+    this.protocolIssuer = config.authority.trim();
     this.baseURL = trimTrailingForwardSlashes(this.issuer);
     this.usesDefaultSessionStorageKey = !config.sessionStorageKey;
     this.sessionStorageKey =

@@ -34,15 +34,13 @@ export function validateFrontChannelLogoutRequest(
     throw new Error("Front-channel logout request is missing issuer (iss)");
   }
 
-  let canonicalIssuer: string;
-  let expectedIssuer: string;
   try {
-    canonicalIssuer = canonicalizeIssuer(issuer);
-    expectedIssuer = canonicalizeIssuer(options.expectedIssuer);
+    canonicalizeIssuer(issuer);
+    canonicalizeIssuer(options.expectedIssuer);
   } catch {
     throw new Error("Front-channel logout issuer validation failed");
   }
-  if (canonicalIssuer !== expectedIssuer) {
+  if (issuer !== options.expectedIssuer) {
     throw new Error("Front-channel logout issuer validation failed");
   }
 
@@ -61,7 +59,7 @@ export function validateFrontChannelLogoutRequest(
   }
 
   return {
-    issuer: canonicalIssuer,
+    issuer,
     sessionId,
   };
 }

@@ -7,14 +7,15 @@ const { ProtectedRoute } = require("../ProtectedRoute");
 const {
   buildRefreshedOidcSession,
   getOidcSessionStorageKey,
+  getLoginTransactionStorageKey,
 } = require("../security-state");
 
 // Use the real Core verifier, signed JWTs and provider restoration, with only
 // the transport and browser storage replaced. No verified identities are forged.
-const issuer = "https://historical.test/";
+let issuer = "https://historical.test/";
 const clientId = "web-client";
 const scope = "openid profile offline_access";
-const key = getOidcSessionStorageKey(issuer, clientId);
+let key = getOidcSessionStorageKey(issuer, clientId);
 const { privateKey, publicKey } = generateKeyPairSync("rsa", {
   modulusLength: 2048,
 });
@@ -84,7 +85,7 @@ async function refreshedSnapshot(raw = token()) {
 }
 
 async function mount(record, protectedRoute = false) {
-  values.set(key, JSON.stringify(record));
+  if (record) values.set(key, JSON.stringify(record));
   function Probe() {
     auth = useAuth();
     return null;
@@ -127,6 +128,8 @@ async function mount(record, protectedRoute = false) {
 }
 
 beforeEach(() => {
+  issuer = "https://historical.test/";
+  key = getOidcSessionStorageKey(issuer, clientId);
   global.crypto = webcrypto;
   values = new Map();
   calls = [];
@@ -174,7 +177,9 @@ beforeEach(() => {
     if (String(url).endsWith("/.well-known/openid-configuration")) {
       body = {
         issuer,
-        jwks_uri: `${issuer}jwks`,
+        jwks_uri: "https://historical.test/jwks",
+        authorization_endpoint: "https://historical.test/connect/authorize",
+        authorization_response_iss_parameter_supported: true,
         id_token_signing_alg_values_supported: ["RS256"],
       };
     } else if (String(url).endsWith("/jwks")) {
@@ -197,6 +202,77 @@ afterEach(async () => {
   delete global.window;
   delete global.sessionStorage;
 });
+
+it.each([
+  "https://historical.test",
+  "https://historical.test/",
+  "https://historical.test/tenant",
+  "https://historical.test/tenant/",
+])(
+  "preserves exact issuer through React callback, refresh and remount (%s)",
+  async (authority) => {
+    issuer = authority;
+    key = getOidcSessionStorageKey(issuer, clientId);
+    const { transaction } = await client().createAuthorizationRequest({
+      redirectUri: "https://app.test/callback",
+      scope,
+      audiencePolicy: "oidc-optional",
+      allowOfflineAccessScope: true,
+      requiredAcrValues: ["mfa"],
+      requiredAmrValues: ["otp"],
+    });
+    const transactionKey = getLoginTransactionStorageKey(
+      issuer,
+      clientId,
+      transaction.state,
+    );
+    values.set(transactionKey, JSON.stringify(transaction));
+    responseTokens.id_token = token({
+      exp: now() + 3600,
+      nonce: transaction.nonce,
+    });
+    global.window.location = new URL(
+      `https://app.test/callback?${new URLSearchParams({ code: "code", state: transaction.state, iss: issuer })}`,
+    );
+    await mount(null);
+    expect(auth.isAuthenticated).toBe(true);
+    expect(values.has(transactionKey)).toBe(false);
+    const current = JSON.parse(values.get(key));
+    expect(current.identity.issuer).toBe(issuer);
+    expect(current.oidc.issuer).toBe(issuer);
+    global.window.location = new URL("https://app.test/");
+    await Renderer.act(async () => renderer.unmount());
+    await mount(current);
+    expect(auth.isAuthenticated).toBe(true);
+    values.set(key, JSON.stringify({ ...current, expiresAt: 1 }));
+    delete responseTokens.id_token;
+    await Renderer.act(async () => {
+      expect(await auth.getAccessTokenSilently()).toBe("refreshed-access");
+    });
+    const historical = JSON.parse(values.get(key));
+    expect(historical.idTokenCurrent).toBe(false);
+    await Renderer.act(async () => renderer.unmount());
+    await mount(historical);
+    expect(auth.isAuthenticated).toBe(true);
+    expect(auth.user).toEqual(userInfo);
+  },
+);
+
+it.each(["https://historical.test", "https://historical.test/"])(
+  "does not restore the other protocol issuer from a shared storage namespace (%s)",
+  async (authority) => {
+    issuer = authority;
+    key = getOidcSessionStorageKey(issuer, clientId);
+    const record = await refreshedSnapshot();
+    issuer = issuer.endsWith("/") ? issuer.slice(0, -1) : issuer + "/";
+    await mount(record);
+    expect(auth.isAuthenticated).toBe(false);
+    expect(auth.user).toBeNull();
+    await Renderer.act(async () => {
+      expect(await auth.getAccessTokenSilently()).toBeNull();
+    });
+  },
+);
 
 it.each([
   ["expired ID token", -120, false],
