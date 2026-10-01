@@ -1,0 +1,26 @@
+name: SDK release check
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run release:check
+      - run: npm ci --prefix examples/node --ignore-scripts
+      - run: npm run build --prefix examples/node
+      - run: npm ci --prefix examples/react --ignore-scripts
+      - run: npm run build --prefix examples/react
+      - run: npm ci --prefix examples/react-native --ignore-scripts
+      - run: npm run typecheck --prefix examples/react-native

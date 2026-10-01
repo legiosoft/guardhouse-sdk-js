@@ -1,6 +1,5 @@
 import type {
   BrowserLoginOptions,
-  ExchangeCodeForTokensOptions,
   GetAccessTokenOptions,
   GuardhouseAuthResult,
   GuardhouseClientConfig,
@@ -8,7 +7,6 @@ import type {
   GuardhouseLogoutOptions,
   GuardhouseSession,
   LoginWithPasskeyOptions,
-  RedirectTokenPayload,
   RefreshTokenOptions,
   RestoreSessionOptions,
 } from "../types/index";
@@ -39,11 +37,10 @@ import { PasskeyManager } from "./PasskeyManager";
 const DEFAULT_SCOPE = "openid profile offline_access";
 
 const DEFAULT_ENDPOINTS = {
-  authorization: "/connect/authorize",
   registration: "/account/signup",
   token: "/connect/token",
   userInfo: "/connect/userinfo",
-  revocation: "/connect/revocation",
+  revocation: "/connect/revoke",
   passkeyChallenge: "/connect/webauthn/challenge",
   passkeyAssertion: "/connect/webauthn/verify",
 } as const;
@@ -112,6 +109,17 @@ export class GuardhouseClient {
       tokenEndpoint: endpoints.token,
       userInfoEndpoint: endpoints.userInfo,
       revocationEndpoint: endpoints.revocation,
+      requestTimeoutMs: config.requestTimeoutMs,
+      discoveryCacheTtlMs: config.discoveryCacheTtlMs,
+      allowUnsafeHttpMethods: config.allowUnsafeHttpMethods,
+      requireDpopForAccessTokenRequests:
+        config.requireDpopForAccessTokenRequests,
+      allowScopeNarrowing: config.allowScopeNarrowing,
+      maxAuthorizationHeaderBytes: config.maxAuthorizationHeaderBytes,
+      maxSilentAuthAttempts: config.maxSilentAuthAttempts,
+      requireUserInteractionForSensitiveOperations:
+        config.requireUserInteractionForSensitiveOperations,
+      dpopProofFactory: config.dpopProofFactory,
       debug,
     });
 
@@ -126,7 +134,7 @@ export class GuardhouseClient {
 
     const sessionStorage = config.sessionStorage
       ? ensureChunkedStorage(config.sessionStorage, chunkSize)
-      : undefined;
+      : refreshTokenStorage;
 
     const browser: GuardhouseBrowserAdapter =
       config.browser ?? new InAppBrowserAuthAdapter(debug);
@@ -139,12 +147,11 @@ export class GuardhouseClient {
       defaultAudience,
       defaultEphemeralSession,
       userInfoOnLogin,
-      authorizationEndpoint: endpoints.authorization,
       registrationEndpoint: endpoints.registration,
-      tokenEndpoint: endpoints.token,
+      requiredAcrValues: config.requiredAcrValues,
+      requiredAmrValues: config.requiredAmrValues,
       coreClient,
       browser,
-      cryptoAdapter,
       refreshTokenStorage,
       sessionStorage,
       logger,
@@ -159,8 +166,8 @@ export class GuardhouseClient {
       fetch: fetchImpl,
       passkey: config.passkey,
       logger,
-      persistTokenResponse: (tokenResponse) =>
-        this.authManager.persistTokenResponse(tokenResponse),
+      persistTokenResponse: (tokenResponse, requestedScope) =>
+        this.authManager.persistTokenResponse(tokenResponse, requestedScope),
     });
   }
 
@@ -180,25 +187,6 @@ export class GuardhouseClient {
     options: BrowserLoginOptions = {},
   ): Promise<GuardhouseAuthResult> {
     return this.authManager.registerWithBrowser(options);
-  }
-
-  /**
-   * Exchanges an OAuth authorization code for tokens via `@guardhouse/core`.
-   */
-  exchangeCodeForTokens(
-    code: string,
-    options: ExchangeCodeForTokensOptions = {},
-  ): Promise<GuardhouseAuthResult> {
-    return this.authManager.exchangeCodeForTokens(code, options);
-  }
-
-  /**
-   * Persists tokens provided directly by deep link callback payloads.
-   */
-  applyRedirectTokens(
-    payload: RedirectTokenPayload,
-  ): Promise<GuardhouseAuthResult> {
-    return this.authManager.applyRedirectTokens(payload);
   }
 
   /**
@@ -256,10 +244,6 @@ export class GuardhouseClient {
     const configured = overrides ?? {};
 
     return {
-      authorization: resolveEndpoint(
-        authority,
-        configured.authorization ?? DEFAULT_ENDPOINTS.authorization,
-      ),
       registration: resolveEndpoint(
         authority,
         configured.registration ?? DEFAULT_ENDPOINTS.registration,

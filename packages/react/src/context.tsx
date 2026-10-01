@@ -6,13 +6,9 @@ import {
   useMemo,
   useRef,
   useState,
-  type ReactNode,
 } from "react";
 import {
   GuardhouseClient,
-  generateAuthUrl,
-  generateNonce,
-  generatePKCE,
   generateState,
   setGuardhouseDebug,
 } from "@guardhouse/core";
@@ -21,9 +17,10 @@ import type {
   User as CoreUser,
 } from "@guardhouse/core";
 import type {
-  AppState,
   AuthState,
-  GuardhouseConfig,
+  AuthContextValue,
+  AppState,
+  GuardhouseProviderProps,
   LoginOptions,
   LogoutOptions,
   OidcSessionData,
@@ -35,30 +32,61 @@ import {
   StorageKeys,
   parseQueryParams,
   removeQueryParams,
-  validateIdToken,
+  getCurrentReturnTo,
+  normalizeReturnTo,
 } from "./utils";
+import {
+  OIDC_SESSION_VERSION,
+  buildRefreshedOidcSession,
+  getAuthorizationResponseParams,
+  getLoginTransactionStorageKey,
+  getLogoutStateStorageKey,
+  getOidcSessionStorageKey,
+  isAuthOperationCurrent,
+  isRetryablePreResponseRefreshError,
+  isValidOAuthState,
+  oidcIdentitiesEqual,
+  getIssuerIdentifier,
+  parseLoginTransaction,
+  parseStoredOidcSession,
+  removeStorageValueIfMatches,
+  replaceStorageValueIfMatches,
+  removeStorageValue,
+  setStorageValue,
+  resolveAuthenticatedUser,
+  snapshotAuthenticatedUser,
+} from "./security-state";
 import { createReactLogger } from "./debug";
 
 const DEFAULT_SCOPE = "openid profile email";
 const ACCESS_TOKEN_REFRESH_LEEWAY_SECONDS = 60;
-
-interface AuthContextValue extends AuthState {
-  loginWithRedirect: (options?: LoginOptions) => Promise<void>;
-  logout: (options?: LogoutOptions) => Promise<void>;
-  getAccessToken: () => Promise<string | null>;
-  getAccessTokenSilently: () => Promise<string | null>;
-  isAuthenticated: boolean;
-  isLoading: boolean;
-  error: string | null;
-  user: CoreUser | null;
+interface RefreshedSessionResult {
+  session: OidcSessionData;
+  snapshot: StoredOidcSessionSnapshot;
+  user: CoreUser;
 }
+interface StoredOidcSessionSnapshot {
+  session: OidcSessionData;
+  serialized: string;
+}
+const LEGACY_STORAGE_KEYS = [
+  StorageKeys.OIDC_SESSION,
+  StorageKeys.ACCESS_TOKEN,
+  StorageKeys.REFRESH_TOKEN,
+  StorageKeys.ID_TOKEN,
+  StorageKeys.EXPIRES_AT,
+  StorageKeys.USER,
+  StorageKeys.CODE_VERIFIER,
+  StorageKeys.STATE,
+  StorageKeys.NONCE,
+  StorageKeys.REQUESTED_SCOPE,
+  StorageKeys.REQUESTED_AUDIENCE,
+  StorageKeys.PROMPT,
+  StorageKeys.APP_STATE,
+  StorageKeys.LOGOUT_STATE,
+] as const;
 
 const AuthContext = createContext<AuthContextValue | null>(null);
-
-interface GuardhouseProviderProps {
-  config: GuardhouseConfig;
-  children: ReactNode;
-}
 
 function scopeContains(scope: string | undefined, value: string): boolean {
   if (!scope) {
@@ -68,81 +96,7 @@ function scopeContains(scope: string | undefined, value: string): boolean {
   return scope
     .trim()
     .split(/\s+/)
-    .some((entry) => entry.toLowerCase() === value.toLowerCase());
-}
-
-function parseStoredOidcSession(
-  serializedSession: string | null,
-): OidcSessionData | null {
-  if (!serializedSession) {
-    return null;
-  }
-
-  let parsed: unknown;
-
-  try {
-    parsed = JSON.parse(serializedSession);
-  } catch {
-    return null;
-  }
-
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return null;
-  }
-
-  const candidate = parsed as Record<string, unknown>;
-  const user = candidate["user"];
-  const oidc = candidate["oidc"];
-
-  if (
-    typeof candidate["accessToken"] !== "string" ||
-    candidate["accessToken"].trim() === "" ||
-    typeof candidate["tokenType"] !== "string" ||
-    candidate["tokenType"].trim() === "" ||
-    typeof candidate["expiresAt"] !== "number" ||
-    !Number.isFinite(candidate["expiresAt"]) ||
-    !user ||
-    typeof user !== "object" ||
-    typeof (user as Record<string, unknown>)["sub"] !== "string" ||
-    !oidc ||
-    typeof oidc !== "object" ||
-    typeof (oidc as Record<string, unknown>)["issuer"] !== "string"
-  ) {
-    return null;
-  }
-
-  const refreshToken = candidate["refreshToken"];
-  const idToken = candidate["idToken"];
-  const scope = candidate["scope"];
-  const audience = (oidc as Record<string, unknown>)["audience"];
-  const sessionState = (oidc as Record<string, unknown>)["sessionState"];
-
-  return {
-    accessToken: candidate["accessToken"],
-    tokenType: candidate["tokenType"],
-    expiresAt: candidate["expiresAt"],
-    refreshToken:
-      typeof refreshToken === "string" && refreshToken.trim() !== ""
-        ? refreshToken
-        : undefined,
-    idToken:
-      typeof idToken === "string" && idToken.trim() !== ""
-        ? idToken
-        : undefined,
-    scope: typeof scope === "string" && scope.trim() !== "" ? scope : undefined,
-    user: user as CoreUser,
-    oidc: {
-      issuer: (oidc as Record<string, unknown>)["issuer"] as string,
-      audience:
-        typeof audience === "string" && audience.trim() !== ""
-          ? audience
-          : undefined,
-      sessionState:
-        typeof sessionState === "string" && sessionState.trim() !== ""
-          ? sessionState
-          : undefined,
-    },
-  };
+    .some((entry) => entry === value);
 }
 
 export function GuardhouseProvider({
@@ -155,10 +109,20 @@ export function GuardhouseProvider({
     error: null,
     user: null,
   });
-  const hasHandledCallback = useRef<boolean>(false);
-  const activeRefreshPromise = useRef<Promise<OidcSessionData | null> | null>(
-    null,
-  );
+  const initializedNamespaceRef = useRef<string | null>(null);
+  const activeRefreshPromise = useRef<{
+    namespace: string;
+    epoch: number;
+    snapshot: string;
+    promise: Promise<RefreshedSessionResult | null>;
+  } | null>(null);
+  const activeLoginPromise = useRef<{
+    namespace: string;
+    epoch: number;
+    promise: Promise<void>;
+  } | null>(null);
+  const activeCallbackPromises = useRef(new Map<string, Promise<boolean>>());
+  const authOperationEpochRef = useRef(0);
   const isMountedRef = useRef<boolean>(true);
 
   const storage: StorageAdapter = useMemo(
@@ -168,6 +132,34 @@ export function GuardhouseProvider({
   const logger = useMemo(
     () => createReactLogger("Provider", config.debug),
     [config.debug],
+  );
+  const issuerIdentifier = useMemo(
+    () => getIssuerIdentifier(config.authority),
+    [config.authority],
+  );
+  const oidcSessionStorageKey = useMemo(
+    () => getOidcSessionStorageKey(issuerIdentifier, config.clientId),
+    [config.clientId, issuerIdentifier],
+  );
+  const logoutStateStorageKey = useMemo(
+    () => getLogoutStateStorageKey(issuerIdentifier, config.clientId),
+    [config.clientId, issuerIdentifier],
+  );
+  const currentNamespaceRef = useRef(oidcSessionStorageKey);
+  currentNamespaceRef.current = oidcSessionStorageKey;
+  const invalidateAuthOperations = useCallback((): number => {
+    authOperationEpochRef.current += 1;
+    return authOperationEpochRef.current;
+  }, []);
+  const isCurrentAuthOperation = useCallback(
+    (operationEpoch: number, operationNamespace: string): boolean =>
+      isAuthOperationCurrent(
+        operationEpoch,
+        authOperationEpochRef.current,
+        operationNamespace,
+        currentNamespaceRef.current,
+      ),
+    [],
   );
 
   const clientConfig = useMemo<CoreGuardhouseConfig>(
@@ -224,9 +216,10 @@ export function GuardhouseProvider({
     isMountedRef.current = true;
 
     return () => {
+      invalidateAuthOperations();
       isMountedRef.current = false;
     };
-  }, []);
+  }, [invalidateAuthOperations]);
 
   useEffect(() => {
     setGuardhouseDebug(Boolean(config.debug));
@@ -234,13 +227,17 @@ export function GuardhouseProvider({
   }, [config.debug, logger]);
 
   const handleError = useCallback(
-    (error: string) => {
-      logger.error("Authentication flow failed", { error });
+    (error: unknown) => {
+      const normalizedError =
+        error instanceof Error ? error : new Error("Authentication failed");
+      logger.error("Authentication flow failed", {
+        error: normalizedError.message,
+      });
 
       setState((prev) => ({
         ...prev,
         isLoading: false,
-        error,
+        error: normalizedError,
         isAuthenticated: false,
         user: null,
       }));
@@ -250,8 +247,9 @@ export function GuardhouseProvider({
 
   const handleSuccess = useCallback(
     (user: CoreUser, tokenData?: TokenData) => {
+      const immutableUser = snapshotAuthenticatedUser(user);
       logger.debug("Updating auth state to authenticated", {
-        subject: user.sub,
+        subject: immutableUser.sub,
         hasTokenData: Boolean(tokenData),
       });
 
@@ -260,11 +258,11 @@ export function GuardhouseProvider({
         isLoading: false,
         error: null,
         isAuthenticated: true,
-        user,
+        user: immutableUser,
       }));
 
       logger.info("Authentication flow completed", {
-        subject: user.sub,
+        subject: immutableUser.sub,
       });
     },
     [logger],
@@ -275,282 +273,767 @@ export function GuardhouseProvider({
     setState((prev) => ({ ...prev, isLoading: true }));
   }, [logger]);
 
-  const clearTransientLoginState = useCallback(async () => {
-    await Promise.all([
-      storage.removeItem(StorageKeys.CODE_VERIFIER),
-      storage.removeItem(StorageKeys.STATE),
-      storage.removeItem(StorageKeys.NONCE),
-      storage.removeItem(StorageKeys.REQUESTED_SCOPE),
-      storage.removeItem(StorageKeys.REQUESTED_AUDIENCE),
-      storage.removeItem(StorageKeys.PROMPT),
-      storage.removeItem(StorageKeys.APP_STATE),
-    ]);
+  const clearLegacyStorage = useCallback(async () => {
+    await Promise.all(
+      LEGACY_STORAGE_KEYS.map((key) => removeStorageValue(storage, key)),
+    );
   }, [storage]);
 
-  const clearAuthState = useCallback(async () => {
+  const clearAuthState = useCallback(async (): Promise<number> => {
+    const invalidationEpoch = invalidateAuthOperations();
     logger.debug("Clearing stored auth state from session storage");
 
     await Promise.all([
-      storage.removeItem(StorageKeys.OIDC_SESSION),
-      storage.removeItem(StorageKeys.ACCESS_TOKEN),
-      storage.removeItem(StorageKeys.REFRESH_TOKEN),
-      storage.removeItem(StorageKeys.ID_TOKEN),
-      storage.removeItem(StorageKeys.EXPIRES_AT),
-      storage.removeItem(StorageKeys.USER),
+      removeStorageValue(storage, oidcSessionStorageKey),
+      clearLegacyStorage(),
     ]);
-
-    await clearTransientLoginState();
     await client.clearSessionState();
-  }, [clearTransientLoginState, client, logger, storage]);
+
+    if (
+      isMountedRef.current &&
+      isCurrentAuthOperation(invalidationEpoch, oidcSessionStorageKey)
+    ) {
+      setState({
+        isAuthenticated: false,
+        isLoading: false,
+        error: null,
+        user: null,
+      });
+    }
+
+    return invalidationEpoch;
+  }, [
+    clearLegacyStorage,
+    client,
+    invalidateAuthOperations,
+    isCurrentAuthOperation,
+    logger,
+    oidcSessionStorageKey,
+    storage,
+  ]);
+
+  const parseOidcSessionSnapshot = useCallback(
+    (serialized: string | null): StoredOidcSessionSnapshot | null => {
+      if (!serialized) return null;
+      const session = parseStoredOidcSession(
+        serialized,
+        issuerIdentifier,
+        config.clientId,
+      );
+      return session ? { session, serialized } : null;
+    },
+    [config.clientId, issuerIdentifier],
+  );
+
+  const readCurrentOidcSessionSnapshot = useCallback(
+    async (): Promise<StoredOidcSessionSnapshot | null> =>
+      parseOidcSessionSnapshot(await storage.getItem(oidcSessionStorageKey)),
+    [oidcSessionStorageKey, parseOidcSessionSnapshot, storage],
+  );
 
   const readStoredOidcSession =
-    useCallback(async (): Promise<OidcSessionData | null> => {
-      const serializedSession = await storage.getItem(StorageKeys.OIDC_SESSION);
-      return parseStoredOidcSession(serializedSession);
-    }, [storage]);
+    useCallback(async (): Promise<StoredOidcSessionSnapshot | null> => {
+      await clearLegacyStorage();
+
+      const serializedSession = await storage.getItem(oidcSessionStorageKey);
+      const snapshot = parseOidcSessionSnapshot(serializedSession);
+      if (snapshot || !serializedSession) return snapshot;
+
+      await removeStorageValueIfMatches(
+        storage,
+        oidcSessionStorageKey,
+        serializedSession,
+      );
+
+      // A compare-and-remove can lose to a newer writer. Inspect at most one
+      // replacement record and never delete it using the stale serialization.
+      const replacementSerialized = await storage.getItem(
+        oidcSessionStorageKey,
+      );
+      const replacement = parseOidcSessionSnapshot(replacementSerialized);
+      if (replacement || !replacementSerialized) return replacement;
+
+      await removeStorageValueIfMatches(
+        storage,
+        oidcSessionStorageKey,
+        replacementSerialized,
+      );
+      return null;
+    }, [
+      clearLegacyStorage,
+      oidcSessionStorageKey,
+      parseOidcSessionSnapshot,
+      storage,
+    ]);
+
+  const createOidcSessionSnapshot = useCallback(
+    (sessionData: OidcSessionData): StoredOidcSessionSnapshot => {
+      if (
+        sessionData.version !== OIDC_SESSION_VERSION ||
+        sessionData.clientId !== config.clientId ||
+        getIssuerIdentifier(sessionData.oidc.issuer) !== issuerIdentifier ||
+        sessionData.identity.clientId !== config.clientId ||
+        getIssuerIdentifier(sessionData.identity.issuer) !== issuerIdentifier ||
+        !sessionData.idToken ||
+        !sessionData.scope
+      ) {
+        throw new Error(
+          "Refusing to persist an OIDC session for another client",
+        );
+      }
+
+      return {
+        session: sessionData,
+        serialized: JSON.stringify(sessionData),
+      };
+    },
+    [config.clientId, issuerIdentifier],
+  );
 
   const persistOidcSession = useCallback(
-    async (sessionData: OidcSessionData): Promise<void> => {
-      await storage.setItem(
-        StorageKeys.OIDC_SESSION,
-        JSON.stringify(sessionData),
+    async (
+      sessionData: OidcSessionData,
+    ): Promise<StoredOidcSessionSnapshot> => {
+      const snapshot = createOidcSessionSnapshot(sessionData);
+      await setStorageValue(
+        storage,
+        oidcSessionStorageKey,
+        snapshot.serialized,
       );
+      return snapshot;
     },
-    [storage],
+    [createOidcSessionSnapshot, oidcSessionStorageKey, storage],
+  );
+
+  const replacePersistedOidcSessionIfMatches = useCallback(
+    async (
+      previousSnapshot: StoredOidcSessionSnapshot,
+      sessionData: OidcSessionData,
+    ): Promise<StoredOidcSessionSnapshot | null> => {
+      const replacement = createOidcSessionSnapshot(sessionData);
+      const replaced = await replaceStorageValueIfMatches(
+        storage,
+        oidcSessionStorageKey,
+        previousSnapshot.serialized,
+        replacement.serialized,
+      );
+      return replaced ? replacement : null;
+    },
+    [createOidcSessionSnapshot, oidcSessionStorageKey, storage],
+  );
+
+  const removePersistedSessionIfMatches = useCallback(
+    async (
+      snapshot: StoredOidcSessionSnapshot,
+    ): Promise<StoredOidcSessionSnapshot | null> => {
+      await removeStorageValueIfMatches(
+        storage,
+        oidcSessionStorageKey,
+        snapshot.serialized,
+      );
+
+      const currentSerialized = await storage.getItem(oidcSessionStorageKey);
+      const current = parseOidcSessionSnapshot(currentSerialized);
+      if (current) return current;
+
+      if (currentSerialized) {
+        await removeStorageValueIfMatches(
+          storage,
+          oidcSessionStorageKey,
+          currentSerialized,
+        );
+
+        // One bounded read lets a valid session that won the invalid-record
+        // cleanup race survive and be restored by the caller.
+        const replacementSerialized = await storage.getItem(
+          oidcSessionStorageKey,
+        );
+        const replacement = parseOidcSessionSnapshot(replacementSerialized);
+        if (replacement) return replacement;
+        if (replacementSerialized) {
+          await removeStorageValueIfMatches(
+            storage,
+            oidcSessionStorageKey,
+            replacementSerialized,
+          );
+        }
+      }
+
+      await client.clearSessionState();
+      return null;
+    },
+    [client, oidcSessionStorageKey, parseOidcSessionSnapshot, storage],
+  );
+
+  const verifySessionIdentity = useCallback(
+    async (sessionData: OidcSessionData): Promise<CoreUser> => {
+      const verified = await client.verifyIdToken(sessionData.idToken, {
+        purpose: "session",
+        requiredAcrValues: config.requiredAcrValues,
+        requiredAmrValues: config.requiredAmrValues,
+      });
+      if (!oidcIdentitiesEqual(verified.identity, sessionData.identity)) {
+        throw new Error(
+          "Stored OIDC identity does not match the signed ID token",
+        );
+      }
+
+      const { user } = await resolveAuthenticatedUser(verified.payload, () =>
+        client.getUserInfo(sessionData.accessToken, verified.identity),
+      );
+      return user;
+    },
+    [client, config.requiredAcrValues, config.requiredAmrValues],
   );
 
   const refreshSession = useCallback(
-    async (sessionData: OidcSessionData): Promise<OidcSessionData | null> => {
-      if (activeRefreshPromise.current) {
+    async (
+      sessionSnapshot: StoredOidcSessionSnapshot,
+      allowNewerRecovery = true,
+    ): Promise<RefreshedSessionResult | null> => {
+      const operationEpoch = authOperationEpochRef.current;
+
+      if (
+        activeRefreshPromise.current?.namespace === oidcSessionStorageKey &&
+        activeRefreshPromise.current.epoch === operationEpoch &&
+        activeRefreshPromise.current.snapshot === sessionSnapshot.serialized
+      ) {
         logger.debug("Joining in-flight token refresh request");
-        return activeRefreshPromise.current;
+        return activeRefreshPromise.current.promise;
       }
 
-      const refreshPromise = (async (): Promise<OidcSessionData | null> => {
-        if (!sessionData.refreshToken) {
-          await clearAuthState();
-          return null;
-        }
+      const refreshPromise =
+        (async (): Promise<RefreshedSessionResult | null> => {
+          const restoreReplacement = async (
+            replacement: StoredOidcSessionSnapshot,
+          ): Promise<RefreshedSessionResult | null> => {
+            if (
+              !isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)
+            ) {
+              return null;
+            }
 
-        try {
-          const tokenResponse = await client.refreshToken(
-            sessionData.refreshToken,
-          );
+            if (
+              replacement.session.expiresAt <= Math.floor(Date.now() / 1000)
+            ) {
+              return runRefresh(replacement, false);
+            }
 
-          const refreshedSession: OidcSessionData = {
-            ...sessionData,
-            accessToken: tokenResponse.access_token,
-            refreshToken:
-              tokenResponse.refresh_token || sessionData.refreshToken,
-            idToken: tokenResponse.id_token || sessionData.idToken,
-            tokenType: tokenResponse.token_type,
-            scope: tokenResponse.scope || sessionData.scope,
-            expiresAt: Math.floor(Date.now() / 1000) + tokenResponse.expires_in,
+            try {
+              const user = await verifySessionIdentity(replacement.session);
+              const current = await readCurrentOidcSessionSnapshot();
+              if (current?.serialized !== replacement.serialized) {
+                return null;
+              }
+              return {
+                session: replacement.session,
+                snapshot: replacement,
+                user,
+              };
+            } catch (error) {
+              logger.warn("Newer stored session could not be restored", {
+                error: String(error),
+              });
+              await removePersistedSessionIfMatches(replacement);
+              return null;
+            }
           };
 
-          await persistOidcSession(refreshedSession);
+          const discardAndMaybeRecover = async (
+            staleSnapshot: StoredOidcSessionSnapshot,
+            canRecoverNewer: boolean,
+          ): Promise<RefreshedSessionResult | null> => {
+            const replacement =
+              await removePersistedSessionIfMatches(staleSnapshot);
+            if (!replacement || !canRecoverNewer) return null;
+            return restoreReplacement(replacement);
+          };
 
-          logger.info("Silent token refresh succeeded", {
-            expiresAt: refreshedSession.expiresAt,
-          });
+          const restoreCurrentWinner = async (
+            staleSnapshot: StoredOidcSessionSnapshot,
+            canRecoverNewer: boolean,
+          ): Promise<RefreshedSessionResult | null> => {
+            const current = await readCurrentOidcSessionSnapshot();
+            if (
+              !current ||
+              current.serialized === staleSnapshot.serialized ||
+              !canRecoverNewer
+            ) {
+              return null;
+            }
+            return restoreReplacement(current);
+          };
 
-          return refreshedSession;
-        } catch (error) {
-          logger.error("Token refresh failed", {
-            error: String(error),
-          });
-          await clearAuthState();
-          return null;
-        }
-      })();
+          async function runRefresh(
+            candidate: StoredOidcSessionSnapshot,
+            canRecoverNewer: boolean,
+          ): Promise<RefreshedSessionResult | null> {
+            const sessionData = candidate.session;
+            if (
+              sessionData.version !== OIDC_SESSION_VERSION ||
+              sessionData.clientId !== config.clientId ||
+              getIssuerIdentifier(sessionData.oidc.issuer) !==
+                issuerIdentifier ||
+              !sessionData.idToken
+            ) {
+              return discardAndMaybeRecover(candidate, canRecoverNewer);
+            }
 
-      activeRefreshPromise.current = refreshPromise;
+            if (!sessionData.refreshToken) {
+              return discardAndMaybeRecover(candidate, canRecoverNewer);
+            }
+
+            let refreshResponseSucceeded = false;
+            try {
+              const refreshResult = await client.refreshOidcSession(
+                sessionData.refreshToken,
+                {
+                  previousIdToken: sessionData.idToken,
+                  grantedScope: sessionData.scope,
+                  requiredAcrValues: config.requiredAcrValues,
+                  requiredAmrValues: config.requiredAmrValues,
+                },
+              );
+              refreshResponseSucceeded = true;
+              const tokenResponse = refreshResult.tokens;
+
+              if (
+                !isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)
+              ) {
+                return null;
+              }
+
+              const refreshedSession = buildRefreshedOidcSession(
+                sessionData,
+                tokenResponse,
+                refreshResult.identity,
+              );
+
+              let refreshedUser: CoreUser;
+              if (refreshResult.identityStatus === "current") {
+                const resolved = await resolveAuthenticatedUser(
+                  refreshResult.idToken.payload,
+                  () =>
+                    client.getUserInfo(
+                      tokenResponse.access_token,
+                      refreshResult.identity,
+                    ),
+                );
+                refreshedUser = resolved.user;
+              } else {
+                // Historical evidence may authorize UserInfo subject binding,
+                // but it never turns the expired ID token into a current token.
+                const userInfo = await client.getUserInfo(
+                  tokenResponse.access_token,
+                  refreshResult.identity,
+                );
+                if (userInfo.sub !== refreshResult.identity.subject) {
+                  throw new Error(
+                    "UserInfo subject does not match the historical ID token subject",
+                  );
+                }
+                refreshedUser = snapshotAuthenticatedUser(userInfo);
+              }
+
+              if (
+                !isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)
+              ) {
+                return null;
+              }
+
+              const refreshedSnapshot =
+                await replacePersistedOidcSessionIfMatches(
+                  candidate,
+                  refreshedSession,
+                );
+
+              if (!refreshedSnapshot) {
+                return restoreCurrentWinner(candidate, canRecoverNewer);
+              }
+
+              if (
+                !isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)
+              ) {
+                await removePersistedSessionIfMatches(refreshedSnapshot);
+                return null;
+              }
+
+              const currentSnapshot = await readCurrentOidcSessionSnapshot();
+              if (
+                currentSnapshot?.serialized !== refreshedSnapshot.serialized
+              ) {
+                if (!currentSnapshot || !canRecoverNewer) return null;
+                return restoreReplacement(currentSnapshot);
+              }
+
+              logger.info("Silent token refresh succeeded", {
+                expiresAt: refreshedSession.expiresAt,
+              });
+
+              return {
+                session: refreshedSession,
+                snapshot: refreshedSnapshot,
+                user: refreshedUser,
+              };
+            } catch (error) {
+              if (
+                !isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)
+              ) {
+                return null;
+              }
+
+              logger.error("Token refresh failed", {
+                error: String(error),
+              });
+              if (
+                refreshResponseSucceeded ||
+                !isRetryablePreResponseRefreshError(error)
+              ) {
+                return discardAndMaybeRecover(candidate, canRecoverNewer);
+              }
+              return restoreCurrentWinner(candidate, canRecoverNewer);
+            }
+          }
+
+          return runRefresh(sessionSnapshot, allowNewerRecovery);
+        })();
+
+      activeRefreshPromise.current = {
+        namespace: oidcSessionStorageKey,
+        epoch: operationEpoch,
+        snapshot: sessionSnapshot.serialized,
+        promise: refreshPromise,
+      };
 
       try {
         return await refreshPromise;
       } finally {
-        if (activeRefreshPromise.current === refreshPromise) {
+        if (activeRefreshPromise.current?.promise === refreshPromise) {
           activeRefreshPromise.current = null;
         }
       }
     },
-    [clearAuthState, client, logger, persistOidcSession],
+    [
+      client,
+      config.clientId,
+      config.requiredAcrValues,
+      config.requiredAmrValues,
+      logger,
+      isCurrentAuthOperation,
+      issuerIdentifier,
+      oidcSessionStorageKey,
+      readCurrentOidcSessionSnapshot,
+      replacePersistedOidcSessionIfMatches,
+      removePersistedSessionIfMatches,
+      verifySessionIdentity,
+    ],
   );
 
-  const handleCallback = useCallback(async () => {
-    const searchParams = parseQueryParams(window.location.search);
-    const hashParams = parseQueryParams(
-      window.location.hash.startsWith("#")
-        ? `?${window.location.hash.slice(1)}`
-        : window.location.hash,
-    );
+  const restoreSessionSnapshot = useCallback(
+    async (
+      initialSnapshot: StoredOidcSessionSnapshot,
+      allowNewerRecovery = true,
+    ): Promise<RefreshedSessionResult | null> => {
+      const restore = async (
+        candidate: StoredOidcSessionSnapshot,
+        canRecoverNewer: boolean,
+      ): Promise<RefreshedSessionResult | null> => {
+        if (candidate.session.expiresAt <= Math.floor(Date.now() / 1000)) {
+          return refreshSession(candidate, canRecoverNewer);
+        }
 
-    const hasAuthResponse = Boolean(
-      searchParams["code"] ||
-      searchParams["error"] ||
-      hashParams["code"] ||
-      hashParams["error"],
-    );
+        let user: CoreUser;
+        try {
+          user = await verifySessionIdentity(candidate.session);
+        } catch (error) {
+          logger.warn("Stored session identity validation failed", {
+            error: String(error),
+          });
+          const replacement = await removePersistedSessionIfMatches(candidate);
+          if (!replacement || !canRecoverNewer) return null;
+          return restore(replacement, false);
+        }
 
-    if (!hasAuthResponse) {
-      logger.debug("No authorization callback parameters found");
-      setState((prev) => ({ ...prev, isLoading: false }));
-      return;
+        const current = await readCurrentOidcSessionSnapshot();
+        if (current?.serialized === candidate.serialized) {
+          return {
+            session: candidate.session,
+            snapshot: candidate,
+            user,
+          };
+        }
+
+        if (!current || !canRecoverNewer) return null;
+        return restore(current, false);
+      };
+
+      return restore(initialSnapshot, allowNewerRecovery);
+    },
+    [
+      logger,
+      readCurrentOidcSessionSnapshot,
+      refreshSession,
+      removePersistedSessionIfMatches,
+      verifySessionIdentity,
+    ],
+  );
+
+  const handleCallback = useCallback(async (): Promise<boolean> => {
+    const callbackUrl = window.location.href;
+    const response = getAuthorizationResponseParams(callbackUrl);
+    const returnedStates = response
+      ? [...new Set(response.stateCandidates.filter(isValidOAuthState))]
+      : [];
+
+    if (!response || returnedStates.length === 0) {
+      logger.debug("Ignoring URL without a matching OAuth transaction");
+      return false;
+    }
+
+    const candidateTransactions = returnedStates.map((returnedState) => ({
+      returnedState,
+      storageKey: getLoginTransactionStorageKey(
+        issuerIdentifier,
+        config.clientId,
+        returnedState,
+      ),
+    }));
+    const existingCallback = candidateTransactions
+      .map(({ storageKey }) => activeCallbackPromises.current.get(storageKey))
+      .find((candidate): candidate is Promise<boolean> => Boolean(candidate));
+
+    if (existingCallback) {
+      return existingCallback;
+    }
+
+    const callbackPromise = (async (): Promise<boolean> => {
+      await clearLegacyStorage();
+
+      let matchedTransaction:
+        | {
+            storageKey: string;
+            serialized: string;
+            transaction: NonNullable<ReturnType<typeof parseLoginTransaction>>;
+          }
+        | undefined;
+
+      for (const { returnedState, storageKey } of candidateTransactions) {
+        const serializedTransaction = await storage.getItem(storageKey);
+        const transaction = parseLoginTransaction(
+          serializedTransaction,
+          issuerIdentifier,
+          config.clientId,
+          returnedState,
+        );
+
+        if (transaction && serializedTransaction) {
+          matchedTransaction = {
+            storageKey,
+            serialized: serializedTransaction,
+            transaction,
+          };
+          break;
+        }
+
+        if (serializedTransaction) {
+          await removeStorageValueIfMatches(
+            storage,
+            storageKey,
+            serializedTransaction,
+          );
+        }
+      }
+
+      if (!matchedTransaction) {
+        return false;
+      }
+
+      if (!isMountedRef.current) {
+        return true;
+      }
+
+      const operationEpoch = invalidateAuthOperations();
+      handleLoading();
+
+      try {
+        const consumed = await removeStorageValueIfMatches(
+          storage,
+          matchedTransaction.storageKey,
+          matchedTransaction.serialized,
+        );
+        if (!consumed) {
+          return false;
+        }
+
+        const transaction = matchedTransaction.transaction;
+        const callback = await client.validateOAuthCallback(
+          { mode: "query", url: callbackUrl },
+          transaction,
+        );
+        removeQueryParams();
+
+        if (callback.type === "error") {
+          const callbackError = new Error(
+            callback.errorDescription || callback.error,
+          ) as Error & { code?: string };
+          callbackError.code = callback.error;
+          throw callbackError;
+        }
+
+        if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
+          return true;
+        }
+
+        const exchangeResult = await client.exchangeAuthorizationCode(callback);
+        if (exchangeResult.mode !== "oidc") {
+          throw new Error(
+            "React authentication requires an OIDC token response",
+          );
+        }
+        const tokenData = exchangeResult.tokens;
+        const verifiedIdToken = exchangeResult.idToken;
+
+        if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
+          return true;
+        }
+
+        logger.debug("Token exchange succeeded", {
+          expiresIn: tokenData.expires_in,
+          hasRefreshToken: Boolean(tokenData.refresh_token),
+          hasIdToken: Boolean(tokenData.id_token),
+        });
+
+        const { user: authenticatedUser } = await resolveAuthenticatedUser(
+          verifiedIdToken.payload,
+          () =>
+            client.getUserInfo(
+              tokenData.access_token,
+              verifiedIdToken.identity,
+            ),
+        );
+
+        if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
+          return true;
+        }
+
+        const oidcSession: OidcSessionData = {
+          version: OIDC_SESSION_VERSION,
+          clientId: transaction.clientId,
+          accessToken: tokenData.access_token,
+          tokenType: tokenData.token_type,
+          expiresAt: Math.floor(Date.now() / 1000) + tokenData.expires_in,
+          refreshToken: tokenData.refresh_token,
+          idToken: tokenData.id_token!,
+          scope: tokenData.scope || transaction.requestedScope,
+          identity: verifiedIdToken.identity,
+          oidc: {
+            issuer: transaction.issuer,
+            audience: transaction.requestedAudience,
+            sessionState: callback.sessionState,
+          },
+        };
+
+        if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
+          return true;
+        }
+
+        const persistedSnapshot = await persistOidcSession(oidcSession);
+
+        if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
+          await removePersistedSessionIfMatches(persistedSnapshot);
+          return true;
+        }
+
+        handleSuccess(authenticatedUser, tokenData);
+        if (config.onRedirectCallback) {
+          await config.onRedirectCallback(
+            transaction.applicationState as AppState | undefined,
+          );
+        } else {
+          const applicationState = transaction.applicationState as
+            | AppState
+            | undefined;
+          const returnTo = normalizeReturnTo(applicationState?.returnTo ?? "/");
+          window.location.replace(
+            new URL(returnTo, window.location.origin).toString(),
+          );
+        }
+
+        logger.info("OAuth callback handled successfully", {
+          subject: authenticatedUser.sub,
+        });
+      } catch (error) {
+        if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
+          return true;
+        }
+
+        removeQueryParams();
+        const normalizedError =
+          error instanceof Error ? error : new Error("Unknown error occurred");
+
+        if (
+          isMountedRef.current &&
+          isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)
+        ) {
+          const previousSnapshot = await readStoredOidcSession();
+          const previousSession = previousSnapshot
+            ? await restoreSessionSnapshot(previousSnapshot)
+            : null;
+
+          if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
+            return true;
+          }
+
+          setState({
+            isLoading: false,
+            error: normalizedError,
+            isAuthenticated: Boolean(previousSession),
+            user: previousSession?.user ?? null,
+          });
+        } else {
+          logger.warn(
+            "Skipping callback error state update after context change",
+            {
+              error: normalizedError.message,
+            },
+          );
+        }
+      }
+
+      return true;
+    })();
+
+    for (const { storageKey } of candidateTransactions) {
+      activeCallbackPromises.current.set(storageKey, callbackPromise);
     }
 
     try {
-      handleLoading();
-
-      const storedState = await storage.getItem(StorageKeys.STATE);
-      if (!storedState) {
-        throw new Error("State parameter missing in session storage");
-      }
-
-      const codeVerifier = await storage.getItem(StorageKeys.CODE_VERIFIER);
-      if (!codeVerifier) {
-        throw new Error("Code verifier not found in session storage");
-      }
-
-      const nonce = await storage.getItem(StorageKeys.NONCE);
-      const requestedScope = await storage.getItem(StorageKeys.REQUESTED_SCOPE);
-      const requestedAudience = await storage.getItem(
-        StorageKeys.REQUESTED_AUDIENCE,
-      );
-      const prompt = await storage.getItem(StorageKeys.PROMPT);
-
-      const callback = await client.validateOAuthCallback(
-        window.location.href,
-        storedState,
-        prompt || undefined,
-      );
-
-      if (!callback.code) {
-        throw new Error("OAuth callback did not include an authorization code");
-      }
-
-      const tokenData = await client.exchangeCodeForTokens(
-        callback.code,
-        codeVerifier,
-        config.redirectUri,
-      );
-
-      logger.debug("Token exchange succeeded", {
-        expiresIn: tokenData.expires_in,
-        hasRefreshToken: Boolean(tokenData.refresh_token),
-        hasIdToken: Boolean(tokenData.id_token),
-      });
-
-      let fallbackUserFromIdToken: CoreUser | null = null;
-
-      if (tokenData.id_token && nonce) {
-        try {
-          const idTokenPayload = validateIdToken(
-            tokenData.id_token,
-            nonce,
-            config.authority,
-            config.clientId,
-          );
-          fallbackUserFromIdToken = idTokenPayload as CoreUser;
-        } catch (idTokenError) {
-          logger.warn("ID token validation failed", {
-            error: String(idTokenError),
-          });
-        }
-      }
-
-      let authenticatedUser: CoreUser | null = null;
-
-      try {
-        authenticatedUser = await client.getUserInfo(tokenData.access_token);
-      } catch (userInfoError) {
-        logger.warn("Failed to fetch user info", {
-          error: String(userInfoError),
-        });
-
-        if (fallbackUserFromIdToken) {
-          authenticatedUser = fallbackUserFromIdToken;
-        }
-      }
-
-      if (!authenticatedUser) {
-        throw new Error(
-          "Failed to load user profile. Ensure the client allows openid/profile scopes and /connect/userinfo.",
-        );
-      }
-
-      const oidcSession: OidcSessionData = {
-        accessToken: tokenData.access_token,
-        tokenType: tokenData.token_type,
-        expiresAt: Math.floor(Date.now() / 1000) + tokenData.expires_in,
-        refreshToken: tokenData.refresh_token,
-        idToken: tokenData.id_token,
-        scope: tokenData.scope || requestedScope || config.scope,
-        user: authenticatedUser,
-        oidc: {
-          issuer: config.authority,
-          audience: requestedAudience || config.audience,
-          sessionState:
-            typeof callback.params["session_state"] === "string"
-              ? callback.params["session_state"]
-              : undefined,
-        },
-      };
-
-      await persistOidcSession(oidcSession);
-      handleSuccess(authenticatedUser, tokenData);
-
-      if (config.onRedirectCallback) {
-        const appStateRaw = await storage.getItem(StorageKeys.APP_STATE);
-
-        if (appStateRaw) {
-          try {
-            const appState = JSON.parse(appStateRaw) as AppState;
-            config.onRedirectCallback(appState);
-          } catch {
-            config.onRedirectCallback();
-          }
-        } else {
-          config.onRedirectCallback();
-        }
-      }
-
-      logger.info("OAuth callback handled successfully", {
-        subject: authenticatedUser.sub,
-      });
-
-      removeQueryParams();
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : "Unknown error occurred";
-
-      if (isMountedRef.current) {
-        handleError(errorMessage);
-      } else {
-        logger.warn("Skipping callback error state update after unmount", {
-          error: errorMessage,
-        });
-      }
-
-      await clearAuthState();
-      removeQueryParams();
+      return await callbackPromise;
     } finally {
-      await clearTransientLoginState();
+      for (const { storageKey } of candidateTransactions) {
+        if (
+          activeCallbackPromises.current.get(storageKey) === callbackPromise
+        ) {
+          activeCallbackPromises.current.delete(storageKey);
+        }
+      }
     }
   }, [
-    clearAuthState,
-    clearTransientLoginState,
+    clearLegacyStorage,
     client,
-    config.audience,
-    config.authority,
     config.clientId,
     config.onRedirectCallback,
-    config.redirectUri,
-    config.scope,
-    handleError,
     handleLoading,
     handleSuccess,
+    invalidateAuthOperations,
+    isCurrentAuthOperation,
     logger,
+    issuerIdentifier,
+    oidcSessionStorageKey,
     persistOidcSession,
+    readStoredOidcSession,
+    removePersistedSessionIfMatches,
+    restoreSessionSnapshot,
     storage,
   ]);
 
@@ -563,18 +1046,11 @@ export function GuardhouseProvider({
     );
 
     const callbackState = searchParams["state"] ?? hashParams["state"];
-    const hasIssuerHints = Boolean(
-      searchParams["iss"] ||
-      searchParams["sid"] ||
-      hashParams["iss"] ||
-      hashParams["sid"],
-    );
-
-    if (!callbackState && !hasIssuerHints) {
+    if (!callbackState) {
       return false;
     }
 
-    const expectedLogoutState = await storage.getItem(StorageKeys.LOGOUT_STATE);
+    const expectedLogoutState = await storage.getItem(logoutStateStorageKey);
     const matchesExpectedLogoutState =
       typeof expectedLogoutState === "string" &&
       expectedLogoutState.trim() !== "" &&
@@ -582,68 +1058,78 @@ export function GuardhouseProvider({
       callbackState.trim() !== "" &&
       callbackState === expectedLogoutState;
 
-    if (!matchesExpectedLogoutState && !hasIssuerHints) {
+    if (!matchesExpectedLogoutState) {
       return false;
     }
 
     logger.debug("Detected post-logout callback, sanitizing URL", {
-      hasIssuerHints,
       hasState: Boolean(callbackState),
     });
 
-    await storage.removeItem(StorageKeys.LOGOUT_STATE);
+    await removeStorageValue(storage, logoutStateStorageKey);
     removeQueryParams();
 
     return true;
-  }, [logger, storage]);
+  }, [logger, logoutStateStorageKey, storage]);
 
   const checkSession = useCallback(async () => {
+    const operationEpoch = authOperationEpochRef.current;
+
     try {
+      if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
+        return;
+      }
+
       handleLoading();
       logger.debug("Checking existing session in session storage");
 
-      const sessionData = await readStoredOidcSession();
+      const sessionSnapshot = await readStoredOidcSession();
 
-      if (!sessionData) {
+      if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
+        return;
+      }
+
+      if (!sessionSnapshot) {
         logger.debug("No active OIDC session found");
         setState((prev) => ({ ...prev, isLoading: false }));
         return;
       }
 
-      const now = Math.floor(Date.now() / 1000);
-
-      if (sessionData.expiresAt <= now) {
+      if (sessionSnapshot.session.expiresAt <= Math.floor(Date.now() / 1000)) {
         logger.info("Stored OIDC session has expired", {
-          expiresAt: sessionData.expiresAt,
-          now,
+          expiresAt: sessionSnapshot.session.expiresAt,
         });
+      }
 
-        const refreshedSession = await refreshSession(sessionData);
+      const restoredSession = await restoreSessionSnapshot(sessionSnapshot);
 
-        if (!refreshedSession) {
-          setState((prev) => ({
-            ...prev,
-            isLoading: false,
-            isAuthenticated: false,
-            user: null,
-          }));
-          return;
-        }
-
-        handleSuccess(refreshedSession.user);
+      if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
         return;
       }
 
-      handleSuccess(sessionData.user);
+      if (!restoredSession) {
+        setState((prev) => ({
+          ...prev,
+          isLoading: false,
+          isAuthenticated: false,
+          user: null,
+        }));
+        return;
+      }
+
+      handleSuccess(restoredSession.user);
 
       logger.info("Restored authenticated session", {
-        subject: sessionData.user.sub,
+        subject: restoredSession.user.sub,
       });
     } catch (error) {
+      if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
+        return;
+      }
+
       logger.error("Session check failed", {
         error: String(error),
       });
-      await clearAuthState();
       setState((prev) => ({
         ...prev,
         isLoading: false,
@@ -652,12 +1138,13 @@ export function GuardhouseProvider({
       }));
     }
   }, [
-    clearAuthState,
     handleLoading,
     handleSuccess,
+    isCurrentAuthOperation,
     logger,
+    oidcSessionStorageKey,
     readStoredOidcSession,
-    refreshSession,
+    restoreSessionSnapshot,
   ]);
 
   useEffect(() => {
@@ -665,172 +1152,238 @@ export function GuardhouseProvider({
       return;
     }
 
-    logger.debug("Initializing Guardhouse React provider");
-
-    const searchParams = parseQueryParams(window.location.search);
-    const hashParams = parseQueryParams(
-      window.location.hash.startsWith("#")
-        ? `?${window.location.hash.slice(1)}`
-        : window.location.hash,
-    );
-
-    const hasAuthResponse = Boolean(
-      searchParams["code"] ||
-      searchParams["error"] ||
-      hashParams["code"] ||
-      hashParams["error"],
-    );
-
-    if (hasAuthResponse) {
-      if (hasHandledCallback.current) {
-        logger.debug("Skipping duplicate OAuth callback handling");
-        return;
-      }
-
-      hasHandledCallback.current = true;
-      void handleCallback();
+    if (initializedNamespaceRef.current === oidcSessionStorageKey) {
       return;
     }
 
+    initializedNamespaceRef.current = oidcSessionStorageKey;
+    logger.debug("Initializing Guardhouse React provider");
+    setState({
+      isAuthenticated: false,
+      isLoading: true,
+      error: null,
+      user: null,
+    });
+
     void (async () => {
+      await clearLegacyStorage();
+      const handledCallback = await handleCallback();
+
+      if (
+        handledCallback ||
+        currentNamespaceRef.current !== oidcSessionStorageKey
+      ) {
+        return;
+      }
+
       await handlePostLogoutRedirect();
+
+      if (currentNamespaceRef.current !== oidcSessionStorageKey) {
+        return;
+      }
+
       await checkSession();
-    })();
-  }, [checkSession, handleCallback, handlePostLogoutRedirect, logger]);
+    })().catch((error: unknown) => {
+      if (currentNamespaceRef.current !== oidcSessionStorageKey) {
+        return;
+      }
+
+      handleError(error);
+    });
+
+    return () => {
+      if (initializedNamespaceRef.current === oidcSessionStorageKey) {
+        initializedNamespaceRef.current = null;
+      }
+    };
+  }, [
+    checkSession,
+    clearLegacyStorage,
+    handleCallback,
+    handleError,
+    handlePostLogoutRedirect,
+    logger,
+    oidcSessionStorageKey,
+  ]);
 
   const loginWithRedirect = useCallback(
-    async (options?: LoginOptions) => {
-      try {
-        logger.info("Starting redirect login flow");
+    (options?: LoginOptions): Promise<void> => {
+      const operationEpoch = authOperationEpochRef.current;
 
-        const requestedScope =
-          options?.scope?.trim() || config.scope || DEFAULT_SCOPE;
-        const requestedAudience =
-          options?.audience?.trim() || config.audience?.trim();
-        const responseType = (config.responseType || "code").trim();
-        const hasCodeResponseType = responseType
-          .split(/\s+/)
-          .some((entry) => entry === "code");
-
-        if (
-          hasCodeResponseType &&
-          !requestedAudience &&
-          !config.requestUri &&
-          !config.allowAuthorizationWithoutAudience
-        ) {
-          throw new Error(
-            "audience is required for authorization code flow unless requestUri is configured or allowAuthorizationWithoutAudience=true",
-          );
-        }
-
-        if (
-          scopeContains(requestedScope, "offline_access") &&
-          !config.allowOfflineAccessScope
-        ) {
-          throw new Error(
-            "offline_access scope requires allowOfflineAccessScope=true",
-          );
-        }
-
-        const { codeVerifier, codeChallenge } = await generatePKCE({
-          debug: config.debug,
-        });
-        const stateToken = await generateState(18, config.debug);
-        const nonce = await generateNonce(18, config.debug);
-
-        await storage.setItem(StorageKeys.CODE_VERIFIER, codeVerifier);
-        await storage.setItem(StorageKeys.STATE, stateToken);
-        await storage.setItem(StorageKeys.NONCE, nonce);
-        await storage.setItem(StorageKeys.REQUESTED_SCOPE, requestedScope);
-
-        if (requestedAudience) {
-          await storage.setItem(
-            StorageKeys.REQUESTED_AUDIENCE,
-            requestedAudience,
-          );
-        } else {
-          await storage.removeItem(StorageKeys.REQUESTED_AUDIENCE);
-        }
-
-        if (options?.prompt) {
-          await storage.setItem(StorageKeys.PROMPT, options.prompt);
-        } else {
-          await storage.removeItem(StorageKeys.PROMPT);
-        }
-
-        if (options?.appState) {
-          await storage.setItem(
-            StorageKeys.APP_STATE,
-            JSON.stringify(options.appState),
-          );
-
-          logger.debug("Stored app state for post-login redirect", {
-            returnTo: options.appState.returnTo,
-          });
-        } else {
-          await storage.removeItem(StorageKeys.APP_STATE);
-        }
-
-        const authorizationEndpoint =
-          config.authorizationEndpoint?.trim() || "/connect/authorize";
-
-        const authUrl = generateAuthUrl({
-          authority: config.authority,
-          authorizationEndpoint,
-          clientId: config.clientId,
-          redirectUri: config.redirectUri,
-          requestUri: config.requestUri,
-          debug: config.debug,
-          responseType,
-          scope: requestedScope,
-          allowOfflineAccessScope: Boolean(config.allowOfflineAccessScope),
-          allowAuthorizationWithoutAudience: Boolean(
-            config.allowAuthorizationWithoutAudience,
-          ),
-          state: stateToken,
-          codeChallenge,
-          codeChallengeMethod: "S256",
-          nonce,
-          prompt: options?.prompt,
-          audience: requestedAudience,
-        });
-
-        logger.debug("Redirecting browser to authorization endpoint", {
-          authority: config.authority,
-        });
-
-        window.location.href = authUrl;
-      } catch (error) {
-        await clearTransientLoginState();
-        handleError(error instanceof Error ? error.message : "Login failed");
+      if (
+        activeLoginPromise.current?.namespace === oidcSessionStorageKey &&
+        activeLoginPromise.current.epoch === operationEpoch
+      ) {
+        logger.debug("Joining in-flight redirect login request");
+        return activeLoginPromise.current.promise;
       }
+
+      let transactionStorageKey: string | null = null;
+      let serializedTransaction: string | null = null;
+      let navigationAssigned = false;
+
+      const removeOwnTransaction = async (): Promise<void> => {
+        if (!transactionStorageKey || !serializedTransaction) {
+          return;
+        }
+
+        await removeStorageValueIfMatches(
+          storage,
+          transactionStorageKey,
+          serializedTransaction,
+        );
+      };
+
+      const loginPromise = (async (): Promise<void> => {
+        try {
+          logger.info("Starting redirect login flow");
+          await clearLegacyStorage();
+
+          if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
+            return;
+          }
+
+          const requestedScope =
+            options?.scope?.trim() || config.scope || DEFAULT_SCOPE;
+          const requestedAudience =
+            options?.audience?.trim() || config.audience?.trim();
+          const requestedResource = options?.resource ?? config.resource;
+
+          if (!scopeContains(requestedScope, "openid")) {
+            throw new Error(
+              "GuardhouseProvider requires the openid scope for authenticated identity",
+            );
+          }
+
+          if (
+            scopeContains(requestedScope, "offline_access") &&
+            !config.allowOfflineAccessScope
+          ) {
+            throw new Error(
+              "offline_access scope requires allowOfflineAccessScope=true",
+            );
+          }
+
+          const authorizationRequest = await client.createAuthorizationRequest({
+            redirectUri: config.redirectUri,
+            scope: requestedScope,
+            allowOfflineAccessScope: Boolean(config.allowOfflineAccessScope),
+            audiencePolicy: config.audiencePolicy ?? "guardhouse-required",
+            prompt: options?.prompt,
+            audience: requestedAudience,
+            resource: requestedResource,
+            maxAgeSeconds: options?.maxAgeSeconds ?? config.maxAgeSeconds,
+            requiredAcrValues: config.requiredAcrValues,
+            requiredAmrValues: config.requiredAmrValues,
+            applicationState: {
+              ...options?.appState,
+              returnTo: normalizeReturnTo(
+                options?.appState?.returnTo ?? getCurrentReturnTo(),
+              ),
+            },
+          });
+          const transaction = authorizationRequest.transaction;
+
+          transactionStorageKey = getLoginTransactionStorageKey(
+            issuerIdentifier,
+            config.clientId,
+            transaction.state,
+          );
+          serializedTransaction = JSON.stringify(transaction);
+
+          if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
+            return;
+          }
+
+          await setStorageValue(
+            storage,
+            transactionStorageKey,
+            serializedTransaction,
+          );
+
+          if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
+            await removeOwnTransaction();
+            return;
+          }
+
+          logger.debug("Redirecting browser to authorization endpoint", {
+            authority: issuerIdentifier,
+          });
+
+          if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
+            await removeOwnTransaction();
+            return;
+          }
+
+          window.location.href = authorizationRequest.authorizationUrl;
+          navigationAssigned = true;
+        } catch (error) {
+          await removeOwnTransaction();
+
+          if (isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
+            handleError(error);
+          }
+          throw error;
+        }
+      })();
+
+      activeLoginPromise.current = {
+        namespace: oidcSessionStorageKey,
+        epoch: operationEpoch,
+        promise: loginPromise,
+      };
+
+      const releaseLogin = () => {
+        if (
+          !navigationAssigned &&
+          activeLoginPromise.current?.promise === loginPromise
+        ) {
+          activeLoginPromise.current = null;
+        }
+      };
+      void loginPromise.then(releaseLogin, releaseLogin);
+
+      return loginPromise;
     },
     [
-      clearTransientLoginState,
+      clearLegacyStorage,
       config.allowOfflineAccessScope,
-      config.allowAuthorizationWithoutAudience,
+      client,
+      config.audiencePolicy,
       config.audience,
-      config.authority,
-      config.authorizationEndpoint,
       config.clientId,
-      config.debug,
+      config.maxAgeSeconds,
       config.redirectUri,
-      config.requestUri,
-      config.responseType,
+      config.requiredAcrValues,
+      config.requiredAmrValues,
+      config.resource,
       config.scope,
       handleError,
+      isCurrentAuthOperation,
       logger,
+      issuerIdentifier,
+      oidcSessionStorageKey,
       storage,
     ],
   );
 
   const logout = useCallback(
     async (options?: LogoutOptions) => {
-      const returnTo =
+      if (currentNamespaceRef.current !== oidcSessionStorageKey) {
+        return;
+      }
+
+      const operationEpoch = invalidateAuthOperations();
+
+      const requestedReturnTo =
         options?.returnTo ||
         config.logoutRedirectUri ||
         config.redirectUri ||
         window.location.origin;
+      const returnTo = new URL(
+        normalizeReturnTo(requestedReturnTo),
+        window.location.origin,
+      ).toString();
 
       logger.info("Starting logout flow", {
         returnTo,
@@ -838,18 +1391,40 @@ export function GuardhouseProvider({
 
       const currentSession = await readStoredOidcSession();
 
+      if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
+        return;
+      }
+
       const logoutState = await generateState(18, config.debug);
-      const logoutUrl = client.buildLogoutUrl({
+
+      if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
+        return;
+      }
+
+      const logoutUrl = await client.buildLogoutUrl({
         postLogoutRedirectUri: returnTo,
-        idTokenHint: currentSession?.idToken,
+        idTokenHint: currentSession?.session.idToken,
         state: logoutState,
         federated: options?.federated,
       });
 
-      await storage.setItem(StorageKeys.LOGOUT_STATE, logoutState);
+      await setStorageValue(storage, logoutStateStorageKey, logoutState);
+
+      if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
+        await removeStorageValueIfMatches(
+          storage,
+          logoutStateStorageKey,
+          logoutState,
+        );
+        return;
+      }
 
       logger.debug("Clearing local auth state before redirecting to logout");
-      await clearAuthState();
+      const clearEpoch = await clearAuthState();
+
+      if (!isCurrentAuthOperation(clearEpoch, oidcSessionStorageKey)) {
+        return;
+      }
 
       logger.debug("Redirecting browser to logout endpoint", {
         authority: config.authority,
@@ -862,7 +1437,12 @@ export function GuardhouseProvider({
       config.authority,
       config.debug,
       config.logoutRedirectUri,
+      config.redirectUri,
       logger,
+      invalidateAuthOperations,
+      isCurrentAuthOperation,
+      logoutStateStorageKey,
+      oidcSessionStorageKey,
       readStoredOidcSession,
       storage,
     ],
@@ -871,14 +1451,26 @@ export function GuardhouseProvider({
   const getAccessTokenSilently = useCallback(async (): Promise<
     string | null
   > => {
+    const operationEpoch = authOperationEpochRef.current;
+
+    if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
+      return null;
+    }
+
     logger.debug("Attempting silent access token retrieval");
 
-    const sessionData = await readStoredOidcSession();
+    const sessionSnapshot = await readStoredOidcSession();
 
-    if (!sessionData) {
+    if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
+      return null;
+    }
+
+    if (!sessionSnapshot) {
       logger.debug("No OIDC session available for silent retrieval");
       return null;
     }
+
+    const sessionData = sessionSnapshot.session;
 
     const now = Math.floor(Date.now() / 1000);
 
@@ -889,13 +1481,11 @@ export function GuardhouseProvider({
       return sessionData.accessToken;
     }
 
-    if (!sessionData.refreshToken) {
-      logger.warn("Silent token retrieval failed: missing refresh token");
-      await clearAuthState();
+    const refreshedSession = await refreshSession(sessionSnapshot);
+
+    if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
       return null;
     }
-
-    const refreshedSession = await refreshSession(sessionData);
 
     if (!refreshedSession) {
       setState((prev) => ({
@@ -915,16 +1505,34 @@ export function GuardhouseProvider({
       user: refreshedSession.user,
     }));
 
-    return refreshedSession.accessToken;
-  }, [clearAuthState, logger, readStoredOidcSession, refreshSession]);
+    return refreshedSession.session.accessToken;
+  }, [
+    isCurrentAuthOperation,
+    logger,
+    oidcSessionStorageKey,
+    readStoredOidcSession,
+    refreshSession,
+  ]);
 
   const getAccessToken = useCallback(async (): Promise<string | null> => {
-    const sessionData = await readStoredOidcSession();
+    const operationEpoch = authOperationEpochRef.current;
 
-    if (!sessionData) {
+    if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
+      return null;
+    }
+
+    const sessionSnapshot = await readStoredOidcSession();
+
+    if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
+      return null;
+    }
+
+    if (!sessionSnapshot) {
       logger.debug("No access token available in session storage");
       return null;
     }
+
+    const sessionData = sessionSnapshot.session;
 
     const now = Math.floor(Date.now() / 1000);
     if (sessionData.expiresAt > now + ACCESS_TOKEN_REFRESH_LEEWAY_SECONDS) {
@@ -932,7 +1540,13 @@ export function GuardhouseProvider({
     }
 
     return getAccessTokenSilently();
-  }, [getAccessTokenSilently, logger, readStoredOidcSession]);
+  }, [
+    getAccessTokenSilently,
+    isCurrentAuthOperation,
+    logger,
+    oidcSessionStorageKey,
+    readStoredOidcSession,
+  ]);
 
   const contextValue: AuthContextValue = {
     ...state,

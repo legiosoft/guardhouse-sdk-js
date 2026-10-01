@@ -1,12 +1,5 @@
-import {
-  BrowserRouter as Router,
-  Routes,
-  Route,
-  Link,
-  useNavigate,
-} from "react-router-dom";
-import { GuardhouseProvider, useAuth } from "@guardhouse/react";
-import type { AppState } from "@guardhouse/react";
+import { BrowserRouter as Router, Routes, Route, Link } from "react-router-dom";
+import { GuardhouseProvider, ProtectedRoute, useAuth } from "@guardhouse/react";
 import { useEffect, useMemo, useState } from "react";
 import { appConfig } from "./config";
 
@@ -15,8 +8,8 @@ type ProfileUser = {
   name?: string;
   email?: string;
   picture?: string;
-  roles?: string[];
-  scopes?: string[];
+  roles?: readonly string[];
+  scopes?: readonly string[];
   [key: string]: unknown;
 };
 
@@ -80,7 +73,7 @@ function Home() {
 
       {error && (
         <div className="error">
-          <strong>Error:</strong> {error}
+          <strong>Error:</strong> {error.message}
         </div>
       )}
 
@@ -133,28 +126,7 @@ function Home() {
 }
 
 function ProtectedPage() {
-  const { user, isAuthenticated, isLoading, error } = useAuth();
-
-  if (isLoading) {
-    return (
-      <div className="loading">
-        <div className="spinner"></div>
-        Loading...
-      </div>
-    );
-  }
-
-  if (!isAuthenticated) {
-    return (
-      <div className="card">
-        <h2>Access Denied</h2>
-        <p>You need to log in to access this page.</p>
-        <Link to="/">
-          <button className="button">Go to Home</button>
-        </Link>
-      </div>
-    );
-  }
+  const { user, error } = useAuth();
 
   return (
     <div className="card">
@@ -162,7 +134,7 @@ function ProtectedPage() {
 
       {error && (
         <div className="error">
-          <strong>Error:</strong> {error}
+          <strong>Error:</strong> {error.message}
         </div>
       )}
 
@@ -346,7 +318,7 @@ function UserInfoPage() {
 
       {(error || profileError) && (
         <div className="error">
-          <strong>Error:</strong> {profileError || error}
+          <strong>Error:</strong> {profileError ?? error?.message}
         </div>
       )}
 
@@ -501,24 +473,21 @@ function ApiDemo() {
 }
 
 function CallbackPage() {
-  const navigate = useNavigate();
   const { isLoading, error } = useAuth();
-
-  useEffect(() => {
-    if (!isLoading) {
-      navigate("/", { replace: true });
-    }
-  }, [isLoading, navigate]);
 
   return (
     <div className="card">
       <h2>Completing sign-in...</h2>
       {error ? (
         <p>
-          Login failed: {error}. <Link to="/">Go back home</Link>
+          Login failed: {error.message}. <Link to="/">Go back home</Link>
         </p>
       ) : (
-        <p>Please wait while we complete authentication.</p>
+        <p>
+          {isLoading
+            ? "Please wait while we complete authentication."
+            : "No sign-in callback is pending."}
+        </p>
       )}
     </div>
   );
@@ -533,13 +502,12 @@ function App() {
       userInfoEndpoint: appConfig.userInfoEndpoint,
       scope: appConfig.scope,
       audience: appConfig.audience,
-      allowAuthorizationWithoutAudience:
-        appConfig.allowAuthorizationWithoutAudience,
+      audiencePolicy: appConfig.allowAuthorizationWithoutAudience
+        ? ("oidc-optional" as const)
+        : ("guardhouse-required" as const),
       allowOfflineAccessScope: appConfig.allowOfflineAccessScope,
       logoutRedirectUri: appConfig.postLogoutRedirectUri,
-      onRedirectCallback: (appState?: AppState) => {
-        console.log("Redirect callback:", appState);
-      },
+      allowedPostLogoutRedirectUris: [appConfig.postLogoutRedirectUri],
     }),
     [],
   );
@@ -563,7 +531,14 @@ function App() {
           <Routes>
             <Route path="/" element={<Home />} />
             <Route path="/callback" element={<CallbackPage />} />
-            <Route path="/protected" element={<ProtectedPage />} />
+            <Route
+              path="/protected"
+              element={
+                <ProtectedRoute>
+                  <ProtectedPage />
+                </ProtectedRoute>
+              }
+            />
             <Route path="/userinfo" element={<UserInfoPage />} />
             <Route path="/api" element={<ApiDemo />} />
           </Routes>

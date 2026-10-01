@@ -8,7 +8,9 @@ import {
   MAX_JWT_LENGTH,
   MAX_JWT_SEGMENT_LENGTH,
 } from "./constants";
-import type { DecodedJWT } from "./types";
+import type { UntrustedDecodedJWT } from "./types";
+
+class SafeJwtDecodeError extends Error {}
 
 function createSafeJsonReviver(
   target: "header" | "payload",
@@ -17,14 +19,14 @@ function createSafeJsonReviver(
 
   return (key, value) => {
     if (key && isUnsafeObjectKey(key)) {
-      throw new Error(malformedMessage);
+      throw new SafeJwtDecodeError(malformedMessage);
     }
 
     if (
       key === "" &&
       (!value || typeof value !== "object" || Array.isArray(value))
     ) {
-      throw new Error(malformedMessage);
+      throw new SafeJwtDecodeError(malformedMessage);
     }
 
     return value;
@@ -36,15 +38,11 @@ function isPlainJsonObject(value: unknown): value is Record<string, unknown> {
 }
 
 function rethrowAsTraversalError(error: unknown): never {
-  if (
-    error instanceof Error &&
-    (error.message.includes("maximum nesting depth") ||
-      error.message.includes("circular references"))
-  ) {
+  if (error instanceof SafeJwtDecodeError) {
     throw error;
   }
 
-  throw new Error("JWT JSON structure is not safely traversable");
+  throw new SafeJwtDecodeError("JWT JSON structure is not safely traversable");
 }
 
 function assertJsonDepthWithinLimit(
@@ -54,7 +52,9 @@ function assertJsonDepthWithinLimit(
   seen = new WeakSet<object>(),
 ): void {
   if (currentDepth > maxDepth) {
-    throw new Error("JWT JSON structure exceeds maximum nesting depth");
+    throw new SafeJwtDecodeError(
+      "JWT JSON structure exceeds maximum nesting depth",
+    );
   }
 
   if (value === null || typeof value !== "object") {
@@ -62,7 +62,9 @@ function assertJsonDepthWithinLimit(
   }
 
   if (seen.has(value)) {
-    throw new Error("JWT JSON structure contains circular references");
+    throw new SafeJwtDecodeError(
+      "JWT JSON structure contains circular references",
+    );
   }
 
   seen.add(value);
@@ -98,10 +100,16 @@ function assertJsonDepthWithinLimit(
  *
  * SECURITY: Does NOT verify signature.
  */
+/**
+ * Parses a compact JWS without verifying its signature or claims.
+ *
+ * SECURITY: The returned header and payload are attacker-controlled. Use
+ * OidcIdTokenVerifier before trusting any token value.
+ */
 export function decodeJWT(
   token: string,
   options: { debug?: boolean } = {},
-): DecodedJWT {
+): UntrustedDecodedJWT {
   const logger = createGuardhouseLogger("Token", options.debug);
 
   logger.debug("Decoding JWT", {
@@ -177,17 +185,17 @@ export function decodeJWT(
     );
 
     if (!isPlainJsonObject(header)) {
-      throw new Error("Malformed JWT header");
+      throw new SafeJwtDecodeError("Malformed JWT header");
     }
 
     if (!isPlainJsonObject(payload)) {
-      throw new Error("Malformed JWT payload");
+      throw new SafeJwtDecodeError("Malformed JWT payload");
     }
 
     const algorithm =
       typeof header.alg === "string" ? header.alg.trim() : undefined;
     if (!algorithm || algorithm.toLowerCase() === "none") {
-      throw new Error(
+      throw new SafeJwtDecodeError(
         'JWT algorithm "none" is not supported for security reasons',
       );
     }
@@ -201,15 +209,17 @@ export function decodeJWT(
     });
 
     return {
-      header: header as DecodedJWT["header"],
-      payload: payload as DecodedJWT["payload"],
+      header: header as UntrustedDecodedJWT["header"],
+      payload: payload as UntrustedDecodedJWT["payload"],
     };
   } catch (error) {
+    const safeReason =
+      error instanceof SafeJwtDecodeError
+        ? error.message
+        : "JWT JSON is malformed";
     logger.error("Token decode failed", {
-      error: error instanceof Error ? error.message : String(error),
+      reason: safeReason,
     });
-    throw new Error(
-      `Failed to decode JWT: ${error instanceof Error ? error.message : "Unknown error"}`,
-    );
+    throw new Error(`Failed to decode JWT: ${safeReason}`);
   }
 }

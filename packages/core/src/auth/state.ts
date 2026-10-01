@@ -82,8 +82,8 @@ export class OAuthStateManager {
 
   validateAndConsumeState(expectedState: string, returnedState: string): void {
     const logger = createGuardhouseLogger("Auth");
-    const normalizedExpectedState = expectedState.trim();
-    const normalizedReturnedState = returnedState.trim();
+    const normalizedExpectedState = expectedState;
+    const normalizedReturnedState = returnedState;
 
     if (!normalizedExpectedState || !normalizedReturnedState) {
       logger.error("OAuth state validation failed", {
@@ -125,7 +125,7 @@ export class OAuthStateManager {
   }
 
   stashExpectedState(expectedState: string): string {
-    const normalizedState = expectedState.trim();
+    const normalizedState = expectedState;
 
     if (!STATE_TOKEN_PATTERN.test(normalizedState)) {
       throw new Error("expectedState must be a valid high-entropy state token");
@@ -152,7 +152,7 @@ export class OAuthStateManager {
   }
 
   consumeStateBinding(stateHandle: string, returnedState: string): void {
-    const normalizedHandle = stateHandle.trim();
+    const normalizedHandle = stateHandle;
     const now = Date.now();
 
     const expectedState = this.stateBindingVault.get(normalizedHandle);

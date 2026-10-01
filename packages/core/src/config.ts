@@ -67,6 +67,17 @@ export interface StorageAdapter {
   getItem(key: string): Promise<string | null>;
   setItem(key: string, value: string): Promise<void>;
   removeItem(key: string): Promise<void>;
+  /**
+   * Atomically removes `key` only when its current value exactly matches
+   * `expectedValue`. Implement this when multiple adapter instances can share
+   * the same durable storage backend.
+   *
+   * @returns `true` when the matching value was removed, otherwise `false`.
+   */
+  compareAndRemoveItem?(
+    key: string,
+    expectedValue: string,
+  ): boolean | Promise<boolean>;
 }
 
 const ABSOLUTE_URI_PATTERN = /^[A-Za-z][A-Za-z0-9+.-]*:/;
@@ -78,12 +89,14 @@ function isAbsoluteUri(value: string): boolean {
 export interface GuardhouseErrorOptions {
   statusCode?: number;
   cause?: unknown;
+  feature?: string;
 }
 
 export class GuardhouseError extends Error {
   public code?: string;
   public statusCode?: number;
   public cause?: unknown;
+  public feature?: string;
 
   constructor(
     message: string,
@@ -98,11 +111,13 @@ export class GuardhouseError extends Error {
     if (typeof statusCodeOrOptions === "number") {
       this.statusCode = statusCodeOrOptions;
       this.cause = options?.cause;
+      this.feature = options?.feature;
       return;
     }
 
     this.statusCode = statusCodeOrOptions?.statusCode;
     this.cause = statusCodeOrOptions?.cause;
+    this.feature = statusCodeOrOptions?.feature;
   }
 }
 

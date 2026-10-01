@@ -283,24 +283,25 @@ function parseAndValidateErrorUri(
 
 function mergeCallbackParams(url: URL): URLSearchParams {
   const merged = new URLSearchParams();
-  const seenKeys = new Set<string>();
+  const seenResponseKeys = new Set<string>();
 
   const appendUnique = (params: URLSearchParams): void => {
-    const keys = new Set(params.keys());
-
-    for (const key of keys) {
-      const values = params.getAll(key);
+    for (const [key, value] of params) {
       const normalizedKey = key.toLowerCase();
 
-      if (values.length > 1 || seenKeys.has(normalizedKey)) {
+      if (
+        OAUTH_CALLBACK_SENSITIVE_KEYS.has(normalizedKey) &&
+        seenResponseKeys.has(normalizedKey)
+      ) {
         throw new Error(
           `OAuth callback contains duplicate parameter values for "${key}"`,
         );
       }
 
-      const value = values[0] ?? "";
-      merged.set(key, value);
-      seenKeys.add(normalizedKey);
+      merged.append(key, value);
+      if (OAUTH_CALLBACK_SENSITIVE_KEYS.has(normalizedKey)) {
+        seenResponseKeys.add(normalizedKey);
+      }
     }
   };
 
@@ -363,6 +364,11 @@ export function sanitizeOAuthCallbackUrl(callbackUrl: string): string {
     const sanitizedHash = hashParams.toString();
     url.hash = sanitizedHash ? `#${sanitizedHash}` : "";
   }
+
+  // Credentials never belong in a redirect URI. Strip them from every
+  // recognized callback before browser-history replacement or error handling.
+  url.username = "";
+  url.password = "";
 
   return url.toString();
 }

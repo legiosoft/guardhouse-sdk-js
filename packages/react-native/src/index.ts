@@ -17,7 +17,6 @@ export { resolveReactNativeCryptoAdapter } from "./crypto";
 
 export type {
   BrowserLoginOptions,
-  ExchangeCodeForTokensOptions,
   GetAccessTokenOptions,
   GuardhouseClientConfig,
   GuardhouseClientEndpoints,
@@ -33,7 +32,6 @@ export type {
   GuardhouseAuthResult,
   GuardhouseSession,
   GuardhouseTokenResponse,
-  RedirectTokenPayload,
   GuardhouseErrorCode,
 } from "./types/index";
 

@@ -170,34 +170,24 @@ export class GuardhouseNodeClient {
       clientId: this.options.clientId,
     });
 
-    const coreClientConfig: Record<string, unknown> = {
+    const coreClientConfig = {
       authority: this.options.authority,
       clientId: this.options.clientId,
       clientSecret: this.options.clientSecret,
+      ...(typeof this.options.debug === "boolean"
+        ? { debug: this.options.debug }
+        : {}),
     };
 
-    if (typeof this.options.debug === "boolean") {
-      coreClientConfig.debug = this.options.debug;
-    }
-
-    const client = new GuardhouseClient(coreClientConfig as any);
+    const client = new GuardhouseClient(coreClientConfig);
 
     const scope =
       this.options.scope || GuardhouseConstants.Defaults.DefaultScope;
 
     try {
-      const body = new URLSearchParams({
-        grant_type: "client_credentials",
+      const tokenResponse = await client.requestClientCredentialsToken({
         scope,
-        client_id: this.options.clientId,
-        client_secret: this.options.clientSecret,
       });
-
-      const tokenResponse = await client.postForm<TokenResponse>(
-        `/${GuardhouseConstants.Endpoints.ConnectToken}`,
-        body,
-        true,
-      );
 
       this.logger.info("Client credentials token request succeeded", {
         expiresIn: tokenResponse.expires_in,
@@ -223,27 +213,19 @@ export class GuardhouseNodeClient {
       hasRefreshToken: Boolean(refreshToken),
     });
 
-    const coreClientConfig: Record<string, unknown> = {
+    const coreClientConfig = {
       authority: this.options.authority,
       clientId: this.options.clientId,
       clientSecret: this.options.clientSecret,
+      ...(typeof this.options.debug === "boolean"
+        ? { debug: this.options.debug }
+        : {}),
     };
 
-    if (typeof this.options.debug === "boolean") {
-      coreClientConfig.debug = this.options.debug;
-    }
-
-    const client = new GuardhouseClient(coreClientConfig as any);
+    const client = new GuardhouseClient(coreClientConfig);
 
     try {
-      const body = new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: refreshToken,
-      });
-      const tokenResponse = await client.postForm<TokenResponse>(
-        `/${GuardhouseConstants.Endpoints.ConnectToken}`,
-        body,
-      );
+      const tokenResponse = await client.refreshOAuthToken(refreshToken);
 
       this.logger.info("Access token refresh succeeded", {
         expiresIn: tokenResponse.expires_in,

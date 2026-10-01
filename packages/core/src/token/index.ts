@@ -1,13 +1,27 @@
 export { decodeJWT } from "./decode";
-export { isTokenExpired, getTokenExpiresIn, validateToken } from "./validation";
+export { isTokenExpired, getTokenExpiresIn } from "./validation";
 export { validateOidcHashClaims } from "./oidc-hash";
 export { validateJwkMetadataForToken } from "./jwk";
 export { JtiReplayCache } from "./replay-cache";
+export { OidcIdTokenVerifier, verifyIdToken } from "./id-token-verifier";
+export type {
+  AuthorizationCodeIdTokenContext,
+  HistoricalOidcIdentity,
+  IdTokenSigningAlgorithm,
+  IdTokenValidationContext,
+  OidcIdentity,
+  OidcIdentityEvidence,
+  OidcIdentityMetadata,
+  OidcIdTokenVerifierOptions,
+  RefreshIdTokenContext,
+  SessionIdTokenContext,
+  VerifiedIdToken,
+  VerifiedIdTokenPayload,
+  VerifyIdTokenOptions,
+} from "./id-token-verifier";
 
 export type {
-  DecodedJWT,
   ExpectedJwkKeyType,
-  VerifiedSignatureProof,
   JwkMetadata,
   JwkMetadataValidationOptions,
   JwkMetadataValidationResult,
@@ -15,7 +29,10 @@ export type {
   JWTPayload,
   OidcHashValidationOptions,
   OidcHashValidationResult,
-  TokenValidationOptions,
-  TokenValidationResult,
+  UntrustedDecodedJWT,
 } from "./types";
-export type { JtiReplayCacheOptions } from "./replay-cache";
+export type {
+  IdTokenReplayCache,
+  IdTokenReplayEntry,
+  JtiReplayCacheOptions,
+} from "./replay-cache";

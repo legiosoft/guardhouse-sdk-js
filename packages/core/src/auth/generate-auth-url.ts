@@ -6,6 +6,7 @@ import {
   isUnsafeObjectKey,
   sanitizeUrlForLogs,
   validateAndNormalizeRedirectUri,
+  validateResourceIndicator,
 } from "../security";
 
 import {
@@ -216,20 +217,6 @@ function normalizeClaimsParameter(claims: unknown): string | undefined {
   return serialized;
 }
 
-function isAuthorizationCodeResponseType(responseType: string): boolean {
-  return responseType
-    .trim()
-    .split(/\s+/)
-    .some((value) => value === "code");
-}
-
-function isImplicitResponseType(responseType: string): boolean {
-  return responseType
-    .trim()
-    .split(/\s+/)
-    .some((value) => value === "token");
-}
-
 function isOpenIdScope(scope: string): boolean {
   return scope
     .trim()
@@ -358,11 +345,15 @@ export function generateAuthUrl(options: AuthUrlOptions): string {
     loginHint,
     claims,
     audience,
+    resource,
     responseMode,
-    formPostCsrfToken,
     maxAge,
     extraParams,
   } = options;
+
+  if (responseType !== "code") {
+    throw new Error("responseType must be exactly 'code'");
+  }
 
   const logger = createGuardhouseLogger("Auth", debug);
 
@@ -404,20 +395,11 @@ export function generateAuthUrl(options: AuthUrlOptions): string {
     const validatedRedirectUri = validateAndNormalizeRedirectUri(redirectUri);
     const normalizedRequestUri = normalizeRequestUri(requestUri);
 
-    if (
-      isAuthorizationCodeResponseType(responseType) &&
-      !codeChallenge &&
-      !normalizedRequestUri
-    ) {
-      throw new Error(
-        "codeChallenge is required when responseType includes 'code' unless requestUri is used",
-      );
+    if (!codeChallenge && !normalizedRequestUri) {
+      throw new Error("codeChallenge is required unless requestUri is used");
     }
 
-    if (
-      isAuthorizationCodeResponseType(responseType) &&
-      normalizedCodeChallengeMethod !== "S256"
-    ) {
+    if (normalizedCodeChallengeMethod !== "S256") {
       throw new Error("codeChallengeMethod must be 'S256'");
     }
 
@@ -476,17 +458,6 @@ export function generateAuthUrl(options: AuthUrlOptions): string {
       );
     }
 
-    if (normalizedResponseMode === "form_post") {
-      if (
-        typeof formPostCsrfToken !== "string" ||
-        formPostCsrfToken.trim() === ""
-      ) {
-        throw new Error(
-          "formPostCsrfToken is required when responseMode is 'form_post'",
-        );
-      }
-    }
-
     if (scopeContains(scope, "offline_access") && !allowOfflineAccessScope) {
       throw new Error(
         "offline_access scope requires explicit allowOfflineAccessScope=true",
@@ -496,25 +467,28 @@ export function generateAuthUrl(options: AuthUrlOptions): string {
     const requestedAudience =
       typeof audience === "string" && audience.trim() !== ""
         ? audience.trim()
-        : typeof extraParams?.resource === "string" &&
-            extraParams.resource.trim() !== ""
-          ? extraParams.resource.trim()
-          : undefined;
+        : undefined;
+    const requestedResources =
+      resource === undefined
+        ? []
+        : typeof resource === "string"
+          ? [resource]
+          : [...resource];
+    if (requestedResources.length > 16) {
+      throw new Error("resource must contain no more than 16 values");
+    }
+    const validatedResources = requestedResources.map((resourceValue) =>
+      validateResourceIndicator(resourceValue),
+    );
 
     if (
-      isAuthorizationCodeResponseType(responseType) &&
       !requestedAudience &&
+      requestedResources.length === 0 &&
       !normalizedRequestUri &&
       !allowAuthorizationWithoutAudience
     ) {
       throw new Error(
         "audience or resource is required to request resource-specific access tokens unless requestUri is used or allowAuthorizationWithoutAudience=true",
-      );
-    }
-
-    if (isImplicitResponseType(responseType)) {
-      logger.warn(
-        "The Implicit Flow (response_type=token) is deprecated in OAuth 2.1 due to security risks. Please use the Authorization Code flow with PKCE instead.",
       );
     }
 
@@ -574,11 +548,10 @@ export function generateAuthUrl(options: AuthUrlOptions): string {
         audience: requestedAudience,
         response_mode: normalizedResponseMode,
         max_age: normalizedMaxAge,
-        guardhouse_form_post_csrf:
-          normalizedResponseMode === "form_post"
-            ? formPostCsrfToken?.trim()
-            : undefined,
       });
+      for (const resourceValue of validatedResources) {
+        url.searchParams.append("resource", resourceValue);
+      }
     }
 
     if (extraParams) {

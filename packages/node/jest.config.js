@@ -35,7 +35,14 @@ const config = {
         },
       },
     ],
+    "^.+\\.m?js$": [
+      "babel-jest",
+      {
+        presets: [["@babel/preset-env", { targets: { node: "current" } }]],
+      },
+    ],
   },
+  transformIgnorePatterns: ["node_modules[\\\\/](?!jose[\\\\/])"],
   testTimeout: 10000,
 };
 

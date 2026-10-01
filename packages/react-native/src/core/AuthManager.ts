@@ -1,20 +1,25 @@
 import {
-  GuardhouseClient as CoreGuardhouseClient,
   GuardhouseError as CoreGuardhouseError,
-  generateAuthUrl,
-  type CryptoAdapter,
-  type TokenResponse as CoreTokenResponse,
-  type User as CoreUser,
+  canonicalizeIssuer,
+} from "@guardhouse/core";
+import type {
+  AuthorizationCodeExchangeResult,
+  AuthorizationTransaction,
+  GuardhouseClient as CoreGuardhouseClient,
+  OidcIdentityEvidence,
+  OidcIdentityMetadata,
+  TokenResponse as CoreTokenResponse,
+  User as CoreUser,
+  VerifiedIdToken,
+  VerifiedIdTokenPayload,
 } from "@guardhouse/core";
 import type {
   BrowserLoginOptions,
-  ExchangeCodeForTokensOptions,
   GetAccessTokenOptions,
   GuardhouseAuthResult,
   GuardhouseLogoutOptions,
   GuardhouseSession,
   GuardhouseTokenResponse,
-  RedirectTokenPayload,
   RefreshTokenOptions,
   RestoreSessionOptions,
 } from "../types/index";
@@ -26,41 +31,51 @@ import type {
 } from "../adapters/BrowserAdapter";
 import type { GuardhouseStorageAdapter } from "../adapters/StorageAdapter";
 import type { GuardhouseLogger } from "../utils/logger";
-import { createPkceArtifacts, type PkceArtifacts } from "../utils/pkce";
-import {
-  createRedirectMatcher,
-  parseAuthorizationCallback,
-  parsePositiveInteger,
-  trimToUndefined,
-  toErrorMessage,
-} from "../utils/url";
+import { trimToUndefined } from "../utils/url";
 
-const CLIENT_STORAGE_KEYS = {
-  TOKEN_TYPE: "gh_token_type",
-  SCOPE: "gh_scope",
-} as const;
-
-const STORAGE_KEYS = {
-  ACCESS_TOKEN: "gh_access_token",
-  REFRESH_TOKEN: "gh_refresh_token",
-  ID_TOKEN: "gh_id_token",
-  EXPIRES_AT: "gh_expires_at",
-  USER: "gh_user",
-} as const;
-
-interface PendingBrowserFlow {
-  codeVerifier: string;
-  state: string;
-  appState?: Record<string, unknown>;
+interface StoredSessionBase {
+  readonly version: 3;
+  readonly issuer: string;
+  readonly clientId: string;
+  readonly accessToken: string;
+  readonly tokenType: string;
+  readonly scope?: string;
+  readonly expiresAt: number;
 }
 
+interface StoredOAuthSession extends StoredSessionBase {
+  readonly kind: "oauth";
+}
+
+interface StoredOidcSession extends StoredSessionBase {
+  readonly kind: "oidc";
+  /** Signed identity evidence retained for refresh continuity. */
+  readonly idToken: string;
+  readonly identity: OidcIdentityMetadata;
+  /** False when the token is retained only as historical refresh evidence. */
+  readonly idTokenCurrent: boolean;
+}
+
+type StoredSession = StoredOAuthSession | StoredOidcSession;
+
 interface SessionCacheData {
-  accessToken: string;
-  idToken?: string;
-  tokenType: string;
-  scope?: string;
-  expiresAt: number;
-  user: CoreUser | null;
+  readonly record: StoredSession;
+  readonly user: CoreUser | null;
+}
+
+interface PersistedIdentity {
+  readonly evidence: OidcIdentityEvidence;
+  readonly metadata: OidcIdentityMetadata;
+  readonly rawIdToken: string;
+  readonly verifiedIdToken?: VerifiedIdToken;
+  readonly idTokenCurrent: boolean;
+}
+
+interface PersistTokenOptions {
+  readonly existingSession?: StoredSession;
+  readonly requestedScope?: string;
+  readonly identity?: PersistedIdentity;
+  readonly appState?: Record<string, unknown>;
 }
 
 interface AuthManagerConfig {
@@ -71,12 +86,11 @@ interface AuthManagerConfig {
   defaultAudience?: string;
   defaultEphemeralSession: boolean;
   userInfoOnLogin: boolean;
-  authorizationEndpoint: string;
   registrationEndpoint: string;
-  tokenEndpoint: string;
+  requiredAcrValues?: readonly string[];
+  requiredAmrValues?: readonly string[];
   coreClient: CoreGuardhouseClient;
   browser?: GuardhouseBrowserAdapter;
-  cryptoAdapter: CryptoAdapter;
   refreshTokenStorage: GuardhouseStorageAdapter;
   sessionStorage?: GuardhouseStorageAdapter;
   logger: GuardhouseLogger;
@@ -86,33 +100,144 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function parseStoredUser(serialized: string | null): CoreUser | null {
-  if (!serialized) {
+function normalizeStringArray(value: unknown): readonly string[] | null {
+  if (
+    !Array.isArray(value) ||
+    value.some((entry) => typeof entry !== "string")
+  ) {
     return null;
   }
 
+  return Object.freeze([...value]);
+}
+
+function identityEquals(
+  left: OidcIdentityMetadata,
+  right: OidcIdentityMetadata,
+): boolean {
+  return (
+    left.issuer === right.issuer &&
+    left.clientId === right.clientId &&
+    left.subject === right.subject &&
+    left.authorizedParty === right.authorizedParty &&
+    left.issuedAt === right.issuedAt &&
+    left.expiresAt === right.expiresAt &&
+    left.nonce === right.nonce &&
+    left.authTime === right.authTime &&
+    left.acr === right.acr &&
+    left.sessionId === right.sessionId &&
+    left.audiences.length === right.audiences.length &&
+    left.audiences.every((value, index) => value === right.audiences[index]) &&
+    left.amr.length === right.amr.length &&
+    left.amr.every((value, index) => value === right.amr[index])
+  );
+}
+
+function toIdentityMetadata(
+  identity: OidcIdentityMetadata,
+): OidcIdentityMetadata {
+  return Object.freeze({
+    issuer: identity.issuer,
+    clientId: identity.clientId,
+    subject: identity.subject,
+    audiences: Object.freeze([...identity.audiences]),
+    authorizedParty: identity.authorizedParty,
+    issuedAt: identity.issuedAt,
+    expiresAt: identity.expiresAt,
+    nonce: identity.nonce,
+    authTime: identity.authTime,
+    acr: identity.acr,
+    amr: Object.freeze([...identity.amr]),
+    sessionId: identity.sessionId,
+  });
+}
+
+function deepFreezeJson(value: unknown): void {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) {
+    return;
+  }
+
+  for (const nested of Object.values(value)) {
+    deepFreezeJson(nested);
+  }
+  Object.freeze(value);
+}
+
+function freezeUser(user: CoreUser): CoreUser {
+  let cloned: unknown;
   try {
-    const parsed = JSON.parse(serialized) as unknown;
-
-    if (!isRecord(parsed)) {
-      return null;
-    }
-
-    const subject = trimToUndefined(
-      typeof parsed.sub === "string" ? parsed.sub : undefined,
-    );
-
-    if (!subject) {
-      return null;
-    }
-
-    return {
-      ...(parsed as CoreUser),
-      sub: subject,
-    };
+    cloned = JSON.parse(JSON.stringify(user)) as unknown;
   } catch {
+    throw new GuardhouseAuthError(
+      "Authenticated user claims are not valid JSON data",
+      "TOKEN_RESPONSE_ERROR",
+    );
+  }
+
+  if (
+    !isRecord(cloned) ||
+    typeof cloned.sub !== "string" ||
+    cloned.sub.trim() === ""
+  ) {
+    throw new GuardhouseAuthError(
+      "Authenticated user claims are missing subject",
+      "TOKEN_RESPONSE_ERROR",
+    );
+  }
+
+  deepFreezeJson(cloned);
+  return cloned as CoreUser;
+}
+
+function parseStoredIdentity(value: unknown): OidcIdentityMetadata | null {
+  if (!isRecord(value)) {
     return null;
   }
+
+  const audiences = normalizeStringArray(value.audiences);
+  const amr = normalizeStringArray(value.amr);
+  const requiredStrings = [value.issuer, value.clientId, value.subject];
+  const nullableStrings = [
+    value.authorizedParty,
+    value.nonce,
+    value.acr,
+    value.sessionId,
+  ];
+  const requiredNumbers = [value.issuedAt, value.expiresAt];
+
+  if (
+    !audiences ||
+    audiences.length === 0 ||
+    !amr ||
+    requiredStrings.some(
+      (entry) => typeof entry !== "string" || entry.trim() === "",
+    ) ||
+    nullableStrings.some(
+      (entry) => entry !== null && typeof entry !== "string",
+    ) ||
+    requiredNumbers.some(
+      (entry) => typeof entry !== "number" || !Number.isFinite(entry),
+    ) ||
+    (value.authTime !== null &&
+      (typeof value.authTime !== "number" || !Number.isFinite(value.authTime)))
+  ) {
+    return null;
+  }
+
+  return Object.freeze({
+    issuer: value.issuer as string,
+    clientId: value.clientId as string,
+    subject: value.subject as string,
+    audiences,
+    authorizedParty: value.authorizedParty as string | null,
+    issuedAt: value.issuedAt as number,
+    expiresAt: value.expiresAt as number,
+    nonce: value.nonce as string | null,
+    authTime: value.authTime as number | null,
+    acr: value.acr as string | null,
+    amr,
+    sessionId: value.sessionId as string | null,
+  });
 }
 
 function extractTokenContainer(payload: unknown): Record<string, unknown> {
@@ -120,8 +245,6 @@ function extractTokenContainer(payload: unknown): Record<string, unknown> {
     throw new GuardhouseAuthError(
       "Token response payload is not a JSON object",
       "TOKEN_RESPONSE_ERROR",
-      undefined,
-      payload,
     );
   }
 
@@ -145,53 +268,40 @@ function extractTokenContainer(payload: unknown): Record<string, unknown> {
   throw new GuardhouseAuthError(
     "Token response payload did not include access_token",
     "TOKEN_RESPONSE_ERROR",
-    undefined,
-    payload,
   );
 }
 
-/**
- * Parses unknown token payloads into normalized token response shape.
- */
+/** Runtime-decodes the Guardhouse passkey token response from unknown input. */
 export function parseTokenResponsePayload(
   payload: unknown,
 ): GuardhouseTokenResponse {
   const container = extractTokenContainer(payload);
-
   const accessToken = trimToUndefined(
     typeof container.access_token === "string"
       ? container.access_token
       : undefined,
   );
+  const tokenType = trimToUndefined(
+    typeof container.token_type === "string" ? container.token_type : undefined,
+  );
+  const expiresIn =
+    typeof container.expires_in === "number" &&
+    Number.isInteger(container.expires_in) &&
+    container.expires_in > 0 &&
+    container.expires_in <= 2_147_483_647
+      ? container.expires_in
+      : undefined;
 
-  if (!accessToken) {
+  if (!accessToken || !tokenType || !expiresIn) {
     throw new GuardhouseAuthError(
-      "Token response did not include access_token",
+      "Token response is missing a valid access_token, token_type, or expires_in",
       "TOKEN_RESPONSE_ERROR",
-      undefined,
-      payload,
-    );
-  }
-
-  const expiresIn = parsePositiveInteger(container.expires_in);
-
-  if (!expiresIn) {
-    throw new GuardhouseAuthError(
-      "Token response did not include a valid expires_in value",
-      "TOKEN_RESPONSE_ERROR",
-      undefined,
-      payload,
     );
   }
 
   return {
     access_token: accessToken,
-    token_type:
-      trimToUndefined(
-        typeof container.token_type === "string"
-          ? container.token_type
-          : undefined,
-      ) ?? "Bearer",
+    token_type: tokenType,
     expires_in: expiresIn,
     refresh_token: trimToUndefined(
       typeof container.refresh_token === "string"
@@ -208,172 +318,208 @@ export function parseTokenResponsePayload(
 }
 
 /**
- * React Native auth manager that composes `@guardhouse/core` OAuth primitives
- * with injected browser and storage adapters.
+ * React Native auth manager built around Core v2 authorization transactions and
+ * cryptographically verified OIDC identities.
  */
 export class AuthManager {
-  private readonly authority: string;
+  private readonly issuer: string;
   private readonly clientId: string;
   private readonly redirectUri: string;
   private readonly defaultScope: string;
   private readonly defaultAudience?: string;
   private readonly defaultEphemeralSession: boolean;
   private readonly userInfoOnLogin: boolean;
-  private readonly authorizationEndpoint: string;
   private readonly registrationEndpoint: string;
-  private readonly tokenEndpoint: string;
+  private readonly requiredAcrValues: readonly string[];
+  private readonly requiredAmrValues: readonly string[];
   private readonly coreClient: CoreGuardhouseClient;
   private readonly browser?: GuardhouseBrowserAdapter;
-  private readonly cryptoAdapter: CryptoAdapter;
   private readonly refreshTokenStorage: GuardhouseStorageAdapter;
   private readonly sessionStorage?: GuardhouseStorageAdapter;
   private readonly logger: GuardhouseLogger;
-  private readonly redirectUriDescriptor;
+  private readonly sessionStorageKey: string;
+  private readonly refreshTokenStorageKey: string;
 
-  private pendingBrowserFlow: PendingBrowserFlow | null = null;
+  private pendingBrowserFlow: AuthorizationTransaction | null = null;
+  private browserAuthPromise: Promise<GuardhouseAuthResult> | null = null;
   private sessionCache: SessionCacheData | null = null;
   private refreshTokenCache: string | null = null;
   private refreshPromise: Promise<GuardhouseAuthResult> | null = null;
 
   constructor(config: AuthManagerConfig) {
-    this.authority = config.authority;
-    this.clientId = config.clientId;
+    this.issuer = canonicalizeIssuer(config.authority);
+    this.clientId = config.clientId.trim();
     this.redirectUri = config.redirectUri;
     this.defaultScope = config.defaultScope;
     this.defaultAudience = config.defaultAudience;
     this.defaultEphemeralSession = config.defaultEphemeralSession;
     this.userInfoOnLogin = config.userInfoOnLogin;
-    this.authorizationEndpoint = config.authorizationEndpoint;
     this.registrationEndpoint = config.registrationEndpoint;
-    this.tokenEndpoint = config.tokenEndpoint;
+    this.requiredAcrValues = Object.freeze([
+      ...(config.requiredAcrValues ?? []),
+    ]);
+    this.requiredAmrValues = Object.freeze([
+      ...(config.requiredAmrValues ?? []),
+    ]);
     this.coreClient = config.coreClient;
     this.browser = config.browser;
-    this.cryptoAdapter = config.cryptoAdapter;
     this.refreshTokenStorage = config.refreshTokenStorage;
     this.sessionStorage = config.sessionStorage;
     this.logger = config.logger;
-    this.redirectUriDescriptor = createRedirectMatcher(this.redirectUri);
+
+    const storageNamespace = `${encodeURIComponent(this.issuer)}:${encodeURIComponent(
+      this.clientId,
+    )}`;
+    this.sessionStorageKey = `gh:v3:${storageNamespace}:session`;
+    this.refreshTokenStorageKey = `gh:v3:${storageNamespace}:refresh-token`;
   }
 
-  /**
-   * Starts OAuth browser login and finalizes callback via `@guardhouse/core` token exchange.
-   */
   async loginWithBrowser(
     options: BrowserLoginOptions = {},
   ): Promise<GuardhouseAuthResult> {
-    return this.runBrowserAuthFlow(this.authorizationEndpoint, options);
+    return this.startBrowserAuthFlow(options, false);
   }
 
-  /**
-   * Starts browser registration flow and finalizes callback via `@guardhouse/core` token exchange.
-   */
   async registerWithBrowser(
     options: BrowserLoginOptions = {},
   ): Promise<GuardhouseAuthResult> {
-    return this.runBrowserAuthFlow(this.registrationEndpoint, options, true);
+    return this.startBrowserAuthFlow(options, true);
   }
 
   /**
-   * Exchanges an authorization code for tokens.
-   * Uses `@guardhouse/core` exchange API when PKCE verifier is available.
-   */
-  async exchangeCodeForTokens(
-    code: string,
-    options: ExchangeCodeForTokensOptions = {},
-  ): Promise<GuardhouseAuthResult> {
-    const normalizedCode = this.requireString(code, "code");
-    const codeVerifier =
-      trimToUndefined(options.codeVerifier) ??
-      this.pendingBrowserFlow?.codeVerifier;
-    const scope = trimToUndefined(options.scope);
-    const audience = this.resolveAudience(options.audience);
-
-    const tokenResponse = await this.exchangeAuthorizationCode(
-      normalizedCode,
-      codeVerifier,
-      scope,
-      audience,
-    );
-    const currentSession = await this.getSession();
-
-    return this.persistAuthResult(tokenResponse, currentSession ?? undefined);
-  }
-
-  /**
-   * Applies tokens delivered via deep link callback directly.
-   */
-  async applyRedirectTokens(
-    payload: RedirectTokenPayload,
-  ): Promise<GuardhouseAuthResult> {
-    const accessToken = this.requireString(payload.accessToken, "accessToken");
-    const expiresIn = parsePositiveInteger(payload.expiresIn) ?? 3600;
-
-    const tokenResponse: GuardhouseTokenResponse = {
-      access_token: accessToken,
-      token_type: trimToUndefined(payload.tokenType) ?? "Bearer",
-      expires_in: expiresIn,
-      refresh_token: trimToUndefined(payload.refreshToken),
-      id_token: trimToUndefined(payload.idToken),
-      scope: trimToUndefined(payload.scope),
-    };
-
-    return this.persistTokenResponse(tokenResponse);
-  }
-
-  /**
-   * Persists a token response and returns normalized auth result.
+   * Persists tokens returned by the Guardhouse passkey verification endpoint.
+   * OIDC responses are verified before any identity is trusted.
    */
   async persistTokenResponse(
     tokenResponse: GuardhouseTokenResponse,
-    appState?: Record<string, unknown>,
+    requestedScope = this.defaultScope,
   ): Promise<GuardhouseAuthResult> {
-    const existingSession = await this.getSession();
-    return this.persistAuthResult(
-      tokenResponse,
-      existingSession ?? undefined,
-      appState,
-    );
+    const existingSession = await this.loadStoredSession();
+    const responseScope = tokenResponse.scope ?? requestedScope;
+    this.assertScopeNotEscalated(requestedScope, responseScope);
+    const expectsOidc = this.scopeSet(requestedScope).has("openid");
+
+    if (tokenResponse.id_token) {
+      if (!expectsOidc) {
+        throw new GuardhouseAuthError(
+          "An OAuth-only passkey response must not include an ID token",
+          "TOKEN_RESPONSE_ERROR",
+        );
+      }
+      const verifiedIdToken = await this.coreClient.verifyIdToken(
+        tokenResponse.id_token,
+        {
+          purpose: "session",
+          requiredAcrValues: this.requiredAcrValues,
+          requiredAmrValues: this.requiredAmrValues,
+        },
+      );
+
+      return this.persistAuthResult(tokenResponse, {
+        existingSession: existingSession ?? undefined,
+        requestedScope,
+        identity: {
+          evidence: verifiedIdToken.identity,
+          metadata: toIdentityMetadata(verifiedIdToken.identity),
+          rawIdToken: tokenResponse.id_token,
+          verifiedIdToken,
+          idTokenCurrent: true,
+        },
+      });
+    }
+
+    if (expectsOidc) {
+      throw new GuardhouseAuthError(
+        "An OpenID passkey response must include a signed ID token",
+        "TOKEN_RESPONSE_ERROR",
+      );
+    }
+
+    return this.persistAuthResult(tokenResponse, {
+      existingSession: existingSession ?? undefined,
+      requestedScope,
+    });
   }
 
-  /**
-   * Performs refresh token grant via `@guardhouse/core`.
-   */
   async refreshToken(
     options: RefreshTokenOptions = {},
   ): Promise<GuardhouseAuthResult> {
     return this.withRefreshLock(async () => {
-      const currentSession = await this.getSession();
+      const currentSession = await this.loadStoredSession();
       const refreshToken = await this.getStoredRefreshToken();
 
-      if (!refreshToken) {
+      if (!currentSession || !refreshToken) {
+        await this.clearSession();
         throw new GuardhouseAuthError(
-          "No refresh token available. User interaction is required.",
+          "No complete refreshable session is available; user interaction is required",
           "MISSING_REFRESH_TOKEN",
         );
       }
 
-      const params: Record<string, string> = {};
-      const scope = trimToUndefined(options.scope);
+      const grantedScope = currentSession.scope ?? this.defaultScope;
+      const requestedScope = trimToUndefined(options.scope) ?? grantedScope;
+      this.assertScopeNotEscalated(grantedScope, requestedScope);
       const audience = this.resolveAudience(options.audience);
-
-      if (scope) {
-        params.scope = scope;
-      }
-
-      if (audience) {
-        params.audience = audience;
-      }
+      const requestParameters = audience ? { audience } : undefined;
+      let tokenRefreshCompleted = false;
 
       try {
-        const coreTokenResponse = await this.coreClient.refreshToken(
-          refreshToken,
-          params,
-        );
+        if (currentSession.kind === "oidc") {
+          const refreshed = await this.coreClient.refreshOidcSession(
+            refreshToken,
+            {
+              previousIdToken: currentSession.idToken,
+              grantedScope: requestedScope,
+              requestParameters,
+              requiredAcrValues: this.requiredAcrValues,
+              requiredAmrValues: this.requiredAmrValues,
+            },
+          );
+          tokenRefreshCompleted = true;
+          if (refreshed.identityStatus === "current") {
+            const replacementRawIdToken = refreshed.tokens.id_token;
+            if (!replacementRawIdToken) {
+              throw new GuardhouseAuthError(
+                "A current refreshed identity must include its signed ID token",
+                "TOKEN_RESPONSE_ERROR",
+              );
+            }
 
-        return this.persistAuthResult(
-          this.normalizeCoreTokenResponse(coreTokenResponse),
-          currentSession ?? undefined,
-        );
+            return await this.persistAuthResult(refreshed.tokens, {
+              existingSession: currentSession,
+              requestedScope,
+              identity: {
+                evidence: refreshed.identity,
+                metadata: toIdentityMetadata(refreshed.identity),
+                rawIdToken: replacementRawIdToken,
+                verifiedIdToken: refreshed.idToken,
+                idTokenCurrent: true,
+              },
+            });
+          }
+
+          return await this.persistAuthResult(refreshed.tokens, {
+            existingSession: currentSession,
+            requestedScope,
+            identity: {
+              evidence: refreshed.identity,
+              metadata: toIdentityMetadata(refreshed.identity),
+              rawIdToken: currentSession.idToken,
+              idTokenCurrent: false,
+            },
+          });
+        }
+
+        const tokens = await this.coreClient.refreshOAuthToken(refreshToken, {
+          grantedScope: requestedScope,
+          requestParameters,
+        });
+        tokenRefreshCompleted = true;
+
+        return await this.persistAuthResult(tokens, {
+          existingSession: currentSession,
+          requestedScope,
+        });
       } catch (error) {
         const wrapped = this.wrapCoreError(
           error,
@@ -381,7 +527,10 @@ export class AuthManager {
           "Refresh token request failed",
         );
 
-        if (this.shouldClearSessionAfterRefreshFailure(wrapped)) {
+        if (
+          tokenRefreshCompleted ||
+          this.shouldClearSessionAfterRefreshFailure(error)
+        ) {
           await this.clearSession();
         }
 
@@ -390,28 +539,37 @@ export class AuthManager {
     });
   }
 
-  /**
-   * Restores session from storage and refreshes when needed.
-   */
   async restoreSession(
     options: RestoreSessionOptions = {},
   ): Promise<GuardhouseAuthResult | null> {
     const minValiditySeconds =
-      options.minValiditySeconds !== undefined
-        ? Math.max(0, options.minValiditySeconds)
-        : 60;
+      options.minValiditySeconds === undefined
+        ? 60
+        : Math.max(0, options.minValiditySeconds);
+    const currentSession = await this.loadStoredSession();
 
-    const currentSession = await this.getSession();
-
-    if (
-      currentSession &&
-      !this.isExpired(currentSession.expiresAt, minValiditySeconds)
-    ) {
-      return this.buildAuthResultFromSession(currentSession);
+    if (!currentSession) {
+      if (await this.getStoredRefreshToken()) {
+        await this.clearSession();
+      }
+      return null;
     }
 
-    const refreshToken = await this.getStoredRefreshToken();
-    if (!refreshToken) {
+    if (!this.isExpired(currentSession.expiresAt, minValiditySeconds)) {
+      try {
+        return await this.restoreCurrentSession(currentSession);
+      } catch (error) {
+        await this.clearSession();
+        throw this.wrapCoreError(
+          error,
+          "TOKEN_REQUEST_FAILED",
+          "Stored session validation failed",
+        );
+      }
+    }
+
+    if (!(await this.getStoredRefreshToken())) {
+      await this.clearSession();
       return null;
     }
 
@@ -422,81 +580,68 @@ export class AuthManager {
         await this.clearSession();
         return null;
       }
-
       throw error;
     }
   }
 
-  /**
-   * Returns normalized in-memory/session storage state.
-   */
   async getSession(): Promise<GuardhouseSession | null> {
-    const cache = await this.loadSessionCache();
-
-    if (!cache) {
+    const stored = await this.loadStoredSession();
+    if (!stored || this.isExpired(stored.expiresAt, 0)) {
       return null;
     }
 
-    const refreshToken = await this.getStoredRefreshToken();
-
-    return {
-      accessToken: cache.accessToken,
-      refreshToken: refreshToken ?? undefined,
-      idToken: cache.idToken,
-      tokenType: cache.tokenType,
-      scope: cache.scope,
-      expiresAt: cache.expiresAt,
-      user: cache.user,
-    };
+    try {
+      return (await this.restoreCurrentSession(stored)).session;
+    } catch (error) {
+      await this.clearSession();
+      throw this.wrapCoreError(
+        error,
+        "TOKEN_REQUEST_FAILED",
+        "Stored session validation failed",
+      );
+    }
   }
 
-  /**
-   * Returns a valid access token, refreshing if requested.
-   */
   async getAccessToken(
     options: GetAccessTokenOptions = {},
   ): Promise<string | null> {
-    const currentSession = await this.getSession();
+    const stored = await this.loadStoredSession();
     const minValiditySeconds =
-      options.minValiditySeconds !== undefined
-        ? Math.max(0, options.minValiditySeconds)
-        : 60;
+      options.minValiditySeconds === undefined
+        ? 60
+        : Math.max(0, options.minValiditySeconds);
+
+    if (stored && !this.isExpired(stored.expiresAt, minValiditySeconds)) {
+      try {
+        await this.restoreCurrentSession(stored);
+        return stored.accessToken;
+      } catch (error) {
+        await this.clearSession();
+        throw this.wrapCoreError(
+          error,
+          "TOKEN_REQUEST_FAILED",
+          "Stored session validation failed",
+        );
+      }
+    }
 
     if (
-      currentSession &&
-      !this.isExpired(currentSession.expiresAt, minValiditySeconds)
+      options.autoRefresh === false ||
+      !(await this.getStoredRefreshToken())
     ) {
-      return currentSession.accessToken;
-    }
-
-    if (options.autoRefresh === false) {
       return null;
     }
 
-    const refreshToken = await this.getStoredRefreshToken();
-    if (!refreshToken) {
-      return null;
-    }
-
-    const refreshed = await this.refreshToken();
-    return refreshed.session.accessToken;
+    return (await this.refreshToken()).session.accessToken;
   }
 
-  /**
-   * Logs out locally and optionally revokes tokens via `@guardhouse/core`.
-   */
   async logout(options: GuardhouseLogoutOptions = {}): Promise<void> {
-    const currentSession = await this.getSession();
+    const currentSession = await this.loadStoredSession();
     const refreshToken = await this.getStoredRefreshToken();
-    const shouldRevoke = options.revoke ?? false;
-
     let revokeError: GuardhouseAuthError | null = null;
 
-    if (shouldRevoke && currentSession) {
-      const revokeAccessToken = options.revokeAccessToken ?? true;
-      const revokeRefreshToken = options.revokeRefreshToken ?? true;
-
-      if (revokeAccessToken && currentSession.accessToken) {
+    if (options.revoke && currentSession) {
+      if (options.revokeAccessToken ?? true) {
         try {
           await this.coreClient.revokeToken(
             currentSession.accessToken,
@@ -511,17 +656,15 @@ export class AuthManager {
         }
       }
 
-      if (revokeRefreshToken && refreshToken) {
+      if ((options.revokeRefreshToken ?? true) && refreshToken) {
         try {
           await this.coreClient.revokeToken(refreshToken, "refresh_token");
         } catch (error) {
-          if (!revokeError) {
-            revokeError = this.wrapCoreError(
-              error,
-              "REVOCATION_FAILED",
-              "Refresh token revocation failed",
-            );
-          }
+          revokeError ??= this.wrapCoreError(
+            error,
+            "REVOCATION_FAILED",
+            "Refresh token revocation failed",
+          );
         }
       }
     }
@@ -534,41 +677,53 @@ export class AuthManager {
   }
 
   private async runBrowserAuthFlow(
-    endpoint: string,
     options: BrowserLoginOptions,
-    registrationFlow = false,
+    registrationFlow: boolean,
   ): Promise<GuardhouseAuthResult> {
+    if (this.pendingBrowserFlow) {
+      throw new GuardhouseAuthError(
+        "An authorization transaction is already in progress",
+        "INVALID_CALLBACK",
+      );
+    }
+
     const browser = this.requireBrowserAdapter();
     const scope = trimToUndefined(options.scope) ?? this.defaultScope;
     const audience = this.resolveAudience(options.audience);
-    const artifacts = await createPkceArtifacts(this.cryptoAdapter, false);
-
-    this.pendingBrowserFlow = {
-      codeVerifier: artifacts.codeVerifier,
-      state: artifacts.state,
-      appState: options.appState,
-    };
+    this.logger.info("Starting transaction-bound browser authorization", {
+      registrationFlow,
+      hasAudience: Boolean(audience),
+    });
+    const created = await this.coreClient.createAuthorizationRequest({
+      redirectUri: this.redirectUri,
+      scope,
+      audience,
+      resource: options.resource,
+      audiencePolicy: "oidc-optional",
+      prompt: trimToUndefined(options.prompt),
+      maxAgeSeconds: options.maxAgeSeconds,
+      responseMode: "query",
+      applicationState: options.appState,
+      allowOfflineAccessScope: true,
+      requiredAcrValues: this.mergeAssuranceRequirements(
+        this.requiredAcrValues,
+        options.requiredAcrValues,
+      ),
+      requiredAmrValues: this.mergeAssuranceRequirements(
+        this.requiredAmrValues,
+        options.requiredAmrValues,
+      ),
+    });
+    this.pendingBrowserFlow = created.transaction;
 
     const browserOptions: BrowserSessionOptions = {
       ephemeralSession:
         options.ephemeralSession ?? this.defaultEphemeralSession,
       timeoutMs: options.timeoutMs,
     };
-
     const authorizationUrl = registrationFlow
-      ? this.buildRegistrationAuthorizationUrl(
-          artifacts,
-          scope,
-          audience,
-          options,
-        )
-      : this.buildAuthorizationUrl(
-          endpoint,
-          artifacts,
-          scope,
-          audience,
-          options,
-        );
+      ? this.buildRegistrationAuthorizationUrl(created.authorizationUrl)
+      : created.authorizationUrl;
 
     try {
       const browserResult = await browser.openAuthSession(
@@ -576,379 +731,380 @@ export class AuthManager {
         this.redirectUri,
         browserOptions,
       );
-
-      const callback = parseAuthorizationCallback(
-        browserResult.url,
-        this.redirectUriDescriptor,
+      const callback = await this.coreClient.validateOAuthCallback(
+        { mode: "query", url: browserResult.url },
+        created.transaction,
       );
 
-      if (callback.state !== this.pendingBrowserFlow?.state) {
+      if (callback.type === "error") {
         throw new GuardhouseAuthError(
-          "OAuth state mismatch detected",
-          "STATE_MISMATCH",
+          `Authorization failed: ${callback.error}`,
+          "INVALID_CALLBACK",
         );
       }
 
-      const tokenResult = await this.exchangeCodeForTokens(callback.code, {
-        codeVerifier: this.pendingBrowserFlow.codeVerifier,
-      });
+      const exchanged =
+        await this.coreClient.exchangeAuthorizationCode(callback);
 
-      return {
-        ...tokenResult,
-        appState: this.pendingBrowserFlow.appState,
-      };
+      return await this.persistAuthorizationResult(
+        exchanged,
+        created.transaction,
+      );
+    } catch (error) {
+      await this.coreClient.clearSessionState();
+      throw this.wrapCoreError(
+        error,
+        "TOKEN_REQUEST_FAILED",
+        "Browser authorization failed",
+      );
     } finally {
       this.pendingBrowserFlow = null;
     }
   }
 
-  private buildRegistrationAuthorizationUrl(
-    artifacts: PkceArtifacts,
-    scope: string,
-    audience: string | undefined,
+  private startBrowserAuthFlow(
     options: BrowserLoginOptions,
-  ): string {
-    const registrationUrl = new URL(this.registrationEndpoint, this.authority);
-    const returnUrlParamName = this.findReturnUrlParamName(registrationUrl);
-
-    if (!returnUrlParamName) {
-      return this.buildAuthorizationUrl(
-        this.registrationEndpoint,
-        artifacts,
-        scope,
-        audience,
-        options,
+    registrationFlow: boolean,
+  ): Promise<GuardhouseAuthResult> {
+    if (this.browserAuthPromise) {
+      return Promise.reject(
+        new GuardhouseAuthError(
+          "An authorization transaction is already in progress",
+          "INVALID_CALLBACK",
+        ),
       );
     }
 
-    const authorizeUrl = this.buildAuthorizationUrl(
-      this.authorizationEndpoint,
-      artifacts,
-      scope,
-      audience,
-      options,
-    );
+    const operation = (async () => {
+      try {
+        return await this.runBrowserAuthFlow(options, registrationFlow);
+      } finally {
+        this.browserAuthPromise = null;
+      }
+    })();
+    this.browserAuthPromise = operation;
+    return operation;
+  }
 
-    registrationUrl.searchParams.set(returnUrlParamName, authorizeUrl);
+  private buildRegistrationAuthorizationUrl(authorizationUrl: string): string {
+    const registrationUrl = new URL(this.registrationEndpoint, this.issuer);
+    const returnUrlParamName = Array.from(
+      registrationUrl.searchParams.keys(),
+    ).find((key) => key.trim().toLowerCase() === "returnurl");
+
+    if (returnUrlParamName) {
+      registrationUrl.searchParams.set(returnUrlParamName, authorizationUrl);
+      return registrationUrl.toString();
+    }
+
+    const authorization = new URL(authorizationUrl);
+    for (const [key, value] of authorization.searchParams) {
+      registrationUrl.searchParams.set(key, value);
+    }
     return registrationUrl.toString();
   }
 
-  private buildAuthorizationUrl(
-    endpoint: string,
-    artifacts: PkceArtifacts,
-    scope: string,
-    audience: string | undefined,
-    options: BrowserLoginOptions,
-  ): string {
-    return generateAuthUrl({
-      authority: this.authority,
-      authorizationEndpoint: endpoint,
-      clientId: this.clientId,
-      redirectUri: this.redirectUri,
-      responseType: "code",
-      scope,
-      state: artifacts.state,
-      nonce: artifacts.nonce,
-      prompt: trimToUndefined(options.prompt),
-      audience,
-      allowAuthorizationWithoutAudience: true,
-      allowOfflineAccessScope: true,
-      codeChallenge: artifacts.codeChallenge,
-      codeChallengeMethod: "S256",
-      extraParams: options.extraParams,
+  private async persistAuthorizationResult(
+    result: AuthorizationCodeExchangeResult,
+    transaction: AuthorizationTransaction,
+  ): Promise<GuardhouseAuthResult> {
+    const existingSession = await this.loadStoredSession();
+    const appState = isRecord(transaction.applicationState)
+      ? transaction.applicationState
+      : undefined;
+
+    if (result.mode === "oidc") {
+      return this.persistAuthResult(result.tokens, {
+        existingSession: existingSession ?? undefined,
+        requestedScope: transaction.requestedScope,
+        appState,
+        identity: {
+          evidence: result.identity,
+          metadata: toIdentityMetadata(result.identity),
+          rawIdToken: result.tokens.id_token as string,
+          verifiedIdToken: result.idToken,
+          idTokenCurrent: true,
+        },
+      });
+    }
+
+    return this.persistAuthResult(result.tokens, {
+      existingSession: existingSession ?? undefined,
+      requestedScope: transaction.requestedScope,
+      appState,
     });
-  }
-
-  private findReturnUrlParamName(url: URL): string | null {
-    for (const key of url.searchParams.keys()) {
-      if (key.trim().toLowerCase() === "returnurl") {
-        return key;
-      }
-    }
-
-    return null;
-  }
-
-  private async exchangeAuthorizationCode(
-    code: string,
-    codeVerifier: string | undefined,
-    scope?: string,
-    audience?: string,
-  ): Promise<GuardhouseTokenResponse> {
-    const extraParams: Record<string, string> = {};
-
-    if (scope) {
-      extraParams.scope = scope;
-    }
-
-    if (audience) {
-      extraParams.audience = audience;
-    }
-
-    if (codeVerifier) {
-      try {
-        const response = await this.coreClient.exchangeCodeForTokens(
-          code,
-          codeVerifier,
-          this.redirectUri,
-          extraParams,
-        );
-
-        return this.normalizeCoreTokenResponse(response);
-      } catch (error) {
-        throw this.wrapCoreError(
-          error,
-          "TOKEN_REQUEST_FAILED",
-          "Authorization code exchange failed",
-        );
-      }
-    }
-
-    const body = new URLSearchParams({
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: this.redirectUri,
-      client_id: this.clientId,
-    });
-
-    if (scope) {
-      body.set("scope", scope);
-    }
-
-    if (audience) {
-      body.set("audience", audience);
-    }
-
-    try {
-      const response = await this.coreClient.postForm<CoreTokenResponse>(
-        this.tokenEndpoint,
-        body,
-      );
-
-      return this.normalizeCoreTokenResponse(response);
-    } catch (error) {
-      throw this.wrapCoreError(
-        error,
-        "TOKEN_REQUEST_FAILED",
-        "Authorization code exchange failed",
-      );
-    }
   }
 
   private async persistAuthResult(
-    tokenResponse: GuardhouseTokenResponse,
-    existingSession?: GuardhouseSession,
-    appState?: Record<string, unknown>,
+    tokenResponse: CoreTokenResponse,
+    options: PersistTokenOptions,
   ): Promise<GuardhouseAuthResult> {
-    const persistedRefreshToken = await this.getStoredRefreshToken();
     const expiresAt = Math.floor(Date.now() / 1000) + tokenResponse.expires_in;
+    if (!Number.isSafeInteger(expiresAt) || expiresAt <= 0) {
+      throw new GuardhouseAuthError(
+        "Token response produced an invalid expiration time",
+        "TOKEN_RESPONSE_ERROR",
+      );
+    }
 
-    const session: GuardhouseSession = {
-      accessToken: tokenResponse.access_token,
-      refreshToken:
-        tokenResponse.refresh_token ??
-        existingSession?.refreshToken ??
-        persistedRefreshToken ??
-        undefined,
-      idToken: tokenResponse.id_token ?? existingSession?.idToken,
-      tokenType:
-        trimToUndefined(tokenResponse.token_type) ??
-        existingSession?.tokenType ??
-        "Bearer",
-      scope:
-        trimToUndefined(tokenResponse.scope) ??
-        existingSession?.scope ??
-        this.defaultScope,
-      expiresAt,
-      user: existingSession?.user ?? null,
-    };
+    const scope =
+      trimToUndefined(tokenResponse.scope) ??
+      options.requestedScope ??
+      options.existingSession?.scope ??
+      this.defaultScope;
+    if (options.requestedScope) {
+      this.assertScopeNotEscalated(options.requestedScope, scope);
+    }
 
-    session.user = await this.fetchUserInfo(session.accessToken, session.user);
-    await this.persistSession(session);
+    let record: StoredSession;
+    let user: CoreUser | null = null;
+    if (options.identity) {
+      record = Object.freeze({
+        version: 3,
+        kind: "oidc",
+        issuer: this.issuer,
+        clientId: this.clientId,
+        accessToken: tokenResponse.access_token,
+        tokenType: tokenResponse.token_type,
+        scope,
+        expiresAt,
+        idToken: options.identity.rawIdToken,
+        identity: options.identity.metadata,
+        idTokenCurrent: options.identity.idTokenCurrent,
+      });
+      user = await this.resolveAuthenticatedUser(
+        record.accessToken,
+        options.identity.evidence,
+        options.identity.verifiedIdToken?.payload,
+      );
+    } else {
+      if (tokenResponse.id_token) {
+        throw new GuardhouseAuthError(
+          "An ID token cannot be persisted without verified identity evidence",
+          "TOKEN_RESPONSE_ERROR",
+        );
+      }
+      record = Object.freeze({
+        version: 3,
+        kind: "oauth",
+        issuer: this.issuer,
+        clientId: this.clientId,
+        accessToken: tokenResponse.access_token,
+        tokenType: tokenResponse.token_type,
+        scope,
+        expiresAt,
+      });
+    }
 
+    const persistedRefreshToken = await this.getStoredRefreshToken();
+    const refreshToken =
+      tokenResponse.refresh_token ?? persistedRefreshToken ?? undefined;
+    try {
+      await this.persistRefreshToken(refreshToken);
+      await this.persistSessionRecord(record, user);
+    } catch (error) {
+      await this.clearSession();
+      throw error;
+    }
+
+    const session = this.toPublicSession(record, refreshToken, user);
     return {
       session,
       tokenResponse: {
         ...tokenResponse,
-        refresh_token: session.refreshToken,
-        id_token: session.idToken,
-        scope: session.scope,
-        token_type: session.tokenType,
+        refresh_token: refreshToken,
+        scope,
       },
-      user: session.user,
-      appState,
+      user,
+      appState: options.appState,
     };
   }
 
-  private async fetchUserInfo(
-    accessToken: string,
-    fallbackUser: CoreUser | null,
-  ): Promise<CoreUser | null> {
-    if (!this.userInfoOnLogin) {
-      return fallbackUser;
-    }
-
-    try {
-      const user = await this.coreClient.getUserInfo(accessToken);
-
-      if (!user || typeof user.sub !== "string" || user.sub.trim() === "") {
-        return fallbackUser;
-      }
-
-      return {
-        ...(user as CoreUser),
-        sub: user.sub.trim(),
-      };
-    } catch (error) {
-      this.logger.warn("Failed to fetch user profile", {
-        error: toErrorMessage(error),
-      });
-      return fallbackUser;
-    }
-  }
-
-  private normalizeCoreTokenResponse(
-    tokenResponse: CoreTokenResponse,
-  ): GuardhouseTokenResponse {
-    return {
-      access_token: tokenResponse.access_token,
-      token_type: tokenResponse.token_type,
-      expires_in: tokenResponse.expires_in,
-      refresh_token: tokenResponse.refresh_token,
-      id_token: tokenResponse.id_token,
-      scope: tokenResponse.scope,
-    };
-  }
-
-  private wrapCoreError(
-    error: unknown,
-    fallbackCode: GuardhouseErrorCode,
-    fallbackMessage: string,
-  ): GuardhouseAuthError {
-    if (error instanceof GuardhouseAuthError) {
-      return error;
-    }
-
-    if (error instanceof GuardhouseNetworkError) {
-      return new GuardhouseAuthError(
-        error.message,
-        "NETWORK_ERROR",
-        error.statusCode,
-        error.details,
-      );
-    }
-
-    if (error instanceof CoreGuardhouseError) {
-      const mappedCode = this.mapCoreCode(error.code, fallbackCode);
-
-      if (mappedCode === "NETWORK_ERROR") {
-        return new GuardhouseAuthError(
-          error.message,
-          "NETWORK_ERROR",
-          error.statusCode,
-          error,
+  private async restoreCurrentSession(
+    record: StoredSession,
+  ): Promise<GuardhouseAuthResult> {
+    let user: CoreUser | null = null;
+    if (record.kind === "oidc") {
+      if (!record.idTokenCurrent) {
+        if (
+          this.sessionCache?.record === record &&
+          this.sessionCache.user !== null
+        ) {
+          const refreshToken = await this.getStoredRefreshToken();
+          const session = this.toPublicSession(
+            record,
+            refreshToken ?? undefined,
+            this.sessionCache.user,
+          );
+          return this.buildAuthResultFromSession(session);
+        }
+        throw new GuardhouseAuthError(
+          "The stored ID token is historical identity evidence, not a current credential",
+          "TOKEN_REQUEST_FAILED",
         );
       }
-
-      return new GuardhouseAuthError(
-        error.message,
-        mappedCode,
-        error.statusCode,
-        {
-          error: error.code,
-          cause: error,
-        },
+      const verified = await this.coreClient.verifyIdToken(record.idToken, {
+        purpose: "session",
+        requiredAcrValues: this.requiredAcrValues,
+        requiredAmrValues: this.requiredAmrValues,
+      });
+      if (!identityEquals(verified.identity, record.identity)) {
+        throw new GuardhouseAuthError(
+          "Stored identity metadata does not match the signed ID token",
+          "TOKEN_REQUEST_FAILED",
+        );
+      }
+      user = await this.resolveAuthenticatedUser(
+        record.accessToken,
+        verified.identity,
+        verified.payload,
       );
     }
 
-    return new GuardhouseAuthError(
-      `${fallbackMessage}: ${toErrorMessage(error)}`,
-      fallbackCode,
-      undefined,
-      error,
+    const refreshToken = await this.getStoredRefreshToken();
+    this.sessionCache = { record, user };
+    const session = this.toPublicSession(
+      record,
+      refreshToken ?? undefined,
+      user,
     );
+    return this.buildAuthResultFromSession(session);
   }
 
-  private mapCoreCode(
-    coreCode: string | undefined,
-    fallbackCode: GuardhouseErrorCode,
-  ): GuardhouseErrorCode {
-    if (!coreCode) {
-      return fallbackCode;
+  private async resolveAuthenticatedUser(
+    accessToken: string,
+    identity: OidcIdentityEvidence,
+    payload?: VerifiedIdTokenPayload,
+  ): Promise<CoreUser> {
+    if (this.userInfoOnLogin) {
+      const userInfo = await this.coreClient.getUserInfo(accessToken, identity);
+      return freezeUser({ ...userInfo, sub: userInfo.sub });
     }
 
-    if (coreCode === "NETWORK_ERROR" || coreCode === "REQUEST_TIMEOUT") {
-      return "NETWORK_ERROR";
+    if (payload) {
+      return freezeUser({ ...payload, sub: identity.subject } as CoreUser);
     }
 
-    if (coreCode === "invalid_grant" || coreCode === "invalid_token") {
-      return "TOKEN_REQUEST_FAILED";
-    }
-
-    return fallbackCode;
+    return freezeUser({ sub: identity.subject });
   }
 
-  private async persistSession(session: GuardhouseSession): Promise<void> {
-    await this.persistRefreshToken(session.refreshToken);
+  private async loadStoredSession(): Promise<StoredSession | null> {
+    if (this.sessionCache) {
+      return this.sessionCache.record;
+    }
+    if (!this.sessionStorage) {
+      return null;
+    }
 
-    await this.persistSessionCache({
-      accessToken: session.accessToken,
-      idToken: session.idToken,
-      tokenType: session.tokenType,
-      scope: session.scope,
-      expiresAt: session.expiresAt,
-      user: session.user,
+    const serialized = await this.sessionStorage.getItem(
+      this.sessionStorageKey,
+    );
+    if (!serialized) {
+      return null;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(serialized) as unknown;
+    } catch {
+      await this.clearSession();
+      return null;
+    }
+
+    const record = this.parseStoredSession(parsed);
+    if (!record) {
+      await this.clearSession();
+      return null;
+    }
+
+    this.sessionCache = { record, user: null };
+    return record;
+  }
+
+  private parseStoredSession(value: unknown): StoredSession | null {
+    if (
+      !isRecord(value) ||
+      value.version !== 3 ||
+      value.issuer !== this.issuer ||
+      value.clientId !== this.clientId ||
+      (value.kind !== "oauth" && value.kind !== "oidc") ||
+      typeof value.accessToken !== "string" ||
+      value.accessToken.trim() === "" ||
+      typeof value.tokenType !== "string" ||
+      value.tokenType.trim() === "" ||
+      typeof value.expiresAt !== "number" ||
+      !Number.isSafeInteger(value.expiresAt) ||
+      value.expiresAt <= 0 ||
+      (value.scope !== undefined && typeof value.scope !== "string")
+    ) {
+      return null;
+    }
+
+    const base: StoredSessionBase = {
+      version: 3,
+      issuer: this.issuer,
+      clientId: this.clientId,
+      accessToken: value.accessToken,
+      tokenType: value.tokenType,
+      scope: trimToUndefined(value.scope as string | undefined),
+      expiresAt: value.expiresAt,
+    };
+
+    if (value.kind === "oauth") {
+      return Object.freeze({ ...base, kind: "oauth" });
+    }
+
+    const identity = parseStoredIdentity(value.identity);
+    if (
+      !identity ||
+      identity.issuer !== this.issuer ||
+      identity.clientId !== this.clientId ||
+      typeof value.idToken !== "string" ||
+      value.idToken.trim() === "" ||
+      typeof value.idTokenCurrent !== "boolean"
+    ) {
+      return null;
+    }
+
+    return Object.freeze({
+      ...base,
+      kind: "oidc",
+      idToken: value.idToken,
+      identity,
+      idTokenCurrent: value.idTokenCurrent,
     });
   }
 
-  private async clearSession(): Promise<void> {
-    this.pendingBrowserFlow = null;
-    this.sessionCache = null;
-
-    await Promise.all([
-      this.persistRefreshToken(undefined),
-      this.clearPersistedSessionCache(),
-    ]);
-  }
-
-  private shouldClearSessionAfterRefreshFailure(error: unknown): boolean {
-    if (!(error instanceof GuardhouseAuthError)) {
-      return false;
+  private async persistSessionRecord(
+    record: StoredSession,
+    user: CoreUser | null,
+  ): Promise<void> {
+    if (this.sessionStorage) {
+      await this.sessionStorage.setItem(
+        this.sessionStorageKey,
+        JSON.stringify(record),
+      );
+      const readBack = await this.sessionStorage.getItem(
+        this.sessionStorageKey,
+      );
+      if (readBack !== JSON.stringify(record)) {
+        throw new GuardhouseAuthError(
+          "Session storage did not durably retain the v3 session record",
+          "STORAGE_ERROR",
+        );
+      }
     }
-
-    if (error.code !== "TOKEN_REQUEST_FAILED") {
-      return false;
-    }
-
-    if (error.statusCode !== 400 && error.statusCode !== 401) {
-      return false;
-    }
-
-    if (!isRecord(error.details)) {
-      return true;
-    }
-
-    const serverError = trimToUndefined(
-      typeof error.details.error === "string" ? error.details.error : undefined,
-    );
-
-    return (
-      serverError === undefined ||
-      serverError === "invalid_grant" ||
-      serverError === "invalid_token"
-    );
+    this.sessionCache = { record, user };
   }
 
   private async getStoredRefreshToken(): Promise<string | null> {
     if (this.refreshTokenCache) {
       return this.refreshTokenCache;
     }
-
     const persisted = trimToUndefined(
-      await this.refreshTokenStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN),
+      await this.refreshTokenStorage.getItem(this.refreshTokenStorageKey),
     );
     this.refreshTokenCache = persisted ?? null;
-
     return this.refreshTokenCache;
   }
 
@@ -956,114 +1112,68 @@ export class AuthManager {
     refreshToken: string | undefined,
   ): Promise<void> {
     const normalized = trimToUndefined(refreshToken);
-    this.refreshTokenCache = normalized ?? null;
-
     if (!normalized) {
-      await this.refreshTokenStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN);
+      await this.refreshTokenStorage.removeItem(this.refreshTokenStorageKey);
+      this.refreshTokenCache = null;
       return;
     }
-
     await this.refreshTokenStorage.setItem(
-      STORAGE_KEYS.REFRESH_TOKEN,
+      this.refreshTokenStorageKey,
       normalized,
     );
+    const readBack = await this.refreshTokenStorage.getItem(
+      this.refreshTokenStorageKey,
+    );
+    if (readBack !== normalized) {
+      throw new GuardhouseAuthError(
+        "Refresh-token storage did not durably retain the token",
+        "STORAGE_ERROR",
+      );
+    }
+    this.refreshTokenCache = normalized;
   }
 
-  private async loadSessionCache(): Promise<SessionCacheData | null> {
-    if (this.sessionCache) {
-      return this.sessionCache;
-    }
-
-    if (!this.sessionStorage) {
-      return null;
-    }
-
-    const [
-      accessToken,
-      idTokenRaw,
-      expiresAtRaw,
-      tokenTypeRaw,
-      scopeRaw,
-      userRaw,
-    ] = await Promise.all([
-      this.sessionStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN),
-      this.sessionStorage.getItem(STORAGE_KEYS.ID_TOKEN),
-      this.sessionStorage.getItem(STORAGE_KEYS.EXPIRES_AT),
-      this.sessionStorage.getItem(CLIENT_STORAGE_KEYS.TOKEN_TYPE),
-      this.sessionStorage.getItem(CLIENT_STORAGE_KEYS.SCOPE),
-      this.sessionStorage.getItem(STORAGE_KEYS.USER),
-    ]);
-
-    if (!accessToken) {
-      return null;
-    }
-
-    const expiresAt = parsePositiveInteger(expiresAtRaw);
-
-    if (!expiresAt) {
-      await this.clearPersistedSessionCache();
-      return null;
-    }
-
-    this.sessionCache = {
-      accessToken,
-      idToken: trimToUndefined(idTokenRaw),
-      tokenType: trimToUndefined(tokenTypeRaw) ?? "Bearer",
-      scope: trimToUndefined(scopeRaw),
-      expiresAt,
-      user: parseStoredUser(userRaw),
-    };
-
-    return this.sessionCache;
-  }
-
-  private async persistSessionCache(cache: SessionCacheData): Promise<void> {
-    this.sessionCache = cache;
-
-    if (!this.sessionStorage) {
-      return;
-    }
-
-    await Promise.all([
-      this.sessionStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, cache.accessToken),
-      this.sessionStorage.setItem(
-        STORAGE_KEYS.EXPIRES_AT,
-        String(cache.expiresAt),
-      ),
-      this.sessionStorage.setItem(
-        CLIENT_STORAGE_KEYS.TOKEN_TYPE,
-        cache.tokenType,
-      ),
-      cache.scope
-        ? this.sessionStorage.setItem(CLIENT_STORAGE_KEYS.SCOPE, cache.scope)
-        : this.sessionStorage.removeItem(CLIENT_STORAGE_KEYS.SCOPE),
-      cache.idToken
-        ? this.sessionStorage.setItem(STORAGE_KEYS.ID_TOKEN, cache.idToken)
-        : this.sessionStorage.removeItem(STORAGE_KEYS.ID_TOKEN),
-      cache.user
-        ? this.sessionStorage.setItem(
-            STORAGE_KEYS.USER,
-            JSON.stringify(cache.user),
-          )
-        : this.sessionStorage.removeItem(STORAGE_KEYS.USER),
-    ]);
-  }
-
-  private async clearPersistedSessionCache(): Promise<void> {
+  private async clearSession(): Promise<void> {
+    this.pendingBrowserFlow = null;
     this.sessionCache = null;
-
-    if (!this.sessionStorage) {
-      return;
-    }
+    this.refreshTokenCache = null;
 
     await Promise.all([
-      this.sessionStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN),
-      this.sessionStorage.removeItem(STORAGE_KEYS.ID_TOKEN),
-      this.sessionStorage.removeItem(STORAGE_KEYS.EXPIRES_AT),
-      this.sessionStorage.removeItem(CLIENT_STORAGE_KEYS.TOKEN_TYPE),
-      this.sessionStorage.removeItem(CLIENT_STORAGE_KEYS.SCOPE),
-      this.sessionStorage.removeItem(STORAGE_KEYS.USER),
+      this.refreshTokenStorage.removeItem(this.refreshTokenStorageKey),
+      this.sessionStorage?.removeItem(this.sessionStorageKey),
+      this.coreClient.clearSessionState(),
     ]);
+
+    const [refreshToken, session] = await Promise.all([
+      this.refreshTokenStorage.getItem(this.refreshTokenStorageKey),
+      this.sessionStorage?.getItem(this.sessionStorageKey),
+    ]);
+    if (refreshToken !== null || (session !== null && session !== undefined)) {
+      throw new GuardhouseAuthError(
+        "Storage retained authentication state after logout",
+        "STORAGE_ERROR",
+      );
+    }
+  }
+
+  private toPublicSession(
+    record: StoredSession,
+    refreshToken: string | undefined,
+    user: CoreUser | null,
+  ): GuardhouseSession {
+    return {
+      accessToken: record.accessToken,
+      refreshToken,
+      idToken:
+        record.kind === "oidc" && record.idTokenCurrent
+          ? record.idToken
+          : undefined,
+      identity: record.kind === "oidc" ? record.identity : undefined,
+      tokenType: record.tokenType,
+      scope: record.scope,
+      expiresAt: record.expiresAt,
+      user,
+    };
   }
 
   private buildAuthResultFromSession(
@@ -1086,34 +1196,99 @@ export class AuthManager {
     };
   }
 
+  private assertScopeNotEscalated(
+    grantedOrRequestedScope: string,
+    returnedOrRequestedScope: string,
+  ): void {
+    const allowed = this.scopeSet(grantedOrRequestedScope);
+    for (const scope of this.scopeSet(returnedOrRequestedScope)) {
+      if (!allowed.has(scope)) {
+        throw new GuardhouseAuthError(
+          "The token request or response attempted to escalate scope",
+          "TOKEN_RESPONSE_ERROR",
+        );
+      }
+    }
+  }
+
+  private scopeSet(scope: string): Set<string> {
+    return new Set(scope.split(/\s+/).filter(Boolean));
+  }
+
+  private mergeAssuranceRequirements(
+    configured: readonly string[],
+    requested: readonly string[] | undefined,
+  ): readonly string[] {
+    return Array.from(new Set([...configured, ...(requested ?? [])]));
+  }
+
   private resolveAudience(audience: string | undefined): string | undefined {
     return trimToUndefined(audience) ?? this.defaultAudience;
   }
 
   private isExpired(expiresAt: number, minValiditySeconds: number): boolean {
-    const now = Math.floor(Date.now() / 1000);
-    return expiresAt <= now + minValiditySeconds;
+    return expiresAt <= Math.floor(Date.now() / 1000) + minValiditySeconds;
   }
 
   private requireBrowserAdapter(): GuardhouseBrowserAdapter {
     if (this.browser) {
       return this.browser;
     }
-
     throw new GuardhouseAuthError(
       "No browser adapter configured",
       "BROWSER_ADAPTER_MISSING",
     );
   }
 
-  private requireString(value: string, fieldName: string): string {
-    const normalized = trimToUndefined(value);
-
-    if (normalized) {
-      return normalized;
+  private wrapCoreError(
+    error: unknown,
+    fallbackCode: GuardhouseErrorCode,
+    fallbackMessage: string,
+  ): GuardhouseAuthError {
+    if (error instanceof GuardhouseAuthError) {
+      return error;
     }
+    if (error instanceof GuardhouseNetworkError) {
+      return new GuardhouseAuthError(
+        error.message,
+        "NETWORK_ERROR",
+        error.statusCode,
+      );
+    }
+    if (error instanceof CoreGuardhouseError) {
+      return new GuardhouseAuthError(
+        error.message,
+        error.code === "NETWORK_ERROR" || error.code === "REQUEST_TIMEOUT"
+          ? "NETWORK_ERROR"
+          : fallbackCode,
+        error.statusCode,
+      );
+    }
+    return new GuardhouseAuthError(
+      fallbackMessage,
+      fallbackCode,
+      undefined,
+      error,
+    );
+  }
 
-    throw new GuardhouseAuthError(`${fieldName} is required`, "CONFIG_ERROR");
+  private shouldClearSessionAfterRefreshFailure(error: unknown): boolean {
+    const code =
+      error instanceof CoreGuardhouseError
+        ? error.code
+        : error instanceof GuardhouseAuthError
+          ? error.code
+          : undefined;
+
+    return (
+      code === "invalid_grant" ||
+      code === "invalid_token" ||
+      code === "ID_TOKEN_VALIDATION_FAILED" ||
+      code === "REFRESH_IDENTITY_REQUIRED" ||
+      code === "USERINFO_SUBJECT_MISMATCH" ||
+      code === "INVALID_IDENTITY" ||
+      code === "TOKEN_RESPONSE_ERROR"
+    );
   }
 
   private withRefreshLock(
@@ -1122,11 +1297,9 @@ export class AuthManager {
     if (this.refreshPromise) {
       return this.refreshPromise;
     }
-
     this.refreshPromise = action().finally(() => {
       this.refreshPromise = null;
     });
-
     return this.refreshPromise;
   }
 }

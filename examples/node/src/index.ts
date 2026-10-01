@@ -6,9 +6,8 @@ import express, {
 import dotenv from "dotenv";
 import {
   GuardhouseClient,
-  generateAuthUrl,
-  generatePKCE,
-  generateState,
+  type AuthorizationTransaction,
+  type OidcIdentityEvidence,
   type TokenResponse,
   type UserInfoResponse,
 } from "@guardhouse/core";
@@ -21,7 +20,10 @@ const app = express();
 const PORT = Number(process.env.PORT || 3001);
 const AUTHORITY = process.env.AUTHORITY?.trim() || "https://auth.example.com";
 const CLIENT_ID = process.env.CLIENT_ID?.trim() || "your-client-id";
-const CLIENT_SECRET = process.env.CLIENT_SECRET?.trim() || "your-client-secret";
+const CLIENT_SECRET = process.env.CLIENT_SECRET?.trim() || undefined;
+const SERVICE_CLIENT_ID = process.env.SERVICE_CLIENT_ID?.trim();
+const SERVICE_CLIENT_SECRET = process.env.SERVICE_CLIENT_SECRET?.trim();
+const SERVICE_SCOPE = process.env.SERVICE_SCOPE?.trim();
 const REDIRECT_URI =
   process.env.REDIRECT_URI?.trim() || `http://localhost:${PORT}/callback`;
 const SCOPE =
@@ -37,25 +39,32 @@ const oauthClient = new GuardhouseClient({
   clientSecret: CLIENT_SECRET,
 });
 
-const machineClient = new GuardhouseNodeClient({
-  authority: AUTHORITY,
-  clientId: CLIENT_ID,
-  clientSecret: CLIENT_SECRET,
-  scope: SCOPE,
-});
+if (
+  [SERVICE_CLIENT_ID, SERVICE_CLIENT_SECRET, SERVICE_SCOPE].some(Boolean) &&
+  ![SERVICE_CLIENT_ID, SERVICE_CLIENT_SECRET, SERVICE_SCOPE].every(Boolean)
+) {
+  throw new Error(
+    "SERVICE_CLIENT_ID, SERVICE_CLIENT_SECRET, and SERVICE_SCOPE must be configured together",
+  );
+}
 
-type PendingAuthRequest = {
-  codeVerifier: string;
-  createdAt: number;
-};
+const machineClient =
+  SERVICE_CLIENT_ID && SERVICE_CLIENT_SECRET && SERVICE_SCOPE
+    ? new GuardhouseNodeClient({
+        authority: AUTHORITY,
+        clientId: SERVICE_CLIENT_ID,
+        clientSecret: SERVICE_CLIENT_SECRET,
+        scope: SERVICE_SCOPE,
+      })
+    : null;
 
-const pendingAuthRequests = new Map<string, PendingAuthRequest>();
-const pendingAuthTtlMs = 10 * 60 * 1000;
+const pendingAuthRequests = new Map<string, AuthorizationTransaction>();
+const verifiedIdentitiesByAccessToken = new Map<string, OidcIdentityEvidence>();
 
 function prunePendingAuthRequests(): void {
   const now = Date.now();
   for (const [state, request] of pendingAuthRequests.entries()) {
-    if (now - request.createdAt > pendingAuthTtlMs) {
+    if (request.expiresAt <= now) {
       pendingAuthRequests.delete(state);
     }
   }
@@ -146,28 +155,18 @@ app.get("/login", async (_req: Request, res: Response): Promise<void> => {
   try {
     prunePendingAuthRequests();
 
-    const { codeVerifier, codeChallenge } = await generatePKCE();
-    const state = await generateState(32);
-
-    pendingAuthRequests.set(state, {
-      codeVerifier,
-      createdAt: Date.now(),
-    });
-
-    const authUrl = generateAuthUrl({
-      authority: AUTHORITY,
-      clientId: CLIENT_ID,
-      redirectUri: REDIRECT_URI,
-      responseType: "code",
-      scope: SCOPE,
-      state,
-      codeChallenge,
-      codeChallengeMethod: "S256",
-    });
+    const { authorizationUrl, transaction } =
+      await oauthClient.createAuthorizationRequest({
+        redirectUri: REDIRECT_URI,
+        scope: SCOPE,
+        audiencePolicy: "oidc-optional",
+        allowOfflineAccessScope: true,
+      });
+    pendingAuthRequests.set(transaction.state, transaction);
 
     res.json({
-      authUrl,
-      state,
+      authUrl: authorizationUrl,
+      state: transaction.state,
       instructions:
         "Open authUrl in a browser. Guardhouse redirects back to /callback with code and state.",
     });
@@ -182,50 +181,51 @@ app.get("/login", async (_req: Request, res: Response): Promise<void> => {
 
 app.get("/callback", async (req: Request, res: Response): Promise<void> => {
   try {
-    const code = typeof req.query["code"] === "string" ? req.query["code"] : "";
     const state =
       typeof req.query["state"] === "string" ? req.query["state"] : "";
-    const error =
-      typeof req.query["error"] === "string" ? req.query["error"] : "";
-    const errorDescription =
-      typeof req.query["error_description"] === "string"
-        ? req.query["error_description"]
-        : "";
-
-    if (error) {
+    if (!state) {
       res.status(400).json({
-        error: "Authentication failed",
-        details: errorDescription || error,
+        error: "Missing state query parameter",
       });
       return;
     }
 
-    if (!code || !state) {
-      res.status(400).json({
-        error: "Missing code or state query parameter",
-      });
-      return;
-    }
-
-    const pendingRequest = pendingAuthRequests.get(state);
-    if (!pendingRequest) {
+    const transaction = pendingAuthRequests.get(state);
+    if (!transaction) {
       res.status(400).json({
         error: "State mismatch or expired authorization request",
       });
       return;
     }
 
+    const callbackUrl = new URL(req.originalUrl, REDIRECT_URI).toString();
+    const callback = await oauthClient.validateOAuthCallback(
+      { mode: "query", url: callbackUrl },
+      transaction,
+    );
     pendingAuthRequests.delete(state);
 
-    const tokens = await oauthClient.exchangeCodeForTokens(
-      code,
-      pendingRequest.codeVerifier,
-      REDIRECT_URI,
-    );
+    if (callback.type === "error") {
+      res.status(400).json({
+        error: "Authentication failed",
+        details: callback.errorDescription || callback.error,
+      });
+      return;
+    }
+
+    const exchange = await oauthClient.exchangeAuthorizationCode(callback);
+    if (exchange.mode !== "oidc") {
+      throw new Error("The example requires an OIDC token response");
+    }
+    const tokens = exchange.tokens;
+    verifiedIdentitiesByAccessToken.set(tokens.access_token, exchange.identity);
 
     let userInfo: UserInfoResponse | null = null;
     try {
-      userInfo = await oauthClient.getUserInfo(tokens.access_token);
+      userInfo = await oauthClient.getUserInfo(
+        tokens.access_token,
+        exchange.identity,
+      );
     } catch (userInfoError) {
       console.warn("User info request failed after callback:", userInfoError);
     }
@@ -265,9 +265,35 @@ app.post("/token", async (req: Request, res: Response): Promise<void> => {
         });
         return;
       }
-
-      tokens = await oauthClient.refreshToken(refreshToken);
+      const previousIdToken =
+        typeof req.body["previous_id_token"] === "string"
+          ? req.body["previous_id_token"]
+          : "";
+      if (!previousIdToken) {
+        res.status(400).json({
+          error: "Missing previous_id_token for an OIDC refresh",
+        });
+        return;
+      }
+      const refreshed = await oauthClient.refreshOidcSession(refreshToken, {
+        previousIdToken,
+        grantedScope:
+          typeof req.body["granted_scope"] === "string"
+            ? req.body["granted_scope"]
+            : SCOPE,
+      });
+      tokens = refreshed.tokens;
+      verifiedIdentitiesByAccessToken.set(
+        tokens.access_token,
+        refreshed.identity,
+      );
     } else if (grantType === "client_credentials") {
+      if (!machineClient) {
+        res.status(503).json({
+          error: "Service client not configured",
+        });
+        return;
+      }
       tokens = await machineClient.requestToken();
     } else {
       res.status(400).json({
@@ -297,7 +323,12 @@ app.get("/user", async (req: Request, res: Response): Promise<void> => {
   }
 
   try {
-    const userInfo = await oauthClient.getUserInfo(token);
+    const identity = verifiedIdentitiesByAccessToken.get(token);
+    if (!identity) {
+      res.status(401).json({ error: "No verified identity for this token" });
+      return;
+    }
+    const userInfo = await oauthClient.getUserInfo(token, identity);
     res.json({ user: userInfo });
   } catch (error) {
     console.error("User endpoint error:", error);
@@ -319,7 +350,12 @@ app.get("/protected", async (req: Request, res: Response): Promise<void> => {
   }
 
   try {
-    const userInfo = await oauthClient.getUserInfo(token);
+    const identity = verifiedIdentitiesByAccessToken.get(token);
+    if (!identity) {
+      res.status(401).json({ error: "No verified identity for this token" });
+      return;
+    }
+    const userInfo = await oauthClient.getUserInfo(token, identity);
 
     res.json({
       message: "This is a protected resource",

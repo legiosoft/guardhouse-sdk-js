@@ -13,6 +13,9 @@ export const RESERVED_TOKEN_BODY_PARAM_KEYS = new Set([
   "client_secret",
   "code_verifier",
   "redirect_uri",
+  "scope",
+  "resource",
+  "audience",
 ]);
 
 export const TOKEN_PARAM_KEY_PATTERN = /^[A-Za-z0-9._~-]+$/;
@@ -40,6 +43,46 @@ export const DISCOVERY_ENDPOINT_KEYS = [
 export const SAFE_HTTP_METHODS = new Set(["GET", "HEAD", "POST"]);
 export const ALLOWED_HTTP_METHODS = new Set(["GET", "HEAD", "POST"]);
 
+// Only standardized, non-secret OAuth/OIDC error identifiers may cross the
+// network trust boundary into exceptions or logs. An authorization server can
+// otherwise echo a submitted credential in its `error` member.
+export const SAFE_OAUTH_ERROR_CODES = new Set([
+  "access_denied",
+  "account_selection_required",
+  "authorization_pending",
+  "consent_required",
+  "expired_token",
+  "insufficient_scope",
+  "interaction_required",
+  "invalid_binding_message",
+  "invalid_client",
+  "invalid_client_metadata",
+  "invalid_dpop_proof",
+  "invalid_grant",
+  "invalid_request",
+  "invalid_request_object",
+  "invalid_request_uri",
+  "invalid_redirect_uri",
+  "invalid_scope",
+  "invalid_software_statement",
+  "invalid_target",
+  "invalid_token",
+  "login_required",
+  "registration_not_supported",
+  "request_not_supported",
+  "request_uri_not_supported",
+  "server_error",
+  "slow_down",
+  "temporarily_unavailable",
+  "transaction_failed",
+  "unauthorized_client",
+  "unapproved_software_statement",
+  "unsupported_grant_type",
+  "unsupported_response_type",
+  "unsupported_token_type",
+  "use_dpop_nonce",
+]);
+
 export const PKCE_CODE_VERIFIER_PATTERN = /^[A-Za-z0-9\-._~]+$/;
 export const STATE_PATTERN = /^[A-Za-z0-9-._~]{8,128}$/;
 export const DPOP_NONCE_PATTERN = /^[A-Za-z0-9-_.~+]+$/;
@@ -53,7 +96,9 @@ export const SILENT_AUTH_ERROR_CODES = new Set([
 ]);
 
 export const DEFAULT_MAX_AUTH_HEADER_BYTES = 4096;
-export const DEFAULT_SESSION_STORAGE_KEY = "guardhouse:session:v1";
+export const DEFAULT_SESSION_STORAGE_KEY_PREFIX = "guardhouse:session:v3";
+export const LEGACY_V2_SESSION_STORAGE_KEY_PREFIX = "guardhouse:session:v2";
+export const LEGACY_DEFAULT_SESSION_STORAGE_KEY = "guardhouse:session:v1";
 export const MAX_DPOP_PROOF_LENGTH = 8192;
 export const MAX_TOKEN_PARAM_KEY_LENGTH = 128;
 export const MAX_TOKEN_PARAM_VALUE_LENGTH = 4096;

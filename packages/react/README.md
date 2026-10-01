@@ -5,7 +5,7 @@ React SDK for adding Guardhouse/OIDC authentication to React 18+ browser apps.
 ## Installation
 
 ```bash
-npm install @guardhouse/react
+npm install @guardhouse/react@2.0.0-beta.1
 ```
 
 ## Example Project
@@ -34,8 +34,11 @@ export function Root() {
         authority: "https://auth.example.com",
         clientId: "your-client-id",
         audience: "https://api.example.com",
+        resource: "https://api.example.com",
+        audiencePolicy: "guardhouse-required",
         redirectUri: `${window.location.origin}/callback`,
         logoutRedirectUri: `${window.location.origin}/callback`,
+        allowedPostLogoutRedirectUris: [`${window.location.origin}/callback`],
       }}
     >
       <BrowserRouter>{/* your routes */}</BrowserRouter>
@@ -80,7 +83,17 @@ import { ProtectedRoute } from "@guardhouse/react";
 <Route
   path="/settings"
   element={
-    <ProtectedRoute onRedirecting={() => <div>Redirecting...</div>}>
+    <ProtectedRoute
+      onRedirecting={() => <div>Redirecting...</div>}
+      onRedirectError={({ error, retry }) => (
+        <div role="alert">
+          <p>{error.message}</p>
+          <button type="button" onClick={retry}>
+            Retry sign in
+          </button>
+        </div>
+      )}
+    >
       <SettingsPage />
     </ProtectedRoute>
   }
@@ -118,7 +131,7 @@ Both guards include React 18 Strict Mode safeguards to avoid duplicate login red
 - `isLoading`: `boolean`
 - `isAuthenticated`: `boolean`
 - `user`: OIDC user profile or `null`
-- `error`: auth error message or `null`
+- `error`: `Error | GuardhouseError | null`
 - `loginWithRedirect(options?)`: starts login redirect
 - `logout(options?)`: starts logout redirect
 - `getAccessToken()`: returns a valid access token or `null`
@@ -126,18 +139,23 @@ Both guards include React 18 Strict Mode safeguards to avoid duplicate login red
 
 ## Provider Configuration (Most Used)
 
-| Option                              | Required | Purpose                                         |
-| ----------------------------------- | -------- | ----------------------------------------------- |
-| `authority`                         | Yes      | OIDC issuer base URL                            |
-| `clientId`                          | Yes      | OAuth/OIDC client ID                            |
-| `redirectUri`                       | Yes      | Callback URI registered at your IdP             |
-| `audience`                          | Usually  | API audience for code flow                      |
-| `logoutRedirectUri`                 | No       | Post-logout redirect URI                        |
-| `scope`                             | No       | Defaults to `openid profile email`              |
-| `onRedirectCallback`                | No       | Receives optional `appState` after callback     |
-| `allowAuthorizationWithoutAudience` | No       | Set `true` only for IdPs that reject `audience` |
-| `allowOfflineAccessScope`           | No       | Required if requesting `offline_access`         |
-| `debug`                             | No       | Enables SDK debug logs                          |
+| Option                          | Required      | Purpose                                                                                               |
+| ------------------------------- | ------------- | ----------------------------------------------------------------------------------------------------- |
+| `authority`                     | Yes           | OIDC issuer base URL                                                                                  |
+| `clientId`                      | Yes           | OAuth/OIDC client ID                                                                                  |
+| `redirectUri`                   | Yes           | Callback URI registered at your IdP                                                                   |
+| `audience`                      | Usually       | Guardhouse API audience                                                                               |
+| `resource`                      | No            | One or more RFC 8707 resource indicators                                                              |
+| `audiencePolicy`                | No            | Defaults to `guardhouse-required`; use `oidc-optional` only for identity-only OIDC                    |
+| `logoutRedirectUri`             | No            | Exact allowlisted post-logout redirect URI                                                            |
+| `allowedPostLogoutRedirectUris` | For redirects | Exact post-logout redirect allowlist used to validate runtime `returnTo` values                       |
+| `scope`                         | No            | Defaults to `openid profile email`                                                                    |
+| `maxAgeSeconds`                 | No            | Requires sufficiently recent authentication                                                           |
+| `requiredAcrValues`             | No            | Exact accepted ACR values                                                                             |
+| `requiredAmrValues`             | No            | Exact AMR values that must all be present                                                             |
+| `onRedirectCallback`            | No            | Async-capable callback receiving optional `appState`; overrides default `location.replace` navigation |
+| `allowOfflineAccessScope`       | No            | Required if requesting `offline_access`                                                               |
+| `debug`                         | No            | Enables SDK debug logs                                                                                |
 
 For advanced options (timeouts, endpoint overrides, DPoP, hardening flags), use the fields available in `GuardhouseConfig`.
 
@@ -166,18 +184,41 @@ export function AuthGate() {
 
 ## Security and Runtime Notes
 
-- Tokens/session are stored only in `sessionStorage` under `gh_oidc_session`.
+- Session schema v3 records are stored only in `sessionStorage`, namespaced by
+  canonical issuer and client ID. Legacy and mismatched records are discarded.
 - The SDK does not use `localStorage` for auth session persistence.
-- Callback handling uses `@guardhouse/core` validation and secure JWT decoding.
+- Callback handling requires an active transaction and uses `@guardhouse/core`
+  signature and claim verification before restoring identity. The validated
+  callback is client-owned, one-use evidence and is consumed before token I/O.
+- Users and roles are rebuilt from verified identity plus subject-bound UserInfo;
+  serialized user claims are not trusted across restore or refresh. Returned
+  users, arrays, and nested custom claims are immutable; extension claims remain
+  typed as `unknown` until the application validates them.
+- Callback redirect matching is exact, including native-safe scheme/authority,
+  path, ordered query tuples, and fragment semantics. Credentials and OAuth
+  response parameters are removed from recognized callback URLs.
+- Every restore and refresh completion is bound to the original raw session
+  snapshot. If another provider has already stored a newer session, React never
+  publishes or overwrites the stale identity and makes one bounded restore
+  attempt for the winner.
+- The browser adapter implements atomic compare-and-set and compare-and-remove.
+  Custom adapters that wrap one shared backend should implement optional
+  `compareAndSetItem` and `compareAndRemoveItem` so commits and cleanup remain
+  atomic across separate provider instances.
 - Concurrent refresh requests are deduplicated to avoid refresh-token rotation races.
-- If your app reads `id_token`, validate signature/claims with a proper JWT/OIDC validation library before trusting claims.
+- `loginWithRedirect()` rejects with the original error. Handle rejection when
+  starting login from an event handler.
 
 ## Integration Checklist
 
 - Register exact `redirectUri` and `logoutRedirectUri` in your IdP client settings.
-- If using code flow and your IdP requires it, set a valid `audience`.
+- Set a valid `audience` or `resource`, or explicitly choose
+  `audiencePolicy: "oidc-optional"` for identity-only OIDC.
 - If requesting `offline_access`, set `allowOfflineAccessScope: true`.
 - Ensure protected pages handle `isLoading` and unauthenticated states explicitly.
+
+See [`MIGRATION-2.0.md`](../../MIGRATION-2.0.md) for the v2 breaking changes,
+session migration, and transaction-bound callback flow.
 
 ## License
 

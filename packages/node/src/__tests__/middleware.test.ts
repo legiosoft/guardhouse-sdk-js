@@ -1,5 +1,9 @@
 import { GuardhouseResourceService, guardhouseMiddleware } from "../middleware";
-import { TokenValidationMode } from "../types";
+import {
+  IntrospectionCredentialTransmission,
+  TokenValidationMode,
+  type GuardhouseResourceOptions,
+} from "../types";
 import { GuardhouseConstants } from "../constants";
 
 jest.mock("jsonwebtoken");
@@ -41,6 +45,160 @@ describe("GuardhouseResourceService", () => {
         validationMode: TokenValidationMode.Introspection,
       });
       expect(introspectionService).toBeDefined();
+    });
+
+    it("rejects legacy form-data introspection credentials before a request", () => {
+      const legacyOptions = {
+        ...mockOptions,
+        validationMode: TokenValidationMode.Introspection,
+        introspectionClientId: "introspection-client",
+        introspectionClientSecret: "introspection-secret",
+        introspectionCredentialTransmission: "form_data",
+      } as unknown as GuardhouseResourceOptions;
+
+      expect(() => new GuardhouseResourceService(legacyOptions)).toThrow(
+        'only "basic_auth" is supported',
+      );
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [["read write"]],
+      [[" read"]],
+      [["read\\write"]],
+      [[""]],
+      [["read", 42]],
+    ])("rejects malformed requiredScopes %p", (requiredScopes) => {
+      expect(
+        () =>
+          new GuardhouseResourceService({
+            ...mockOptions,
+            requiredScopes,
+          } as unknown as GuardhouseResourceOptions),
+      ).toThrow("OAuth scope tokens");
+    });
+  });
+
+  describe("introspection", () => {
+    it("uses Core v2 introspection with HTTP Basic credentials", async () => {
+      const introspectionService = new GuardhouseResourceService({
+        ...mockOptions,
+        validationMode: TokenValidationMode.Introspection,
+        introspectionClientId: "introspection-client",
+        introspectionClientSecret: "introspection-secret",
+        introspectionCredentialTransmission:
+          IntrospectionCredentialTransmission.BasicAuth,
+      });
+
+      (global.fetch as jest.Mock).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          active: true,
+          sub: "user-123",
+          scope: "read write",
+          aud: "test-audience",
+          exp: Math.floor(Date.now() / 1000) + 3600,
+        }),
+        text: async () => "",
+      } as Response);
+
+      const user = await introspectionService.validateToken("opaque-token");
+
+      expect(user.sub).toBe("user-123");
+      expect(user.scopes).toEqual(["read", "write"]);
+      const [, request] = (global.fetch as jest.Mock).mock.calls[0];
+      const headers = request.headers as Headers;
+      expect(headers.get("Authorization")).toBe(
+        `Basic ${Buffer.from(
+          "introspection-client:introspection-secret",
+        ).toString("base64")}`,
+      );
+      expect(request.body).toContain("token=opaque-token");
+      expect(request.body).not.toContain("client_secret");
+      expect(request.body).not.toContain("client_id");
+    });
+
+    it("enforces every required scope on fresh and cached introspection", async () => {
+      const introspectionService = new GuardhouseResourceService({
+        ...mockOptions,
+        validationMode: TokenValidationMode.Introspection,
+        introspectionClientId: "introspection-client",
+        introspectionClientSecret: "introspection-secret",
+        introspectionCacheTtlSeconds: 60,
+        requiredScopes: ["read", "write", "read"],
+      });
+
+      (global.fetch as jest.Mock).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          active: true,
+          sub: "user-123",
+          scope: "read",
+          exp: Math.floor(Date.now() / 1000) + 3600,
+        }),
+        text: async () => "",
+      } as Response);
+
+      await expect(
+        introspectionService.validateToken("partially-scoped-token"),
+      ).rejects.toThrow("Token missing required scopes: write");
+      await expect(
+        introspectionService.validateToken("partially-scoped-token"),
+      ).rejects.toThrow("Token missing required scopes: write");
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects introspection responses without required scope data", async () => {
+      const introspectionService = new GuardhouseResourceService({
+        ...mockOptions,
+        validationMode: TokenValidationMode.Introspection,
+        introspectionClientId: "introspection-client",
+        introspectionClientSecret: "introspection-secret",
+        requiredScopes: ["read"],
+      });
+
+      (global.fetch as jest.Mock).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          active: true,
+          sub: "user-123",
+          exp: Math.floor(Date.now() / 1000) + 3600,
+        }),
+        text: async () => "",
+      } as Response);
+
+      await expect(
+        introspectionService.validateToken("unscoped-token"),
+      ).rejects.toThrow("Token missing required scopes: read");
+    });
+
+    it("accepts introspection only when all exact scopes are present", async () => {
+      const introspectionService = new GuardhouseResourceService({
+        ...mockOptions,
+        validationMode: TokenValidationMode.Introspection,
+        introspectionClientId: "introspection-client",
+        introspectionClientSecret: "introspection-secret",
+        requiredScopes: ["read", "write"],
+      });
+
+      (global.fetch as jest.Mock).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          active: true,
+          sub: "user-123",
+          scope: "write read extra",
+          exp: Math.floor(Date.now() / 1000) + 3600,
+        }),
+        text: async () => "",
+      } as Response);
+
+      await expect(
+        introspectionService.validateToken("fully-scoped-token"),
+      ).resolves.toMatchObject({ scopes: ["write", "read", "extra"] });
     });
   });
 
@@ -213,6 +371,59 @@ describe("GuardhouseResourceService", () => {
       const user = await service.validateToken(token);
 
       expect(user.scopes).toEqual(["read", "write", "admin"]);
+    });
+
+    it("rejects a JWT without required scope data", async () => {
+      const scopedService = new GuardhouseResourceService({
+        ...mockOptions,
+        requiredScopes: ["read"],
+      });
+      mockJwt.verify.mockReturnValue({
+        sub: "user-123",
+        iss: "https://auth.guardhouse.io",
+        aud: "test-audience",
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      });
+
+      await expect(
+        scopedService.validateToken(createMockJwtToken()),
+      ).rejects.toThrow("Token missing required scopes: read");
+    });
+
+    it("rejects a JWT with missing or differently-cased required scopes", async () => {
+      const scopedService = new GuardhouseResourceService({
+        ...mockOptions,
+        requiredScopes: ["read", "write"],
+      });
+      mockJwt.verify.mockReturnValue({
+        sub: "user-123",
+        iss: "https://auth.guardhouse.io",
+        aud: "test-audience",
+        exp: Math.floor(Date.now() / 1000) + 3600,
+        scope: "read Write",
+      });
+
+      await expect(
+        scopedService.validateToken(createMockJwtToken()),
+      ).rejects.toThrow("Token missing required scopes: write");
+    });
+
+    it("accepts a JWT only when every exact required scope is present", async () => {
+      const scopedService = new GuardhouseResourceService({
+        ...mockOptions,
+        requiredScopes: ["read", "write", "read"],
+      });
+      mockJwt.verify.mockReturnValue({
+        sub: "user-123",
+        iss: "https://auth.guardhouse.io",
+        aud: "test-audience",
+        exp: Math.floor(Date.now() / 1000) + 3600,
+        scope: "extra write read",
+      });
+
+      await expect(
+        scopedService.validateToken(createMockJwtToken()),
+      ).resolves.toMatchObject({ scopes: ["extra", "write", "read"] });
     });
 
     it("should reject token exceeding max age", async () => {

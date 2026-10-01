@@ -24,13 +24,21 @@ cp .env.example .env
 ```env
 AUTHORITY=https://your-test-identity-server
 CLIENT_ID=your-client-id
-CLIENT_SECRET=your-client-secret
+CLIENT_SECRET=
 REDIRECT_URI=http://localhost:3001/callback
 SCOPE=openid profile email offline_access
+SERVICE_CLIENT_ID=your-service-client-id
+SERVICE_CLIENT_SECRET=your-service-client-secret
+SERVICE_SCOPE=your-api-scope
 AUDIENCE=your-api-audience
 PORT=3001
 CORS_ORIGINS=http://localhost:5173
 ```
+
+Use separate Guardhouse registrations: an authorization-code client for `/login`
+and a confidential service client for `client_credentials`. Set `CLIENT_SECRET`
+only when the authorization-code client is confidential. `SERVICE_SCOPE` must be
+an API scope granted to the service client.
 
 3. Install dependencies:
 

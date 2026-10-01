@@ -112,35 +112,20 @@ describe("generateAuthUrl", () => {
     ).toThrow("codeChallengeMethod must be 'S256'");
   });
 
-  it("warns when implicit flow is requested", () => {
-    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
-    const debugSpy = jest.spyOn(console, "debug").mockImplementation(() => {});
-
-    try {
-      generateAuthUrl({
-        authority: "https://auth.example.com",
-        clientId: "client-id",
-        redirectUri: "https://app.example.com/callback",
-        responseType: "token",
-        scope: "profile email",
-        state: "state-value-123456",
-        debug: true,
-      });
-
-      expect(
-        warnSpy.mock.calls.some((call) =>
-          call.some(
-            (arg) =>
-              typeof arg === "string" &&
-              arg.includes("Implicit Flow (response_type=token) is deprecated"),
-          ),
-        ),
-      ).toBe(true);
-    } finally {
-      warnSpy.mockRestore();
-      debugSpy.mockRestore();
-    }
-  });
+  it.each(["token", "id_token", "code id_token"])(
+    "rejects the runtime response type %s before URL construction",
+    (responseType) => {
+      expect(() =>
+        generateAuthUrl({
+          authority: "not a URL",
+          clientId: "client-id",
+          redirectUri: "https://app.example.com/callback",
+          responseType,
+          state: "state-value-123456",
+        }),
+      ).toThrow("responseType must be exactly 'code'");
+    },
+  );
 
   it("requires nonce when requesting openid scope", () => {
     expect(() =>
@@ -246,11 +231,47 @@ describe("generateAuthUrl", () => {
     expect(parsed.searchParams.get("audience")).toBeNull();
   });
 
-  it("preserves root redirect_uri without forcing a trailing slash", () => {
+  it.each(["http://localhost:3000", "http://localhost:3000/"])(
+    "preserves the exact root redirect_uri %s",
+    (redirectUri) => {
+      const authUrl = generateAuthUrl({
+        authority: "https://auth.example.com",
+        clientId: "client-id",
+        redirectUri,
+        responseType: "code",
+        state: "state-value-123456",
+        nonce: "nonce-value",
+        codeChallenge: "code-challenge",
+        audience: "api",
+      });
+
+      const parsed = new URL(authUrl);
+      expect(parsed.searchParams.get("redirect_uri")).toBe(redirectUri);
+    },
+  );
+
+  it("preserves a trailing slash on a non-root redirect_uri", () => {
     const authUrl = generateAuthUrl({
       authority: "https://auth.example.com",
       clientId: "client-id",
-      redirectUri: "http://localhost:3000",
+      redirectUri: "https://app.example.com/callback/",
+      responseType: "code",
+      state: "state-value-123456",
+      nonce: "nonce-value",
+      codeChallenge: "code-challenge",
+      audience: "api",
+    });
+
+    expect(new URL(authUrl).searchParams.get("redirect_uri")).toBe(
+      "https://app.example.com/callback/",
+    );
+  });
+
+  it("emits the exact code response type with PKCE", () => {
+    const authUrl = generateAuthUrl({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      redirectUri: "https://app.example.com/callback",
       responseType: "code",
       state: "state-value-123456",
       nonce: "nonce-value",
@@ -259,24 +280,8 @@ describe("generateAuthUrl", () => {
     });
 
     const parsed = new URL(authUrl);
-    expect(parsed.searchParams.get("redirect_uri")).toBe(
-      "http://localhost:3000",
-    );
-  });
-
-  it("allows non-code response types without PKCE", () => {
-    const authUrl = generateAuthUrl({
-      authority: "https://auth.example.com",
-      clientId: "client-id",
-      redirectUri: "https://app.example.com/callback",
-      responseType: "token",
-      scope: "profile email",
-      state: "state-value-123456",
-    });
-
-    const parsed = new URL(authUrl);
-    expect(parsed.searchParams.get("response_type")).toBe("token");
-    expect(parsed.searchParams.get("code_challenge")).toBeNull();
+    expect(parsed.searchParams.get("response_type")).toBe("code");
+    expect(parsed.searchParams.get("code_challenge")).toBe("code-challenge");
   });
 
   it("preserves authority query params", () => {
@@ -455,9 +460,8 @@ describe("generateAuthUrl", () => {
     ).toThrow("prompt contains unsupported values");
   });
 
-  it("requires formPostCsrfToken for response_mode=form_post", () => {
-    expect(() =>
-      generateAuthUrl({
+  it("uses standard state correlation for response_mode=form_post", () => {
+    const authUrl = generateAuthUrl({
         authority: "https://auth.example.com",
         clientId: "client-id",
         redirectUri: "https://app.example.com/callback",
@@ -466,11 +470,13 @@ describe("generateAuthUrl", () => {
         codeChallenge: "code-challenge",
         audience: "https://api.example.com",
         responseMode: "form_post",
-      }),
-    ).toThrow("formPostCsrfToken is required");
+      });
+    const parsed = new URL(authUrl);
+    expect(parsed.searchParams.get("state")).toBe("state-value-123456");
+    expect(parsed.searchParams.has("guardhouse_form_post_csrf")).toBe(false);
   });
 
-  it("includes form_post CSRF binding parameter", () => {
+  it("does not emit a non-standard form_post CSRF parameter", () => {
     const authUrl = generateAuthUrl({
       authority: "https://auth.example.com",
       clientId: "client-id",
@@ -480,14 +486,11 @@ describe("generateAuthUrl", () => {
       codeChallenge: "code-challenge",
       audience: "https://api.example.com",
       responseMode: "form_post",
-      formPostCsrfToken: "csrf-token-123",
     });
 
     const parsed = new URL(authUrl);
     expect(parsed.searchParams.get("response_mode")).toBe("form_post");
-    expect(parsed.searchParams.get("guardhouse_form_post_csrf")).toBe(
-      "csrf-token-123",
-    );
+    expect(parsed.searchParams.has("guardhouse_form_post_csrf")).toBe(false);
   });
 
   it("preserves original URL error as cause", () => {
@@ -921,7 +924,7 @@ describe("generateAuthUrl", () => {
       },
     );
 
-    expect(result.issuer).toBe("https://auth.example.com");
+    expect(result.issuer).toBe("https://auth.example.com/");
     expect(result.sessionId).toBe("session-123");
   });
 

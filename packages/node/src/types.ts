@@ -8,7 +8,6 @@ export type TokenValidationMode =
 
 export const IntrospectionCredentialTransmission = {
   BasicAuth: "basic_auth" as const,
-  FormData: "form_data" as const,
 };
 
 export type IntrospectionCredentialTransmission =
@@ -52,7 +51,8 @@ export interface GuardhouseResourceOptions {
   tokenTypes?: string[];
   maxTokenAgeSeconds?: number;
   requireAzpMatch?: boolean;
-  requiredScopes?: string[];
+  /** Exact, case-sensitive OAuth scope tokens required in every accepted token. */
+  requiredScopes?: readonly string[];
   enableStrictMode?: boolean;
 }
 

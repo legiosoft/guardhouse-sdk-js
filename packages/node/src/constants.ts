@@ -1,7 +1,7 @@
 export const GuardhouseConstants = {
   Endpoints: {
     WellKnownOpenIdConfiguration: ".well-known/openid-configuration",
-    WellKnownJwks: ".well-known/jwks.json",
+    WellKnownJwks: ".well-known/jwks",
     ConnectToken: "connect/token",
     ConnectIntrospect: "connect/introspect",
     ConnectAuthorize: "connect/authorize",

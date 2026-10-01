@@ -5,7 +5,7 @@ Backend SDK for Node.js with JWT validation middleware and OAuth 2.0 client cred
 ## Installation
 
 ```bash
-npm install @guardhouse/node express
+npm install @guardhouse/node@1.0.2-beta.1 express
 ```
 
 ## Quick Start
@@ -84,11 +84,16 @@ app.use(
     validateLifetime?: boolean;     // Default: true
     requireHttpsMetadata?: boolean; // Default: true
     maxTokenAgeSeconds?: number;    // Max token age
-    requiredScopes?: string[];      // Required scopes
+    requiredScopes?: readonly string[]; // All required, exact case-sensitive scopes
     debug?: boolean;                // Enable debug logging
   })
 );
 ```
+
+`requiredScopes` is enforced after either JWT validation or token
+introspection, including cached introspection results. Every entry must be one
+valid OAuth scope token; duplicates are removed, comparison is case-sensitive,
+and a token with missing or partial scope data is rejected.
 
 ### `GuardhouseNodeClient`
 
@@ -172,9 +177,12 @@ const TokenValidationMode = {
 
 const IntrospectionCredentialTransmission = {
   BasicAuth: "basic_auth",
-  FormData: "form_data",
 };
 ```
+
+Introspection credentials are sent with HTTP Basic authentication. The former
+`"form_data"` / `client_secret_post` mode is not supported and is rejected
+before any request is made.
 
 ## Token Validation Modes
 
@@ -182,7 +190,7 @@ const IntrospectionCredentialTransmission = {
 
 Validates tokens locally using JWKS:
 
-1. Fetches public keys from `/.well-known/jwks.json`
+1. Fetches public keys from `/.well-known/jwks`
 2. Verifies signature with allowed algorithms
 3. Validates issuer, audience, expiration
 

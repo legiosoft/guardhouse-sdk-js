@@ -1,13 +1,9 @@
-import { parseOAuthCallbackUrl } from "@guardhouse/core";
 import {
   createRedirectUriDescriptor,
   matchesRedirectUri,
   type RedirectUriDescriptor,
 } from "./idToken";
-import {
-  GuardhouseAuthError,
-  GuardhouseConfigurationError,
-} from "../types/errors";
+import { GuardhouseConfigurationError } from "../types/errors";
 
 /**
  * Converts unknown error values to readable strings.
@@ -125,44 +121,4 @@ export function isMatchingRedirectUri(
   descriptor: RedirectUriDescriptor,
 ): boolean {
   return matchesRedirectUri(callbackUrl, descriptor);
-}
-
-/**
- * Parses and validates OAuth callback URL.
- */
-export function parseAuthorizationCallback(
-  callbackUrl: string,
-  redirectUriDescriptor: RedirectUriDescriptor,
-): { code: string; state: string } {
-  if (!isMatchingRedirectUri(callbackUrl, redirectUriDescriptor)) {
-    throw new GuardhouseAuthError(
-      "Callback URL does not match configured redirect URI",
-      "INVALID_CALLBACK",
-    );
-  }
-
-  const callback = parseOAuthCallbackUrl(callbackUrl);
-
-  if (callback.error) {
-    throw new GuardhouseAuthError(
-      `OAuth callback returned an error: ${callback.errorDescription ?? callback.error}`,
-      "INVALID_CALLBACK",
-      undefined,
-      callback,
-    );
-  }
-
-  if (!callback.code || !callback.state) {
-    throw new GuardhouseAuthError(
-      "OAuth callback is missing required code/state parameters",
-      "INVALID_CALLBACK",
-      undefined,
-      callback,
-    );
-  }
-
-  return {
-    code: callback.code,
-    state: callback.state,
-  };
 }

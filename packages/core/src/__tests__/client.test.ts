@@ -1,6 +1,164 @@
-import { GuardhouseClient } from "../client";
+import { GuardhouseClient as GuardhouseClientImplementation } from "../client";
 import { GuardhouseError } from "../config";
 import { generateState } from "../pkce";
+import { decodeJWT } from "../token";
+
+// This suite retains low-level transport and race coverage for APIs that became
+// private in v2. Public v2 behavior and typings are exercised in client-v2.test.ts.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const LegacyClientBase: any = GuardhouseClientImplementation;
+
+class GuardhouseClient extends LegacyClientBase {
+  constructor(
+    config: ConstructorParameters<typeof GuardhouseClientImplementation>[0],
+  ) {
+    super(config);
+  }
+
+  async exchangeCodeForTokens(
+    code: string,
+    codeVerifier: string,
+    redirectUri: string,
+    params: Record<string, string> = {},
+    validationContext?: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const requestedScope = this.config.scope as string | undefined;
+    const context =
+      validationContext ??
+      (requestedScope?.split(/\s+/).includes("openid")
+        ? { purpose: "authorization_code", nonce: "legacy-test-nonce" }
+        : undefined);
+    const result = await super.exchangeCodeForTokens(
+      code,
+      codeVerifier,
+      redirectUri,
+      params,
+      context,
+      requestedScope,
+    );
+    return result.tokens;
+  }
+
+  async exchangeCodeForTokensUsingHandle(
+    code: string,
+    verifierHandle: string,
+    redirectUri: string,
+    params: Record<string, string> = {},
+  ): Promise<Record<string, unknown>> {
+    const verifier = this.pkceManager.consumeCodeVerifier(verifierHandle);
+    return this.exchangeCodeForTokens(code, verifier, redirectUri, params);
+  }
+
+  async refreshToken(
+    refreshToken: string,
+    params: Record<string, string> = {},
+  ): Promise<Record<string, unknown>> {
+    const { scope, ...requestParameters } = params;
+    const result = await super.refreshToken(
+      refreshToken,
+      requestParameters,
+      undefined,
+      scope ?? this.config.scope,
+    );
+    return result.tokens;
+  }
+
+  async getUserInfo(
+    token: string,
+    identityOrSubject?: Record<string, unknown> | string,
+  ): Promise<Record<string, unknown>> {
+    // This legacy suite exercises transport/header/decoder behavior that sits
+    // behind the v2 verified-identity boundary. Public evidence rejection and
+    // subject binding are covered in client-v2.test.ts.
+    const expectedSubject =
+      identityOrSubject && typeof identityOrSubject === "object"
+        ? String(identityOrSubject["subject"] ?? "user-1")
+        : typeof identityOrSubject === "string"
+          ? identityOrSubject
+          : "user-1";
+    const normalizedToken = this.requireNonEmptyString(token, "token");
+    const response = await this.fetch(this.endpoints.userInfo, {
+      token: normalizedToken,
+    });
+    const user = this.decodeUserInfoResponse(response.data);
+    if (user.sub !== expectedSubject) {
+      throw new GuardhouseError(
+        "UserInfo response subject does not match expected subject",
+        "USERINFO_SUBJECT_MISMATCH",
+      );
+    }
+    return user;
+  }
+
+  buildLogoutUrl(request: Record<string, unknown> = {}): string {
+    this.latestDiscoveryMetadata = {
+      issuer: this.issuer,
+      end_session_endpoint: `${this.issuer}connect/logout`,
+    };
+    return this.buildLogoutUrlFromMetadata(request);
+  }
+
+  async validateOAuthCallback(
+    input: string | Record<string, unknown>,
+    transactionOrState: Record<string, unknown> | string,
+    prompt?: string,
+  ): Promise<Record<string, unknown>> {
+    if (typeof input !== "string") {
+      return super.validateOAuthCallback(input, transactionOrState);
+    }
+
+    const callbackUrl = new URL(input);
+    const redirectUrl = new URL(input);
+    for (const key of [
+      "code",
+      "state",
+      "session_state",
+      "error",
+      "error_description",
+      "error_uri",
+      "iss",
+      "access_token",
+      "id_token",
+      "refresh_token",
+      "token_type",
+      "expires_in",
+    ]) {
+      redirectUrl.searchParams.delete(key);
+    }
+    redirectUrl.hash = "";
+    const state = String(transactionOrState);
+    const transaction = {
+      version: 2,
+      issuer: this.issuer,
+      clientId: this.config.clientId,
+      redirectUri: redirectUrl.toString(),
+      state,
+      codeVerifier: validCodeVerifier,
+      codeChallenge: "c".repeat(43),
+      nonce: "legacy-test-nonce",
+      requestedScope: this.config.scope ?? "openid",
+      requestedResources: [],
+      requiredAcrValues: [],
+      requiredAmrValues: [],
+      prompt,
+      responseMode: "query",
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 10 * 60 * 1000,
+      issRequired: false,
+    };
+    const result = await super.validateOAuthCallback(
+      { mode: "query", url: callbackUrl.toString() },
+      transaction,
+    );
+    if (result.type === "error" && prompt === "none") {
+      return this.handleSilentAuthenticationError(
+        result.error,
+        result.errorDescription,
+      );
+    }
+    return result;
+  }
+}
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -9,6 +167,21 @@ function jsonResponse(data: unknown, status = 200): Response {
       "Content-Type": "application/json",
     },
   });
+}
+
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+
+  return { promise, resolve, reject };
 }
 
 function getCallHeaders(
@@ -22,6 +195,31 @@ function getCallHeaders(
 }
 
 const validCodeVerifier = "a".repeat(43);
+
+function createAuthorizationTransaction(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const now = Date.now();
+  return {
+    version: 2,
+    issuer: "https://auth.example.com/",
+    clientId: "public-client",
+    redirectUri: "https://app.example.com/callback",
+    state: "state-value-123456",
+    codeVerifier: validCodeVerifier,
+    codeChallenge: "c".repeat(43),
+    nonce: "nonce-value-1234",
+    requestedScope: "openid profile",
+    requestedResources: [],
+    requiredAcrValues: [],
+    requiredAmrValues: [],
+    responseMode: "query",
+    createdAt: now,
+    expiresAt: now + 10 * 60 * 1000,
+    issRequired: false,
+    ...overrides,
+  };
+}
 
 function createOidcHash(value: string, algorithm = "RS256"): string {
   const hashBitLength = algorithm.endsWith("384")
@@ -70,6 +268,41 @@ function createIdToken(payloadOverrides: Record<string, unknown> = {}): string {
     .replace(/=/g, "");
 
   return `${base64UrlEncode(header)}.${base64UrlEncode(payload)}.${signature}`;
+}
+
+function mockIdTokenVerification(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  client: any,
+  idToken: string,
+): void {
+  const decodedJWT = decodeJWT(idToken);
+  jest.spyOn(client, "verifyIdToken").mockResolvedValue({
+    header: decodedJWT.header,
+    payload: {
+      ...decodedJWT.payload,
+      iss: String(decodedJWT.payload.iss),
+      sub: String(decodedJWT.payload.sub),
+      aud: decodedJWT.payload.aud ?? "client-id",
+      exp: Number(decodedJWT.payload.exp),
+      iat: Number(decodedJWT.payload.iat ?? Math.floor(Date.now() / 1000)),
+    },
+    identity: {
+      issuer: String(decodedJWT.payload.iss),
+      clientId: "client-id",
+      subject: String(decodedJWT.payload.sub),
+      audiences: Array.isArray(decodedJWT.payload.aud)
+        ? decodedJWT.payload.aud
+        : [String(decodedJWT.payload.aud)],
+      authorizedParty: null,
+      issuedAt: Number(decodedJWT.payload.iat ?? Math.floor(Date.now() / 1000)),
+      expiresAt: Number(decodedJWT.payload.exp),
+      nonce: null,
+      authTime: null,
+      acr: null,
+      amr: [],
+      sessionId: null,
+    },
+  } as never);
 }
 
 describe("GuardhouseClient", () => {
@@ -521,38 +754,41 @@ describe("GuardhouseClient", () => {
     expect(refreshBody.get("custom_refresh")).toBe("ok");
   });
 
-  it("preserves root redirect_uri without forcing trailing slash in token exchange", async () => {
-    const fetchMock = jest.fn().mockResolvedValueOnce(
-      jsonResponse({
-        access_token: "access",
-        token_type: "Bearer",
-        expires_in: 3600,
-      }),
-    );
+  it.each(["http://localhost:3000", "http://localhost:3000/"])(
+    "preserves the exact root redirect_uri %s in token exchange",
+    async (redirectUri) => {
+      const fetchMock = jest.fn().mockResolvedValueOnce(
+        jsonResponse({
+          access_token: "access",
+          token_type: "Bearer",
+          expires_in: 3600,
+        }),
+      );
 
-    Object.defineProperty(globalThis, "fetch", {
-      value: fetchMock,
-      configurable: true,
-      writable: true,
-    });
+      Object.defineProperty(globalThis, "fetch", {
+        value: fetchMock,
+        configurable: true,
+        writable: true,
+      });
 
-    const client = new GuardhouseClient({
-      authority: "https://auth.example.com",
-      clientId: "client-id",
-    });
+      const client = new GuardhouseClient({
+        authority: "https://auth.example.com",
+        clientId: "client-id",
+      });
 
-    await client.exchangeCodeForTokens(
-      "good-code",
-      validCodeVerifier,
-      "http://localhost:3000",
-    );
+      await client.exchangeCodeForTokens(
+        "good-code",
+        validCodeVerifier,
+        redirectUri,
+      );
 
-    const exchangeBody = new URLSearchParams(
-      fetchMock.mock.calls[0][1]?.body as string,
-    );
+      const exchangeBody = new URLSearchParams(
+        fetchMock.mock.calls[0][1]?.body as string,
+      );
 
-    expect(exchangeBody.get("redirect_uri")).toBe("http://localhost:3000");
-  });
+      expect(exchangeBody.get("redirect_uri")).toBe(redirectUri);
+    },
+  );
 
   it("includes client_id for public-client token requests", async () => {
     const fetchMock = jest
@@ -663,7 +899,7 @@ describe("GuardhouseClient", () => {
         token_type: "Bearer",
         expires_in: 3600,
         id_token: idToken,
-        scope: "read",
+        scope: "openid read",
       }),
     );
 
@@ -676,8 +912,9 @@ describe("GuardhouseClient", () => {
     const client = new GuardhouseClient({
       authority: "https://auth.example.com",
       clientId: "public-client",
-      scope: "read",
+      scope: "openid read",
     });
+    mockIdTokenVerification(client, idToken);
 
     await expect(
       client.exchangeCodeForTokens(
@@ -734,13 +971,14 @@ describe("GuardhouseClient", () => {
   });
 
   it("rejects token response when id_token at_hash is invalid", async () => {
+    const idToken = createIdToken({ at_hash: "invalid" });
     const fetchMock = jest.fn().mockResolvedValueOnce(
       jsonResponse({
         access_token: "access-token-123",
         token_type: "Bearer",
         expires_in: 3600,
-        id_token: createIdToken({ at_hash: "invalid" }),
-        scope: "read",
+        id_token: idToken,
+        scope: "openid read",
       }),
     );
 
@@ -753,8 +991,9 @@ describe("GuardhouseClient", () => {
     const client = new GuardhouseClient({
       authority: "https://auth.example.com",
       clientId: "public-client",
-      scope: "read",
+      scope: "openid read",
     });
+    mockIdTokenVerification(client, idToken);
 
     await expect(
       client.exchangeCodeForTokens(
@@ -1309,6 +1548,325 @@ describe("GuardhouseClient", () => {
     expect(persistedValues.includes("refresh-value")).toBe(false);
   });
 
+  it("does not resurrect a session when logout clears an in-flight code exchange", async () => {
+    const tokenResponse = createDeferred<Response>();
+    const persisted: Record<string, string> = {};
+    const storage = {
+      getItem: jest.fn(async (key: string) => persisted[key] ?? null),
+      setItem: jest.fn(async (key: string, value: string) => {
+        persisted[key] = value;
+      }),
+      removeItem: jest.fn(async (key: string) => {
+        delete persisted[key];
+      }),
+    };
+    const fetchMock = jest.fn(() => tokenResponse.promise);
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      storage,
+    });
+    const exchange = client.exchangeCodeForTokens(
+      "good-code",
+      validCodeVerifier,
+      "https://app.example.com/callback",
+    );
+    const rejection = expect(exchange).rejects.toMatchObject({
+      code: "SESSION_OPERATION_INVALIDATED",
+    });
+
+    await client.prepareSharedDeviceLogout();
+    tokenResponse.resolve(
+      jsonResponse({
+        access_token: "stale-access",
+        token_type: "Bearer",
+        expires_in: 3600,
+      }),
+    );
+
+    await rejection;
+    expect(await client.getSessionState()).toBeNull();
+    expect(Object.keys(persisted)).toHaveLength(0);
+  });
+
+  it("single-flights identical refreshes and rejects conflicting concurrent requests", async () => {
+    const refreshResponse = createDeferred<Response>();
+    const fetchMock = jest.fn(() => refreshResponse.promise);
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      scope: "read",
+    });
+    const firstRefresh = client.refreshToken("rotating-refresh-token");
+    const joinedRefresh = client.refreshToken("rotating-refresh-token");
+
+    await expect(
+      client.refreshToken("rotating-refresh-token", { scope: "write" }),
+    ).rejects.toMatchObject({
+      code: "REFRESH_OPERATION_CONFLICT",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    refreshResponse.resolve(
+      jsonResponse({
+        access_token: "refreshed-access-token",
+        refresh_token: "replacement-refresh-token",
+        token_type: "Bearer",
+        expires_in: 3600,
+        scope: "read",
+      }),
+    );
+
+    await expect(firstRefresh).resolves.toMatchObject({
+      access_token: "refreshed-access-token",
+    });
+    await expect(joinedRefresh).resolves.toMatchObject({
+      access_token: "refreshed-access-token",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await expect(client.getSessionState()).resolves.toMatchObject({
+      accessToken: "refreshed-access-token",
+    });
+  });
+
+  it("keeps refresh deduplication isolated to each client instance", async () => {
+    const refreshGate = createDeferred<void>();
+    const fetchMock = jest.fn(async () => {
+      await refreshGate.promise;
+      return jsonResponse({
+        access_token: "shared-access-token",
+        token_type: "Bearer",
+        expires_in: 3600,
+      });
+    });
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const firstClient = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+    const secondClient = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+    const firstRefresh = firstClient.refreshToken("shared-refresh-token");
+    const secondRefresh = secondClient.refreshToken("shared-refresh-token");
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    refreshGate.resolve();
+
+    await expect(firstRefresh).resolves.toMatchObject({
+      access_token: "shared-access-token",
+    });
+    await expect(secondRefresh).resolves.toMatchObject({
+      access_token: "shared-access-token",
+    });
+    await expect(firstClient.getSessionState()).resolves.toMatchObject({
+      accessToken: "shared-access-token",
+      hasRefreshToken: true,
+    });
+    await expect(secondClient.getSessionState()).resolves.toMatchObject({
+      accessToken: "shared-access-token",
+      hasRefreshToken: true,
+    });
+  });
+
+  it("preserves refresh capability and the established ID token when refresh omits both", async () => {
+    const idToken = createIdToken();
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          access_token: "initial-access-token",
+          refresh_token: "existing-refresh-token",
+          id_token: idToken,
+          token_type: "Bearer",
+          expires_in: 60,
+          scope: "openid read",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          access_token: "refreshed-access-token",
+          token_type: "Bearer",
+          expires_in: 3600,
+        }),
+      );
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      scope: "openid read",
+    });
+    mockIdTokenVerification(client, idToken);
+
+    await client.exchangeCodeForTokens(
+      "good-code",
+      validCodeVerifier,
+      "https://app.example.com/callback",
+    );
+    await client.refreshToken("existing-refresh-token");
+
+    await expect(client.getSessionState()).resolves.toMatchObject({
+      accessToken: "refreshed-access-token",
+      hasRefreshToken: true,
+      idToken,
+      scope: "openid read",
+    });
+  });
+
+  it("invalidates an older refresh when a code exchange starts", async () => {
+    const refreshResponse = createDeferred<Response>();
+    const fetchMock = jest.fn((_input: unknown, init?: RequestInit) => {
+      const body = new URLSearchParams(init?.body as string);
+      if (body.get("grant_type") === "refresh_token") {
+        return refreshResponse.promise;
+      }
+
+      return Promise.resolve(
+        jsonResponse({
+          access_token: "new-access",
+          token_type: "Bearer",
+          expires_in: 3600,
+        }),
+      );
+    });
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+    const refresh = client.refreshToken("old-refresh");
+    const rejection = expect(refresh).rejects.toMatchObject({
+      code: "SESSION_OPERATION_INVALIDATED",
+    });
+
+    await client.exchangeCodeForTokens(
+      "new-code",
+      validCodeVerifier,
+      "https://app.example.com/callback",
+    );
+    refreshResponse.resolve(
+      jsonResponse({
+        access_token: "stale-refresh-access",
+        token_type: "Bearer",
+        expires_in: 3600,
+      }),
+    );
+
+    await rejection;
+    expect(await client.getSessionState()).toMatchObject({
+      accessToken: "new-access",
+    });
+  });
+
+  it("keeps a newer session when clear races a delayed stale storage write", async () => {
+    const firstWriteStarted = createDeferred<void>();
+    const releaseFirstWrite = createDeferred<void>();
+    const persisted: Record<string, string> = {};
+    let writeCount = 0;
+    const storage = {
+      getItem: jest.fn(async (key: string) => persisted[key] ?? null),
+      setItem: jest.fn(async (key: string, value: string) => {
+        writeCount += 1;
+        if (writeCount === 1) {
+          firstWriteStarted.resolve();
+          await releaseFirstWrite.promise;
+        }
+        persisted[key] = value;
+      }),
+      removeItem: jest.fn(async (key: string) => {
+        delete persisted[key];
+      }),
+    };
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          access_token: "stale-access",
+          token_type: "Bearer",
+          expires_in: 3600,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          access_token: "new-access",
+          token_type: "Bearer",
+          expires_in: 3600,
+        }),
+      );
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      storage,
+    });
+    const staleExchange = client.exchangeCodeForTokens(
+      "stale-code",
+      validCodeVerifier,
+      "https://app.example.com/callback",
+    );
+    const staleRejection = expect(staleExchange).rejects.toMatchObject({
+      code: "SESSION_OPERATION_INVALIDATED",
+    });
+
+    await firstWriteStarted.promise;
+    const clear = client.clearSessionState();
+    const newExchange = client.exchangeCodeForTokens(
+      "new-code",
+      validCodeVerifier,
+      "https://app.example.com/callback",
+    );
+    releaseFirstWrite.resolve();
+
+    await staleRejection;
+    await clear;
+    await expect(newExchange).resolves.toMatchObject({
+      access_token: "new-access",
+    });
+    const persistedSession = JSON.parse(Object.values(persisted)[0] ?? "null");
+    expect(persistedSession).toMatchObject({ accessToken: "new-access" });
+    expect(await client.getSessionState()).toMatchObject({
+      accessToken: "new-access",
+    });
+  });
+
   it("clears local session on silent authentication interaction errors", async () => {
     const persisted: Record<string, string> = {};
     const storage = {
@@ -1377,7 +1935,7 @@ describe("GuardhouseClient", () => {
     expect(callback.state).toBe("state-callback-123456");
   });
 
-  it("clears fragment tokens from browser history during callback validation", async () => {
+  it("rejects fragment front-channel tokens during callback validation", async () => {
     const replaceStateMock = jest.fn();
 
     Object.defineProperty(globalThis, "history", {
@@ -1395,16 +1953,19 @@ describe("GuardhouseClient", () => {
       at_hash: createOidcHash("access-token-123", "RS256"),
       c_hash: createOidcHash("abc", "RS256"),
     });
+    mockIdTokenVerification(client, idToken);
 
-    await client.validateOAuthCallback(
-      `https://app.example.com/callback#state=state-callback-xyz123&code=abc&access_token=access-token-123&id_token=${idToken}`,
-      "state-callback-xyz123",
-    );
+    await expect(
+      client.validateOAuthCallback(
+        `https://app.example.com/callback#state=state-callback-xyz123&code=abc&access_token=access-token-123&id_token=${idToken}`,
+        "state-callback-xyz123",
+      ),
+    ).rejects.toMatchObject({ code: "INVALID_CALLBACK_RESPONSE" });
 
-    expect(replaceStateMock).toHaveBeenCalled();
-    const replacedUrl = replaceStateMock.mock.calls[0][2] as string;
-    expect(replacedUrl.includes("access_token")).toBe(false);
-    expect(replacedUrl.includes("id_token")).toBe(false);
+    expect(replaceStateMock).toHaveBeenCalledTimes(1);
+    const replacedUrl = String(replaceStateMock.mock.calls[0][2]);
+    expect(replacedUrl).not.toContain("access_token");
+    expect(replacedUrl).not.toContain("id_token");
   });
 
   it("clears session when silent callback requires interaction", async () => {
@@ -1437,6 +1998,7 @@ describe("GuardhouseClient", () => {
     const client = new GuardhouseClient({
       authority: "https://auth.example.com",
       clientId: "client-id",
+      allowedPostLogoutRedirectUris: ["https://app.example.com/logout"],
       scope: "read",
       storage,
     });
@@ -1571,6 +2133,81 @@ describe("GuardhouseClient", () => {
     expect(await client.getSessionState()).toBeNull();
   });
 
+  it("does not erase a newer persisted session when a stale refresh fails", async () => {
+    const persisted: Record<string, string> = {};
+    const storage = {
+      getItem: jest.fn(async (key: string) => persisted[key] ?? null),
+      setItem: jest.fn(async (key: string, value: string) => {
+        persisted[key] = value;
+      }),
+      removeItem: jest.fn(async (key: string) => {
+        delete persisted[key];
+      }),
+    };
+    const refreshStarted = createDeferred<void>();
+    const refreshFailure = createDeferred<Response>();
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          access_token: "old-access",
+          refresh_token: "old-refresh",
+          token_type: "Bearer",
+          expires_in: 60,
+          scope: "read",
+        }),
+      )
+      .mockImplementationOnce(() => {
+        refreshStarted.resolve();
+        return refreshFailure.promise;
+      });
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+      scope: "read",
+      storage,
+    });
+    await client.exchangeCodeForTokens(
+      "good-code",
+      validCodeVerifier,
+      "https://app.example.com/callback",
+    );
+
+    const staleRefresh = client.refreshToken("old-refresh");
+    await refreshStarted.promise;
+    const sessionKey = Object.keys(persisted)[0];
+    const winningSession = {
+      ...JSON.parse(persisted[sessionKey]),
+      accessToken: "winner-access",
+      expiresAt: Date.now() + 3600_000,
+    };
+    persisted[sessionKey] = JSON.stringify(winningSession);
+    refreshFailure.resolve(
+      jsonResponse(
+        {
+          error: "invalid_grant",
+          error_description: "The stale refresh token was rotated",
+        },
+        400,
+      ),
+    );
+
+    await expect(staleRefresh).rejects.toMatchObject({
+      code: "invalid_grant",
+    });
+    await expect(client.getSessionState()).resolves.toMatchObject({
+      accessToken: "winner-access",
+    });
+    expect(JSON.parse(persisted[sessionKey]).accessToken).toBe("winner-access");
+  });
+
   it("requires initial access token for dynamic registration", async () => {
     const client = new GuardhouseClient({
       authority: "https://auth.example.com",
@@ -1585,7 +2222,13 @@ describe("GuardhouseClient", () => {
   it("sends authenticated dynamic registration request", async () => {
     const fetchMock = jest
       .fn()
-      .mockResolvedValue(jsonResponse({ client_id: "registered-client" }));
+      .mockResolvedValueOnce(
+        jsonResponse({
+          issuer: "https://auth.example.com/",
+          registration_endpoint: "https://auth.example.com/connect/register",
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ client_id: "registered-client" }));
 
     Object.defineProperty(globalThis, "fetch", {
       value: fetchMock,
@@ -1609,7 +2252,7 @@ describe("GuardhouseClient", () => {
     );
 
     expect(response.client_id).toBe("registered-client");
-    const headers = getCallHeaders(fetchMock, 0);
+    const headers = getCallHeaders(fetchMock, 1);
     expect(headers.get("Authorization")).toBe("Bearer initial-access-token");
   });
 
@@ -1939,10 +2582,10 @@ describe("GuardhouseClient", () => {
     }
   });
 
-  it("rejects discovery metadata when issuer does not exactly match authority", async () => {
+  it("normalizes the issuer root slash but preserves path differences", async () => {
     const fetchMock = jest.fn().mockResolvedValue(
       jsonResponse({
-        issuer: "https://auth.example.com/",
+        issuer: "https://auth.example.com/tenant/",
       }),
     );
 
@@ -2066,6 +2709,7 @@ describe("GuardhouseClient", () => {
     const client = new GuardhouseClient({
       authority: "https://auth.example.com",
       clientId: "client-id",
+      allowedPostLogoutRedirectUris: ["https://app.example.com/logout"],
     });
 
     const logoutUrl = await client.prepareSharedDeviceLogout({
@@ -2259,11 +2903,19 @@ describe("GuardhouseClient", () => {
   });
 
   it("filters unsafe registration metadata keys before dynamic client registration", async () => {
-    const fetchMock = jest.fn().mockResolvedValue(
-      jsonResponse({
-        client_id: "registered-client",
-      }),
-    );
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          issuer: "https://auth.example.com/",
+          registration_endpoint: "https://auth.example.com/connect/register",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          client_id: "registered-client",
+        }),
+      );
 
     Object.defineProperty(globalThis, "fetch", {
       value: fetchMock,
@@ -2289,7 +2941,7 @@ describe("GuardhouseClient", () => {
     await client.registerClient(metadata, "initial-access-token");
 
     const sentBody = JSON.parse(
-      (fetchMock.mock.calls[0][1] as RequestInit).body as string,
+      (fetchMock.mock.calls[1][1] as RequestInit).body as string,
     ) as Record<string, unknown>;
 
     expect(sentBody["client_name"]).toBe("Example App");
@@ -2304,12 +2956,22 @@ describe("GuardhouseClient", () => {
   });
 
   it("creates pushed authorization requests for PAR", async () => {
-    const fetchMock = jest.fn().mockResolvedValue(
-      jsonResponse({
-        request_uri: "urn:ietf:params:oauth:request_uri:xyz",
-        expires_in: 90,
-      }),
-    );
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          issuer: "https://auth.example.com/",
+          authorization_endpoint: "https://auth.example.com/connect/authorize",
+          pushed_authorization_request_endpoint:
+            "https://auth.example.com/connect/par",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          request_uri: "urn:ietf:params:oauth:request_uri:xyz",
+          expires_in: 90,
+        }),
+      );
 
     Object.defineProperty(globalThis, "fetch", {
       value: fetchMock,
@@ -2322,33 +2984,37 @@ describe("GuardhouseClient", () => {
       clientId: "public-client",
     });
 
-    const result = await client.createPushedAuthorizationRequest({
-      response_type: "code",
-      redirect_uri: "https://app.example.com/callback",
-      code_challenge: "abc",
-      code_challenge_method: "S256",
-      scope: "openid profile",
-      state: "state-value-123456",
-      nonce: "nonce-value",
-    });
+    const result = await client.createPushedAuthorizationRequest(
+      createAuthorizationTransaction(),
+    );
 
     expect(result.requestUri).toBe("urn:ietf:params:oauth:request_uri:xyz");
     expect(result.expiresIn).toBe(90);
 
     const body = new URLSearchParams(
-      fetchMock.mock.calls[0][1]?.body as string,
+      fetchMock.mock.calls[1][1]?.body as string,
     );
     expect(body.get("client_id")).toBe("public-client");
   });
 
   it("logs PAR request context with sensitive params redacted", async () => {
     const debugSpy = jest.spyOn(console, "debug").mockImplementation(() => {});
-    const fetchMock = jest.fn().mockResolvedValue(
-      jsonResponse({
-        request_uri: "urn:ietf:params:oauth:request_uri:xyz",
-        expires_in: 90,
-      }),
-    );
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          issuer: "https://auth.example.com/",
+          authorization_endpoint: "https://auth.example.com/connect/authorize",
+          pushed_authorization_request_endpoint:
+            "https://auth.example.com/connect/par",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          request_uri: "urn:ietf:params:oauth:request_uri:xyz",
+          expires_in: 90,
+        }),
+      );
 
     Object.defineProperty(globalThis, "fetch", {
       value: fetchMock,
@@ -2363,11 +3029,13 @@ describe("GuardhouseClient", () => {
         debug: true,
       });
 
-      await client.createPushedAuthorizationRequest({
-        response_type: "code",
-        client_secret: "top-secret",
-        code_verifier: "verifier-value",
-      });
+      await client.createPushedAuthorizationRequest(
+        createAuthorizationTransaction(),
+        {
+          client_secret: "top-secret",
+          code_verifier: "verifier-value",
+        },
+      );
 
       const parLogCall = debugSpy.mock.calls.find((call) =>
         call.some(
@@ -2399,15 +3067,17 @@ describe("GuardhouseClient", () => {
     });
 
     await expect(
-      client.createPushedAuthorizationRequest({
-        request: "jwt-request-object",
-      }),
+      client.createPushedAuthorizationRequest(
+        createAuthorizationTransaction(),
+        { request: "jwt-request-object" },
+      ),
     ).rejects.toThrow("Invalid PAR parameter: request");
 
     await expect(
-      client.createPushedAuthorizationRequest({
-        request_uri: "urn:ietf:params:oauth:request_uri:abc",
-      }),
+      client.createPushedAuthorizationRequest(
+        createAuthorizationTransaction(),
+        { request_uri: "urn:ietf:params:oauth:request_uri:abc" },
+      ),
     ).rejects.toThrow("Invalid PAR parameter: request_uri");
   });
 
@@ -2464,5 +3134,183 @@ describe("GuardhouseClient", () => {
     ).toBe(true);
 
     infoSpy.mockRestore();
+  });
+
+  it("rejects a persisted session bound to another client", async () => {
+    const persisted: Record<string, string> = {};
+    const storage = {
+      getItem: jest.fn(async (key: string) => persisted[key] ?? null),
+      setItem: jest.fn(async (key: string, value: string) => {
+        persisted[key] = value;
+      }),
+      removeItem: jest.fn(async (key: string) => {
+        delete persisted[key];
+      }),
+    };
+    const fetchMock = jest.fn().mockResolvedValueOnce(
+      jsonResponse({
+        access_token: "access",
+        token_type: "Bearer",
+        expires_in: 3600,
+      }),
+    );
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+    const firstClient = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-a",
+      sessionStorageKey: "shared-session-key",
+      storage,
+    });
+    await firstClient.exchangeCodeForTokens(
+      "code",
+      validCodeVerifier,
+      "https://app.example.com/callback",
+    );
+
+    const secondClient = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-b",
+      sessionStorageKey: "shared-session-key",
+      storage,
+    });
+    await expect(secondClient.getSessionState()).resolves.toBeNull();
+    expect(storage.removeItem).toHaveBeenCalledWith("shared-session-key");
+  });
+
+  it("rejects a persisted session bound to another issuer without network I/O", async () => {
+    const persisted: Record<string, string> = {
+      "shared-session-key": JSON.stringify({
+        version: 2,
+        issuer: "https://auth.example.com",
+        clientId: "client-id",
+        accessToken: "access",
+        tokenType: "Bearer",
+        expiresAt: Date.now() + 3600_000,
+        hasRefreshToken: true,
+      }),
+    };
+    const storage = {
+      getItem: jest.fn(async (key: string) => persisted[key] ?? null),
+      setItem: jest.fn(async (key: string, value: string) => {
+        persisted[key] = value;
+      }),
+      removeItem: jest.fn(async (key: string) => {
+        delete persisted[key];
+      }),
+    };
+    const fetchMock = jest.fn();
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+    const client = new GuardhouseClient({
+      authority: "https://other.example.com",
+      clientId: "client-id",
+      sessionStorageKey: "shared-session-key",
+      storage,
+    });
+
+    await expect(client.getSessionState()).resolves.toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(storage.removeItem).toHaveBeenCalledWith("shared-session-key");
+  });
+
+  it("namespaces default sessions and removes the legacy global record", async () => {
+    const persisted: Record<string, string> = {
+      "guardhouse:session:v1": JSON.stringify({
+        accessToken: "legacy-access",
+        tokenType: "Bearer",
+        expiresAt: Date.now() + 3600_000,
+        hasRefreshToken: false,
+      }),
+    };
+    const storage = {
+      getItem: jest.fn(async (key: string) => persisted[key] ?? null),
+      setItem: jest.fn(async (key: string, value: string) => {
+        persisted[key] = value;
+      }),
+      removeItem: jest.fn(async (key: string) => {
+        delete persisted[key];
+      }),
+    };
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-a",
+      storage,
+    });
+
+    await expect(client.getSessionState()).resolves.toBeNull();
+    const requestedKey = storage.getItem.mock.calls[0][0];
+    expect(requestedKey).toContain("guardhouse:session:v3:");
+    expect(requestedKey).toContain("client-a");
+    expect(storage.removeItem).toHaveBeenCalledWith("guardhouse:session:v1");
+  });
+
+  it("sanitizes callback tokens without attempting verification", async () => {
+    const replaceState = jest.fn();
+    const fetchMock = jest.fn();
+    Object.defineProperty(globalThis, "history", {
+      value: { replaceState },
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+    const verifySpy = jest.spyOn(client, "verifyIdToken");
+
+    await expect(
+      client.validateOAuthCallback(
+        "https://app.example.com/callback?state=wrong-state&id_token=a.b.c",
+        "expected-state-1234",
+      ),
+    ).rejects.toMatchObject({ code: "UNSUPPORTED_CALLBACK_RESPONSE" });
+    await expect(
+      client.validateOAuthCallback(
+        "https://app.example.com/callback?id_token=a.b.c",
+        "expected-state-1234",
+      ),
+    ).rejects.toMatchObject({ code: "UNSUPPORTED_CALLBACK_RESPONSE" });
+    expect(verifySpy).not.toHaveBeenCalled();
+    expect(replaceState).toHaveBeenCalledTimes(2);
+    for (const call of replaceState.mock.calls) {
+      expect(String(call[2])).not.toContain("id_token");
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("sanitizes a validated query-mode callback", async () => {
+    const replaceState = jest.fn();
+    Object.defineProperty(globalThis, "history", {
+      value: { replaceState },
+      configurable: true,
+      writable: true,
+    });
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com",
+      clientId: "client-id",
+    });
+
+    await client.validateOAuthCallback(
+      "https://app.example.com/callback?code=abc&state=query-state-123456&keep=yes",
+      "query-state-123456",
+    );
+
+    expect(replaceState).toHaveBeenCalledTimes(1);
+    const sanitized = String(replaceState.mock.calls[0][2]);
+    expect(sanitized).toContain("keep=yes");
+    expect(sanitized).not.toContain("code=");
+    expect(sanitized).not.toContain("state=");
   });
 });

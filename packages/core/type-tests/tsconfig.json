@@ -1,0 +1,16 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "allowJs": false,
+    "baseUrl": "..",
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "paths": {
+      "@guardhouse/core": ["./src/index.ts"]
+    },
+    "sourceMap": false
+  },
+  "include": ["./public-api.ts"],
+  "exclude": ["../dist", "../node_modules"]
+}

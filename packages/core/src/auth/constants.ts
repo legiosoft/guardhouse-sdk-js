@@ -20,6 +20,7 @@ export const RESERVED_AUTH_PARAM_KEYS = new Set([
   "login_hint",
   "claims",
   "audience",
+  "resource",
   "response_mode",
   "max_age",
   "guardhouse_form_post_csrf",
@@ -84,6 +85,7 @@ export const OAUTH_CALLBACK_SENSITIVE_KEYS = new Set([
   "expires_in",
   "scope",
   "session_state",
+  "iss",
 ]);
 
 export const AUTHORIZATION_URL_SENSITIVE_KEYS = new Set([

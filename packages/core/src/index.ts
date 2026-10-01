@@ -11,7 +11,7 @@
  *
  * Usage:
  * ```ts
- * import { GuardhouseClient, generatePKCE, generateAuthUrl } from '@guardhouse/core';
+ * import { GuardhouseClient } from '@guardhouse/core';
  *
  * const client = new GuardhouseClient({
  *   authority: 'https://auth.example.com',
@@ -20,26 +20,15 @@
  *   clientSecret: 'my-app-secret',
  * });
  *
- * // Generate PKCE for OAuth flow
- * const { codeVerifier, codeChallenge } = await generatePKCE();
- *
- * // Build authorization URL
- * const authUrl = await generateAuthUrl({
- *   authority: client.config.authority,
- *   clientId: client.config.clientId,
+ * const { authorizationUrl, transaction } =
+ *   await client.createAuthorizationRequest({
  *   redirectUri: 'https://app.example.com/callback',
- *   codeChallenge,
- *   responseType: 'code',
- *   state: await generateState(),
- *   nonce: await generateNonce(),
+ *   scope: 'openid profile',
  *   audience: 'https://api.example.com',
  * });
  *
- * // Exchange code for tokens
- * const tokens = await client.exchangeCodeForTokens(code, codeVerifier, redirectUri);
- *
- * // Use access token
- * const userInfo = await client.getUserInfo(tokens.access_token);
+ * // Persist transaction atomically by state, then redirect to authorizationUrl.
+ * // On return, restore it, validate the callback, and exchange the code.
  * ```
  */
 
@@ -51,36 +40,50 @@ export type {
   DPoPProofContext,
   DPoPProofFactory,
 } from "./config";
-export type { User, AuthUrlOptions } from "./types";
+export type { User } from "./types";
 export type {
   TokenResponse,
   UserInfoResponse,
   IntrospectionResponse,
   AuthorizationPageProtectionResult,
   AccountLinkingContext,
+  AuthorizationCodeExchangeResult,
+  ClientCredentialsTokenOptions,
+  DynamicClientRegistrationResponse,
   HomeRealmDiscoveryResult,
   LogoutRequest,
-  PushedAuthorizationRequestResult,
+  OpenIdConfiguration,
+  PushedAuthorizationRequest,
   PostMessageTarget,
+  RefreshOAuthTokenOptions,
+  RefreshOidcSessionOptions,
+  RefreshOidcSessionResult,
   SecureCookieOptions,
+  OAuthSessionState,
+  OidcSessionState,
   SessionState,
 } from "./client";
 export {
   createLocationHeaderRedirect,
-  generateAuthUrl,
+  canonicalizeIssuer,
   isSilentAuthenticationError,
   OAuthStateManager,
-  parseOAuthCallbackUrl,
+  parseOAuthCallbackUrl as parseUntrustedOAuthCallback,
   sanitizeAuthorizationUrlForHistory,
   sanitizeOAuthCallbackUrl,
+  restoreAuthorizationTransaction,
   StateExpiredError,
   validateFormPostCsrfToken,
   validateFrontChannelLogoutRequest,
 } from "./auth";
 export type {
+  AuthorizationCallbackInput,
+  AuthorizationTransaction,
+  CreatedAuthorizationRequest,
+  CreateAuthorizationRequestOptions,
   FrontChannelLogoutValidationOptions,
-  OAuthCallbackResult,
   RedirectResponse,
+  ValidatedAuthorizationCallback,
 } from "./auth";
 
 // PKCE exports
@@ -119,7 +122,8 @@ export {
   JtiReplayCache,
   validateJwkMetadataForToken,
   validateOidcHashClaims,
-  validateToken,
+  verifyIdToken,
+  OidcIdTokenVerifier,
   isTokenExpired,
   getTokenExpiresIn,
 } from "./token";
@@ -129,14 +133,26 @@ export type {
   JwkMetadata,
   JwkMetadataValidationOptions,
   JwkMetadataValidationResult,
-  DecodedJWT,
+  UntrustedDecodedJWT,
   ExpectedJwkKeyType,
-  VerifiedSignatureProof,
   OidcHashValidationOptions,
   OidcHashValidationResult,
   JtiReplayCacheOptions,
-  TokenValidationResult,
-  TokenValidationOptions,
+  IdTokenReplayCache,
+  IdTokenReplayEntry,
+  AuthorizationCodeIdTokenContext,
+  HistoricalOidcIdentity,
+  IdTokenSigningAlgorithm,
+  IdTokenValidationContext,
+  OidcIdentity,
+  OidcIdentityEvidence,
+  OidcIdentityMetadata,
+  OidcIdTokenVerifierOptions,
+  RefreshIdTokenContext,
+  SessionIdTokenContext,
+  VerifiedIdToken,
+  VerifiedIdTokenPayload,
+  VerifyIdTokenOptions,
 } from "./token";
 
 // Config exports

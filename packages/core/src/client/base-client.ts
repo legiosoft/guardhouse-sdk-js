@@ -1,5 +1,6 @@
 import type { GuardhouseConfig } from "../config";
 import { GuardhouseError } from "../config";
+import { canonicalizeIssuer } from "../auth";
 import { createGuardhouseLogger, setGuardhouseDebug } from "../debug";
 import {
   enforceNonSpoofableHostname,
@@ -17,8 +18,9 @@ import {
   DEFAULT_ENDPOINTS,
   DEFAULT_MAX_AUTH_HEADER_BYTES,
   DEFAULT_MAX_SILENT_AUTH_ATTEMPTS,
-  DEFAULT_SESSION_STORAGE_KEY,
+  DEFAULT_SESSION_STORAGE_KEY_PREFIX,
   DISCOVERY_ENDPOINT_KEYS,
+  LEGACY_V2_SESSION_STORAGE_KEY_PREFIX,
   MAX_DISCOVERY_CACHE_TTL_MS,
   MAX_DPOP_PROOF_LENGTH,
   MAX_TOKEN_PARAM_KEY_LENGTH,
@@ -27,9 +29,18 @@ import {
   REGISTRATION_METADATA_KEY_PATTERN,
   RESERVED_TOKEN_BODY_PARAM_KEYS,
   SAFE_HTTP_METHODS,
+  SAFE_OAUTH_ERROR_CODES,
   TOKEN_PARAM_KEY_PATTERN,
 } from "./constants";
-import type { RequestOptions, SessionState, TokenResponse } from "./types";
+import type {
+  IntrospectionResponse,
+  OpenIdConfiguration,
+  RequestOptions,
+  SessionState,
+  TokenResponse,
+  UserInfoResponse,
+} from "./types";
+import type { OidcIdentity } from "../token/id-token-verifier";
 
 function trimTrailingForwardSlashes(value: string): string {
   let end = value.length;
@@ -41,22 +52,101 @@ function trimTrailingForwardSlashes(value: string): string {
   return end === value.length ? value : value.slice(0, end);
 }
 
+function cloneAndFreezeJsonValue(
+  value: unknown,
+  ancestors: WeakSet<object>,
+): unknown {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean"
+  ) {
+    return value;
+  }
+
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new GuardhouseError(
+        "UserInfo response contains a non-JSON number",
+        "INVALID_USERINFO_RESPONSE",
+      );
+    }
+    return value;
+  }
+
+  if (typeof value !== "object") {
+    throw new GuardhouseError(
+      "UserInfo response contains a non-JSON claim",
+      "INVALID_USERINFO_RESPONSE",
+    );
+  }
+
+  if (ancestors.has(value)) {
+    throw new GuardhouseError(
+      "UserInfo response contains a cyclic claim",
+      "INVALID_USERINFO_RESPONSE",
+    );
+  }
+  ancestors.add(value);
+
+  try {
+    if (Array.isArray(value)) {
+      return Object.freeze(
+        value.map((entry) => cloneAndFreezeJsonValue(entry, ancestors)),
+      );
+    }
+
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new GuardhouseError(
+        "UserInfo response contains a non-JSON claim",
+        "INVALID_USERINFO_RESPONSE",
+      );
+    }
+
+    const snapshot: Record<string, unknown> = {};
+    for (const key of Object.keys(value)) {
+      if (isUnsafeObjectKey(key)) {
+        throw new GuardhouseError(
+          "UserInfo response contains an unsafe property name",
+          "INVALID_USERINFO_RESPONSE",
+        );
+      }
+      Object.defineProperty(snapshot, key, {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: cloneAndFreezeJsonValue(
+          (value as Record<string, unknown>)[key],
+          ancestors,
+        ),
+      });
+    }
+    return Object.freeze(snapshot);
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
 export class GuardhouseClientBase {
   protected config: GuardhouseConfig;
   protected baseURL: string;
+  protected issuer: string;
   protected logger: ReturnType<typeof createGuardhouseLogger>;
   protected requestTimeoutMs: number | null;
   protected discoveryCacheTtlMs: number;
   protected maxAuthorizationHeaderBytes: number;
   protected maxSilentAuthAttempts: number;
   protected sessionStorageKey: string;
+  protected usesDefaultSessionStorageKey: boolean;
+  protected legacyV2SessionStorageKey: string | null;
   protected sessionState: SessionState | null;
   protected silentAuthAttemptCount: number;
   protected discoveryCache: Map<
     string,
     {
       expiresAt: number;
-      data: Record<string, unknown>;
+      data: OpenIdConfiguration;
       context?: {
         authority: string;
         clientId: string;
@@ -163,13 +253,23 @@ export class GuardhouseClientBase {
       config.maxAuthorizationHeaderBytes ?? DEFAULT_MAX_AUTH_HEADER_BYTES;
     this.maxSilentAuthAttempts =
       config.maxSilentAuthAttempts ?? DEFAULT_MAX_SILENT_AUTH_ATTEMPTS;
+    this.issuer = canonicalizeIssuer(config.authority);
+    this.baseURL = trimTrailingForwardSlashes(this.issuer);
+    this.usesDefaultSessionStorageKey = !config.sessionStorageKey;
     this.sessionStorageKey =
-      config.sessionStorageKey ?? DEFAULT_SESSION_STORAGE_KEY;
+      config.sessionStorageKey?.trim() ??
+      `${DEFAULT_SESSION_STORAGE_KEY_PREFIX}:${encodeURIComponent(
+        this.issuer,
+      )}:${encodeURIComponent(config.clientId.trim())}`;
+    this.legacyV2SessionStorageKey = this.usesDefaultSessionStorageKey
+      ? `${LEGACY_V2_SESSION_STORAGE_KEY_PREFIX}:${encodeURIComponent(
+          this.baseURL,
+        )}:${encodeURIComponent(config.clientId.trim())}`
+      : null;
     this.sessionState = null;
     this.silentAuthAttemptCount = 0;
     this.discoveryCache = new Map();
 
-    this.baseURL = trimTrailingForwardSlashes(config.authority);
     this.endpoints = {
       token: config.tokenEndpoint || DEFAULT_ENDPOINTS.token,
       userInfo: config.userInfoEndpoint || DEFAULT_ENDPOINTS.userInfo,
@@ -270,6 +370,170 @@ export class GuardhouseClientBase {
     }
 
     return value.trim();
+  }
+
+  protected requireRecord(
+    value: unknown,
+    responseName: string,
+    errorCode = "INVALID_RESPONSE",
+  ): Record<string, unknown> {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new GuardhouseError(
+        `${responseName} must be a JSON object`,
+        errorCode,
+      );
+    }
+    const record = value as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+      if (isUnsafeObjectKey(key)) {
+        throw new GuardhouseError(
+          `${responseName} contains an unsafe property name`,
+          errorCode,
+        );
+      }
+    }
+    return record;
+  }
+
+  protected decodeTokenResponse(value: unknown): TokenResponse {
+    const data = this.requireRecord(
+      value,
+      "Token response",
+      "INVALID_TOKEN_RESPONSE",
+    );
+    const accessToken = data["access_token"];
+    const tokenType = data["token_type"];
+    const expiresIn = data["expires_in"];
+    if (
+      typeof accessToken !== "string" ||
+      accessToken.trim() === "" ||
+      typeof tokenType !== "string" ||
+      tokenType.trim() === "" ||
+      typeof expiresIn !== "number" ||
+      !Number.isInteger(expiresIn) ||
+      expiresIn <= 0 ||
+      expiresIn > 2_147_483_647
+    ) {
+      throw new GuardhouseError(
+        "Token response contains invalid required fields",
+        "INVALID_TOKEN_RESPONSE",
+      );
+    }
+
+    const decoded: TokenResponse = {
+      access_token: accessToken,
+      token_type: tokenType,
+      expires_in: expiresIn,
+    };
+    for (const key of ["refresh_token", "scope", "id_token"] as const) {
+      const field = data[key];
+      if (field !== undefined) {
+        if (typeof field !== "string" || field.trim() === "") {
+          throw new GuardhouseError(
+            `Token response field ${key} is invalid`,
+            "INVALID_TOKEN_RESPONSE",
+          );
+        }
+        decoded[key] = field;
+      }
+    }
+    return decoded;
+  }
+
+  protected decodeUserInfoResponse(value: unknown): UserInfoResponse {
+    const data = this.requireRecord(
+      value,
+      "UserInfo response",
+      "INVALID_USERINFO_RESPONSE",
+    );
+    if (typeof data["sub"] !== "string" || data["sub"].trim() === "") {
+      throw new GuardhouseError(
+        "UserInfo response must contain a non-empty subject",
+        "INVALID_USERINFO_RESPONSE",
+      );
+    }
+    for (const key of ["name", "email", "picture"] as const) {
+      if (data[key] !== undefined && typeof data[key] !== "string") {
+        throw new GuardhouseError(
+          `UserInfo response field ${key} is invalid`,
+          "INVALID_USERINFO_RESPONSE",
+        );
+      }
+    }
+    for (const key of ["roles", "scopes"] as const) {
+      const field = data[key];
+      if (
+        field !== undefined &&
+        (!Array.isArray(field) ||
+          field.some((entry) => typeof entry !== "string"))
+      ) {
+        throw new GuardhouseError(
+          `UserInfo response field ${key} is invalid`,
+          "INVALID_USERINFO_RESPONSE",
+        );
+      }
+    }
+    return cloneAndFreezeJsonValue(
+      data,
+      new WeakSet<object>(),
+    ) as UserInfoResponse;
+  }
+
+  protected decodeIntrospectionResponse(value: unknown): IntrospectionResponse {
+    const data = this.requireRecord(
+      value,
+      "Token introspection response",
+      "INVALID_INTROSPECTION_RESPONSE",
+    );
+    if (typeof data["active"] !== "boolean") {
+      throw new GuardhouseError(
+        "Token introspection response must contain a boolean active field",
+        "INVALID_INTROSPECTION_RESPONSE",
+      );
+    }
+    if (data["active"] === false) {
+      return { active: false };
+    }
+    const stringFields = [
+      "scope",
+      "client_id",
+      "username",
+      "token_type",
+      "sub",
+      "iss",
+      "jti",
+    ] as const;
+    for (const key of stringFields) {
+      if (data[key] !== undefined && typeof data[key] !== "string") {
+        throw new GuardhouseError(
+          `Token introspection response field ${key} is invalid`,
+          "INVALID_INTROSPECTION_RESPONSE",
+        );
+      }
+    }
+    for (const key of ["exp", "iat", "nbf"] as const) {
+      if (
+        data[key] !== undefined &&
+        (typeof data[key] !== "number" || !Number.isFinite(data[key]))
+      ) {
+        throw new GuardhouseError(
+          `Token introspection response field ${key} is invalid`,
+          "INVALID_INTROSPECTION_RESPONSE",
+        );
+      }
+    }
+    const aud = data["aud"];
+    if (
+      aud !== undefined &&
+      typeof aud !== "string" &&
+      (!Array.isArray(aud) || aud.some((entry) => typeof entry !== "string"))
+    ) {
+      throw new GuardhouseError(
+        "Token introspection response field aud is invalid",
+        "INVALID_INTROSPECTION_RESPONSE",
+      );
+    }
+    return { ...data, active: true } as IntrospectionResponse;
   }
 
   protected validatePkceCodeVerifier(codeVerifier: string): string {
@@ -565,15 +829,35 @@ export class GuardhouseClientBase {
 
   protected buildSessionStateFromTokenResponse(
     tokenResponse: TokenResponse,
+    previousSessionState?: SessionState | null,
+    preserveRefreshToken = false,
+    verifiedIdentity?: OidcIdentity,
   ): SessionState {
-    return {
+    const base = {
+      version: 3 as const,
+      issuer: this.issuer,
+      clientId: this.config.clientId.trim(),
       accessToken: tokenResponse.access_token,
       tokenType: tokenResponse.token_type,
       expiresAt: Date.now() + tokenResponse.expires_in * 1000,
-      scope: tokenResponse.scope,
-      idToken: tokenResponse.id_token,
-      hasRefreshToken: Boolean(tokenResponse.refresh_token),
+      scope: tokenResponse.scope ?? previousSessionState?.scope,
+      hasRefreshToken:
+        Boolean(tokenResponse.refresh_token) || preserveRefreshToken,
     };
+    const idToken =
+      tokenResponse.id_token ||
+      (previousSessionState?.kind === "oidc"
+        ? previousSessionState.idToken
+        : undefined);
+    const identity =
+      verifiedIdentity ||
+      (previousSessionState?.kind === "oidc"
+        ? previousSessionState.identity
+        : undefined);
+    if (idToken && identity) {
+      return { ...base, kind: "oidc", idToken, identity };
+    }
+    return { ...base, kind: "oauth" };
   }
 
   protected resetSilentAuthAttemptCounter(): void {
@@ -584,9 +868,7 @@ export class GuardhouseClientBase {
     callbackUrl: string,
     sanitizedUrl: string,
   ): void {
-    const hasFragment = callbackUrl.includes("#");
-
-    if (!hasFragment || sanitizedUrl === callbackUrl) {
+    if (sanitizedUrl === callbackUrl) {
       return;
     }
 
@@ -608,7 +890,7 @@ export class GuardhouseClientBase {
     }
   }
 
-  private parseScope(scope: string | undefined): Set<string> {
+  protected parseRequestedScope(scope: string | undefined): Set<string> {
     if (!scope) {
       return new Set<string>();
     }
@@ -629,7 +911,7 @@ export class GuardhouseClientBase {
       return;
     }
 
-    const requested = this.parseScope(requestedScope);
+    const requested = this.parseRequestedScope(requestedScope);
 
     if (!grantedScope) {
       this.logger.warn(
@@ -641,7 +923,7 @@ export class GuardhouseClientBase {
       return;
     }
 
-    const granted = this.parseScope(grantedScope);
+    const granted = this.parseRequestedScope(grantedScope);
     const unexpected: string[] = [];
     const missing: string[] = [];
 
@@ -692,11 +974,21 @@ export class GuardhouseClientBase {
       .map((directive) => directive.trim())
       .filter((directive) => directive.length > 0);
 
-    const frameAncestors = directives.find((directive) =>
-      directive.toLowerCase().startsWith("frame-ancestors"),
+    const frameAncestors = directives.filter(
+      (directive) =>
+        directive.split(/\s+/, 1)[0]?.toLowerCase() === "frame-ancestors",
     );
-
-    return frameAncestors;
+    if (frameAncestors.length > 1) {
+      throw new GuardhouseError(
+        "CSP contains duplicate frame-ancestors directives",
+        "AUTH_PAGE_CLICKJACKING_RISK",
+      );
+    }
+    if (frameAncestors.length === 0) {
+      return undefined;
+    }
+    const tokens = frameAncestors[0].split(/\s+/).slice(1);
+    return tokens.length > 0 ? frameAncestors[0] : undefined;
   }
 
   protected assertRecentUserInteraction(operationName: string): void {
@@ -725,7 +1017,10 @@ export class GuardhouseClientBase {
     const allowlist = this.config.allowedPostLogoutRedirectUris;
 
     if (!allowlist || allowlist.length === 0) {
-      return;
+      throw new GuardhouseError(
+        "post_logout_redirect_uri requires a non-empty allowedPostLogoutRedirectUris allowlist",
+        "UNSAFE_LOGOUT_REDIRECT_URI",
+      );
     }
 
     const normalizedRedirectUri = validateAndNormalizeRedirectUri(redirectUri);
@@ -820,7 +1115,9 @@ export class GuardhouseClientBase {
       return "";
     }
 
-    const credentials = `${encodeURIComponent(this.config.clientId)}:${encodeURIComponent(this.config.clientSecret)}`;
+    const formEncode = (value: string): string =>
+      new URLSearchParams([["value", value]]).toString().slice("value=".length);
+    const credentials = `${formEncode(this.config.clientId)}:${formEncode(this.config.clientSecret)}`;
     const encoded = this.encodeBase64(credentials);
 
     this.logger.debug("Built basic auth header for confidential client");
@@ -937,15 +1234,17 @@ export class GuardhouseClientBase {
           ? errorData["error"]
           : undefined;
         const errorCode =
-          typeof rawErrorCode === "string" ? rawErrorCode : "server_error";
+          typeof rawErrorCode === "string" &&
+          SAFE_OAUTH_ERROR_CODES.has(rawErrorCode)
+            ? rawErrorCode
+            : "server_error";
         const errorMessage =
-          typeof rawErrorCode === "string"
+          errorCode !== "server_error"
             ? `Request failed (${errorCode})`
             : `Request failed with status ${response.status}`;
 
         this.logger.error("HTTP request failed", {
           status: response.status,
-          statusText: response.statusText,
           errorCode,
         });
         throw new GuardhouseError(errorMessage, errorCode, response.status);
@@ -963,10 +1262,9 @@ export class GuardhouseClientBase {
         if (text) {
           try {
             data = JSON.parse(text);
-          } catch (error) {
+          } catch {
             this.logger.warn("Response body is not valid JSON", {
               status: response.status,
-              error: error instanceof Error ? error.message : String(error),
             });
             data = text;
           }
@@ -1032,10 +1330,7 @@ export class GuardhouseClientBase {
             parsedErrorData === null ||
             Array.isArray(parsedErrorData)
           ) {
-            return {
-              error: "server_error",
-              error_description: rawBody.slice(0, 200),
-            };
+            return { error: "server_error" };
           }
 
           const errorData = parsedErrorData as Record<string, unknown>;
@@ -1053,10 +1348,7 @@ export class GuardhouseClientBase {
 
           return errorData;
         } catch {
-          return {
-            error: "server_error",
-            error_description: rawBody.slice(0, 200),
-          };
+          return { error: "server_error" };
         }
       }
 
@@ -1064,10 +1356,7 @@ export class GuardhouseClientBase {
         contentType.includes("text/html") ||
         contentType.includes("text/plain")
       ) {
-        return {
-          error: "server_error",
-          error_description: rawBody.slice(0, 200),
-        };
+        return { error: "server_error" };
       }
 
       try {
@@ -1078,54 +1367,19 @@ export class GuardhouseClientBase {
           parsed === null ||
           Array.isArray(parsed)
         ) {
-          return {
-            error: "server_error",
-            error_description: rawBody.slice(0, 200),
-          };
+          return { error: "server_error" };
         }
 
         return parsed as Record<string, unknown>;
       } catch {
-        return {
-          error: "server_error",
-          error_description: rawBody.slice(0, 200),
-        };
+        return { error: "server_error" };
       }
-    } catch (error) {
+    } catch {
       this.logger.warn("Failed to parse HTTP error response body", {
         status: response.status,
-        error: error instanceof Error ? error.message : String(error),
       });
 
       return {};
     }
-  }
-
-  async postForm<T>(
-    endpoint: string,
-    body: URLSearchParams,
-    skipAuthHeader = false,
-  ): Promise<T> {
-    this.logger.debug("Submitting form request", {
-      endpoint,
-      paramCount: Array.from(body.keys()).length,
-      skipAuthHeader,
-    });
-
-    const response = await this.fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: body.toString(),
-      skipAuthHeader,
-    });
-
-    this.logger.debug("Form request succeeded", {
-      endpoint,
-      status: response.status,
-    });
-
-    return response.data as T;
   }
 }

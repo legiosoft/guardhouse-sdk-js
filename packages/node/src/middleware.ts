@@ -26,8 +26,13 @@ import { createNodeLogger } from "./debug";
 import type { IntrospectionResponse } from "@guardhouse/core";
 import { GuardhouseClient } from "@guardhouse/core";
 
+type ActiveIntrospectionResponse = Extract<
+  IntrospectionResponse,
+  { active: true }
+>;
+
 interface IntrospectionCacheEntry {
-  result: IntrospectionResponse;
+  result: ActiveIntrospectionResponse;
   expiresAt: number;
   tokenExp: number;
 }
@@ -37,14 +42,76 @@ interface KeyCacheEntry {
   expiresAt: number;
 }
 
+const OAUTH_SCOPE_TOKEN = /^[\u0021\u0023-\u005b\u005d-\u007e]+$/;
+
+function normalizeRequiredScopes(value: unknown): readonly string[] {
+  if (value === undefined) {
+    return [];
+  }
+
+  if (!Array.isArray(value)) {
+    throw new Error("requiredScopes must be an array of OAuth scope tokens");
+  }
+
+  const scopes = Array.from(value, (scope) => {
+    if (
+      typeof scope !== "string" ||
+      scope.length === 0 ||
+      !OAUTH_SCOPE_TOKEN.test(scope)
+    ) {
+      throw new Error(
+        "requiredScopes must contain only non-empty OAuth scope tokens",
+      );
+    }
+
+    return scope;
+  });
+
+  return Object.freeze(Array.from(new Set(scopes)));
+}
+
+function parseScopeClaim(value: unknown): string[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== "string") {
+    throw new Error("Token 'scope' claim must be a string");
+  }
+
+  if (value.length === 0) {
+    return [];
+  }
+
+  const scopes = value.split(" ");
+  if (scopes.some((scope) => !OAUTH_SCOPE_TOKEN.test(scope))) {
+    throw new Error("Token 'scope' claim is malformed");
+  }
+
+  return Array.from(new Set(scopes));
+}
+
 export class GuardhouseResourceService {
   private jwksClient: JwksClient | null = null;
   private introspectionCache = new Map<string, IntrospectionCacheEntry>();
   private keyCache = new Map<string, KeyCacheEntry>();
   private jwksUri: string;
   private logger: ReturnType<typeof createNodeLogger>;
+  private readonly requiredScopes: readonly string[];
 
   constructor(private options: GuardhouseResourceOptions) {
+    if (
+      options.introspectionCredentialTransmission !== undefined &&
+      options.introspectionCredentialTransmission !==
+        IntrospectionCredentialTransmission.BasicAuth
+    ) {
+      throw new Error(
+        'Unsupported introspection credential transmission; only "basic_auth" is supported',
+      );
+    }
+
+    this.requiredScopes = normalizeRequiredScopes(options.requiredScopes);
+
     this.jwksUri = "";
     this.logger = createNodeLogger("Middleware", options.debug);
 
@@ -343,43 +410,17 @@ export class GuardhouseResourceService {
         IntrospectionCredentialTransmission.BasicAuth,
     });
 
-    const coreClientConfig: Record<string, unknown> = {
+    const coreClientConfig = {
       authority: this.options.authority,
       clientId: this.options.introspectionClientId,
       clientSecret: this.options.introspectionClientSecret,
+      ...(typeof this.options.debug === "boolean"
+        ? { debug: this.options.debug }
+        : {}),
     };
 
-    if (typeof this.options.debug === "boolean") {
-      coreClientConfig.debug = this.options.debug;
-    }
-
-    const client = new GuardhouseClient(coreClientConfig as any);
-
-    let introspectionResult: IntrospectionResponse;
-
-    const useBasicAuth =
-      this.options.introspectionCredentialTransmission ===
-      IntrospectionCredentialTransmission.BasicAuth;
-
-    if (useBasicAuth) {
-      introspectionResult = await client.postForm<IntrospectionResponse>(
-        `/${GuardhouseConstants.Endpoints.ConnectIntrospect}`,
-        new URLSearchParams({
-          token,
-          token_type_hint: "access_token",
-        }),
-      );
-    } else {
-      introspectionResult = await client.postForm<IntrospectionResponse>(
-        `/${GuardhouseConstants.Endpoints.ConnectIntrospect}`,
-        new URLSearchParams({
-          token,
-          token_type_hint: "access_token",
-          client_id: this.options.introspectionClientId,
-          client_secret: this.options.introspectionClientSecret,
-        }),
-      );
-    }
+    const client = new GuardhouseClient(coreClientConfig);
+    const introspectionResult = await client.introspectToken(token);
 
     if (!introspectionResult.active) {
       throw new Error("Token is not active");
@@ -409,19 +450,6 @@ export class GuardhouseResourceService {
       const now = Math.floor(Date.now() / 1000);
       if (introspectionResult.exp < now) {
         throw new Error("Token has expired");
-      }
-    }
-
-    if (this.options.requiredScopes && introspectionResult.scope) {
-      const tokenScopes = introspectionResult.scope.split(" ");
-      const missingScopes = this.options.requiredScopes.filter(
-        (s: string) => !tokenScopes.includes(s),
-      );
-
-      if (missingScopes.length > 0) {
-        throw new Error(
-          `Token missing required scopes: ${missingScopes.join(", ")}`,
-        );
       }
     }
 
@@ -480,7 +508,7 @@ export class GuardhouseResourceService {
       username: payload.username,
       email: payload.email,
       roles: roles.size > 0 ? Array.from(roles) : undefined,
-      scopes: payload.scope ? payload.scope.split(" ") : undefined,
+      scopes: parseScopeClaim(payload.scope),
       aud: Array.isArray(payload.aud) ? payload.aud : [payload.aud],
       iss: payload.iss,
       jti: payload.jti,
@@ -500,7 +528,7 @@ export class GuardhouseResourceService {
   }
 
   private buildUserFromIntrospection(
-    result: IntrospectionResponse,
+    result: ActiveIntrospectionResponse,
   ): GuardhouseUser {
     const claims = buildClaimsFromIntrospection(result);
 
@@ -514,7 +542,7 @@ export class GuardhouseResourceService {
       username: claims.username,
       email: claims.email,
       roles: claims.roles,
-      scopes: claims.scopes,
+      scopes: parseScopeClaim(result.scope),
       aud: claims.aud,
       iss: claims.iss,
       jti: claims.jti,
@@ -537,6 +565,7 @@ export class GuardhouseResourceService {
     if (this.options.validationMode === "introspection") {
       this.logger.debug("Validating token via introspection");
       const user = await this.introspectToken(token);
+      this.assertRequiredScopes(user);
 
       this.logger.debug("Token validation succeeded", {
         subject: user.sub,
@@ -548,6 +577,7 @@ export class GuardhouseResourceService {
 
     this.logger.debug("Validating token via JWT signature");
     const user = await this.validateJwtToken(token);
+    this.assertRequiredScopes(user);
 
     this.logger.debug("Token validation succeeded", {
       subject: user.sub,
@@ -555,6 +585,23 @@ export class GuardhouseResourceService {
     });
 
     return user;
+  }
+
+  private assertRequiredScopes(user: GuardhouseUser): void {
+    if (this.requiredScopes.length === 0) {
+      return;
+    }
+
+    const grantedScopes = new Set(user.scopes ?? []);
+    const missingScopes = this.requiredScopes.filter(
+      (scope) => !grantedScopes.has(scope),
+    );
+
+    if (missingScopes.length > 0) {
+      throw new Error(
+        `Token missing required scopes: ${missingScopes.join(", ")}`,
+      );
+    }
   }
 }
 

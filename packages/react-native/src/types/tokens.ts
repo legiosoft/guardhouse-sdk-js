@@ -1,4 +1,5 @@
 import type {
+  OidcIdentityMetadata,
   TokenResponse as CoreTokenResponse,
   User as CoreUser,
 } from "@guardhouse/core";
@@ -15,6 +16,8 @@ export interface GuardhouseSession {
   accessToken: string;
   refreshToken?: string;
   idToken?: string;
+  /** Serializable metadata copied from Core-verified OIDC evidence. */
+  identity?: OidcIdentityMetadata;
   tokenType: string;
   scope?: string;
   expiresAt: number;
@@ -29,16 +32,4 @@ export interface GuardhouseAuthResult {
   tokenResponse: GuardhouseTokenResponse;
   user: CoreUser | null;
   appState?: Record<string, unknown>;
-}
-
-/**
- * Token payload shape accepted from a deep link redirect.
- */
-export interface RedirectTokenPayload {
-  accessToken: string;
-  refreshToken?: string;
-  idToken?: string;
-  tokenType?: string;
-  expiresIn?: number;
-  scope?: string;
 }

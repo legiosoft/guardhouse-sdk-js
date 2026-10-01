@@ -128,7 +128,6 @@ export class InAppBrowserAuthAdapter implements GuardhouseBrowserAdapter {
 
     return new Promise((resolve, reject) => {
       let settled = false;
-      let subscription: { remove: () => void } | undefined;
 
       const timeoutHandle = setTimeout(() => {
         if (settled) {
@@ -178,7 +177,7 @@ export class InAppBrowserAuthAdapter implements GuardhouseBrowserAdapter {
         );
       };
 
-      subscription = Linking.addEventListener("url", ({ url }) => {
+      const subscription = Linking.addEventListener("url", ({ url }) => {
         if (!isMatchingRedirectUri(url, redirectMatcher)) {
           return;
         }

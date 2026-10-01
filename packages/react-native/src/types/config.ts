@@ -18,9 +18,13 @@ export interface BrowserLoginOptions {
   timeoutMs?: number;
   scope?: string;
   audience?: string;
+  /** RFC 8707 resource indicators. */
+  resource?: string | readonly string[];
   prompt?: string;
+  maxAgeSeconds?: number;
+  requiredAcrValues?: readonly string[];
+  requiredAmrValues?: readonly string[];
   appState?: Record<string, unknown>;
-  extraParams?: Record<string, string | number | null | undefined>;
 }
 
 /**
@@ -102,13 +106,6 @@ export interface RefreshTokenOptions {
 }
 
 /**
- * Authorization code exchange options.
- */
-export interface ExchangeCodeForTokensOptions extends RefreshTokenOptions {
-  codeVerifier?: string;
-}
-
-/**
  * Session restore options.
  */
 export interface RestoreSessionOptions extends RefreshTokenOptions {
@@ -137,7 +134,6 @@ export interface GuardhouseLogoutOptions {
  * Guardhouse endpoint configuration.
  */
 export interface GuardhouseClientEndpoints {
-  authorization: string;
   registration: string;
   token: string;
   userInfo: string;
@@ -178,6 +174,10 @@ export interface GuardhouseClientConfig extends Omit<
   fetch?: FetchLike;
   defaultEphemeralSession?: boolean;
   userInfoOnLogin?: boolean;
+  /** Exact, case-sensitive accepted ACR values. */
+  requiredAcrValues?: readonly string[];
+  /** Exact, case-sensitive AMR values that must all be present. */
+  requiredAmrValues?: readonly string[];
   endpoints?: Partial<GuardhouseClientEndpoints>;
   chunkSize?: number;
 }

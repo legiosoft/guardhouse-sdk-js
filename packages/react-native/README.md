@@ -5,7 +5,7 @@ React Native SDK for Guardhouse OAuth 2.0 Authorization Code + PKCE, passkey aut
 ## Installation
 
 ```bash
-npm install @guardhouse/react-native
+npm install @guardhouse/react-native@1.0.2-beta.1
 ```
 
 ### Peer dependencies
@@ -97,6 +97,7 @@ const client = new GuardhouseClient({
 ```tsx
 const result = await client.loginWithBrowser({
   ephemeralSession: true,
+  resource: ["urn:guardhouse:api:orders"],
 });
 
 console.log(result.session.accessToken);
@@ -255,8 +256,6 @@ new GuardhouseClient(config: GuardhouseClientConfig)
 - `loginWithBrowser(options?)` – OAuth browser login
 - `registerWithBrowser(options?)` – OAuth browser registration
 - `loginWithPasskey(options?)` – headless WebAuthn login
-- `exchangeCodeForTokens(code, options?)` – exchange auth code
-- `applyRedirectTokens(payload)` – apply tokens from deep link
 - `refreshToken(options?)` – refresh access token
 - `restoreSession(options?)` – restore and optionally refresh
 - `getSession()` – get current session
@@ -288,10 +287,11 @@ interface GuardhouseSession {
   accessToken: string;
   refreshToken?: string;
   idToken?: string;
+  identity?: OidcIdentityMetadata;
   tokenType: string;
   scope?: string;
   expiresAt: number;
-  user: User | null;
+  user: User | null; // Deeply immutable verified/UserInfo claims
 }
 
 interface GuardhouseAuthResult {
@@ -328,8 +328,20 @@ try {
 - Tokens stored in iOS Keychain / Android Keystore (via `react-native-keychain`)
 - No AsyncStorage/SharedPreferences fallback
 - PKCE with S256 enforced
-- State parameter CSRF protection
-- Deep link sanitization and strict redirect URI matching
+- Callbacks require a live, one-use Core v2 transaction binding state, nonce,
+  PKCE, issuer, client, and redirect URI. The callback is runtime-opaque and is
+  consumed before token I/O; fabricated, serialized, cross-client, and replayed
+  callbacks fail.
+- ID-token signatures and claims are verified before identity is exposed;
+  UserInfo must have the exact same `sub`. Returned user arrays and nested custom
+  claims are recursively copied and frozen, and extension claims are `unknown`
+  until your application validates them.
+- Manual authorization-code exchange and front-channel token ingestion are not
+  exposed
+- Deep-link redirects match exact scheme, authority, path, ordered query tuples,
+  and fragment. Credentials are rejected and recognized callbacks are sanitized.
+- RFC 8707 `resource` values must be absolute URIs (URNs are supported); relative
+  values, fragments, whitespace, and controls are rejected.
 - Android `launchMode="singleTask"` prevents task hijacking
 
 ## License

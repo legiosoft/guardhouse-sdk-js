@@ -72,7 +72,7 @@ const registrationEndpoint =
   GH_REGISTRATION_ENDPOINT?.trim() || "/account/signup?returnUrl=";
 const tokenEndpoint = GH_TOKEN_ENDPOINT?.trim() || "/connect/token";
 const revocationEndpoint =
-  GH_REVOCATION_ENDPOINT?.trim() || "/connect/revocation";
+  GH_REVOCATION_ENDPOINT?.trim() || "/connect/revoke";
 const passkeyChallengeEndpoint =
   GH_PASSKEY_CHALLENGE_ENDPOINT?.trim() || "/connect/webauthn/challenge";
 const passkeyAssertionEndpoint =

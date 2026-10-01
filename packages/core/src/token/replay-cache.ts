@@ -1,48 +1,83 @@
-import { MAX_TRACKED_NONCE_AND_JTI } from "./constants";
+import {
+  MAX_CLOCK_SKEW_TOLERANCE_SECONDS,
+  MAX_TRACKED_NONCE_AND_JTI,
+} from "./constants";
 
-export const DEFAULT_JTI_REPLAY_TTL_MS = 300_000;
+const DEFAULT_CLOCK_SKEW_TOLERANCE_SECONDS = 60;
 
 export interface JtiReplayCacheOptions {
   maxTrackedJti?: number;
-  ttlMs?: number;
+  clockSkewToleranceSeconds?: number;
 }
 
-export class JtiReplayCache {
+export interface IdTokenReplayEntry {
+  readonly issuer: string;
+  readonly jti: string;
+  /** Token expiration as a Unix timestamp in seconds. */
+  readonly expiresAt: number;
+}
+
+export interface IdTokenReplayCache {
+  consume(entry: IdTokenReplayEntry): boolean | Promise<boolean>;
+}
+
+export class JtiReplayCache implements IdTokenReplayCache {
   private readonly entries = new Map<string, number>();
   private readonly maxTrackedJti: number;
-  private readonly ttlMs: number;
+  private readonly clockSkewToleranceSeconds: number;
 
   constructor(options: JtiReplayCacheOptions = {}) {
     const maxTrackedJti = options.maxTrackedJti ?? MAX_TRACKED_NONCE_AND_JTI;
-    const ttlMs = options.ttlMs ?? DEFAULT_JTI_REPLAY_TTL_MS;
+    const clockSkewToleranceSeconds =
+      options.clockSkewToleranceSeconds ?? DEFAULT_CLOCK_SKEW_TOLERANCE_SECONDS;
 
     if (!Number.isInteger(maxTrackedJti) || maxTrackedJti <= 0) {
       throw new Error("maxTrackedJti must be a positive integer");
     }
-
-    if (!Number.isInteger(ttlMs) || ttlMs <= 0) {
-      throw new Error("ttlMs must be a positive integer");
+    if (
+      !Number.isFinite(clockSkewToleranceSeconds) ||
+      clockSkewToleranceSeconds < 0 ||
+      clockSkewToleranceSeconds > MAX_CLOCK_SKEW_TOLERANCE_SECONDS
+    ) {
+      throw new Error(
+        `clockSkewToleranceSeconds must be between 0 and ${MAX_CLOCK_SKEW_TOLERANCE_SECONDS}`,
+      );
     }
 
     this.maxTrackedJti = maxTrackedJti;
-    this.ttlMs = ttlMs;
+    this.clockSkewToleranceSeconds = clockSkewToleranceSeconds;
   }
 
-  consume(jti: string): boolean {
-    const normalizedJti = jti.trim();
-    if (!normalizedJti) {
+  consume(entry: IdTokenReplayEntry): boolean {
+    const issuer = entry.issuer.trim();
+    const jti = entry.jti.trim();
+    const now = Math.floor(Date.now() / 1000);
+
+    if (
+      !issuer ||
+      !jti ||
+      !Number.isFinite(entry.expiresAt) ||
+      entry.expiresAt <= now
+    ) {
       return false;
     }
 
-    const now = Date.now();
     this.purgeExpiredEntries(now);
+    const key = `${issuer.length}:${issuer}${jti}`;
 
-    if (this.entries.has(normalizedJti)) {
+    if (this.entries.has(key)) {
       return false;
     }
 
-    this.entries.set(normalizedJti, now + this.ttlMs);
-    this.evictOverflowEntries();
+    // Saturation must not silently evict a still-live replay marker.
+    if (this.entries.size >= this.maxTrackedJti) {
+      return false;
+    }
+
+    const retentionExpiresAt = entry.expiresAt + this.clockSkewToleranceSeconds;
+    if (!Number.isFinite(retentionExpiresAt)) return false;
+
+    this.entries.set(key, retentionExpiresAt);
     return true;
   }
 
@@ -51,23 +86,10 @@ export class JtiReplayCache {
   }
 
   private purgeExpiredEntries(now: number): void {
-    for (const [jti, expiresAt] of this.entries.entries()) {
-      if (now > expiresAt) {
-        this.entries.delete(jti);
-      } else {
-        break;
+    for (const [key, expiresAt] of this.entries.entries()) {
+      if (expiresAt <= now) {
+        this.entries.delete(key);
       }
-    }
-  }
-
-  private evictOverflowEntries(): void {
-    while (this.entries.size > this.maxTrackedJti) {
-      const oldestJti = this.entries.keys().next().value;
-      if (!oldestJti) {
-        break;
-      }
-
-      this.entries.delete(oldestJti);
     }
   }
 }

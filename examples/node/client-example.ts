@@ -9,9 +9,10 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const AUTHORITY = process.env.AUTHORITY || "https://auth.example.com";
-const CLIENT_ID = process.env.CLIENT_ID || "your-client-id";
-const CLIENT_SECRET = process.env.CLIENT_SECRET || "your-client-secret";
-const SCOPE = process.env.SCOPE;
+const CLIENT_ID = process.env.SERVICE_CLIENT_ID || "your-service-client-id";
+const CLIENT_SECRET =
+  process.env.SERVICE_CLIENT_SECRET || "your-service-client-secret";
+const SCOPE = process.env.SERVICE_SCOPE;
 
 async function main() {
   console.log("Guardhouse Client Example (Client Credentials Flow)\n");

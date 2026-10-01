@@ -28,6 +28,7 @@ interface PasskeyManagerConfig {
   logger: GuardhouseLogger;
   persistTokenResponse: (
     tokenResponse: GuardhouseTokenResponse,
+    requestedScope: string,
   ) => Promise<GuardhouseAuthResult>;
 }
 
@@ -49,6 +50,7 @@ export class PasskeyManager {
   private readonly logger: GuardhouseLogger;
   private readonly persistTokenResponse: (
     tokenResponse: GuardhouseTokenResponse,
+    requestedScope: string,
   ) => Promise<GuardhouseAuthResult>;
 
   constructor(config: PasskeyManagerConfig) {
@@ -109,7 +111,7 @@ export class PasskeyManager {
     );
 
     const tokenResponse = parseTokenResponsePayload(verificationPayload);
-    return this.persistTokenResponse(tokenResponse);
+    return this.persistTokenResponse(tokenResponse, scope);
   }
 
   private requirePasskeyAdapter(): GuardhousePasskeyAdapter {

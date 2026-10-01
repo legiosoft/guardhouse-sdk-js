@@ -1,6 +1,5 @@
 export type {
   BrowserLoginOptions,
-  ExchangeCodeForTokensOptions,
   FetchLike,
   GetAccessTokenOptions,
   GuardhouseClientConfig,
@@ -20,7 +19,6 @@ export type {
   GuardhouseAuthResult,
   GuardhouseSession,
   GuardhouseTokenResponse,
-  RedirectTokenPayload,
 } from "./tokens";
 export {
   GuardhouseAuthError,

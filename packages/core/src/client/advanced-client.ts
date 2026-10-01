@@ -1,4 +1,11 @@
 import { GuardhouseError } from "../config";
+import { generateAuthUrl } from "../auth";
+import type {
+  AuthorizationTransaction,
+  CreatedAuthorizationRequest,
+  CreateAuthorizationRequestOptions,
+} from "../auth";
+import { generateNonce, generatePKCE, generateState } from "../pkce";
 import {
   enforceNonSpoofableHostname,
   enforceSecureHttpUrl,
@@ -7,6 +14,7 @@ import {
   timingSafeEqual,
   validateAndNormalizeRedirectUri,
   validateRedirectUri,
+  validateResourceIndicator,
 } from "../security";
 
 import {
@@ -20,10 +28,12 @@ import { GuardhouseClientToken } from "./token-client";
 import type {
   AccountLinkingContext,
   AuthorizationPageProtectionResult,
+  DynamicClientRegistrationResponse,
   HomeRealmDiscoveryResult,
   LogoutRequest,
+  OpenIdConfiguration,
   PostMessageTarget,
-  PushedAuthorizationRequestResult,
+  PushedAuthorizationRequest,
   SecureCookieOptions,
 } from "./types";
 
@@ -38,12 +48,284 @@ const FORBIDDEN_REDIRECT_URI_CHARS = new Set([
   "\n",
 ]);
 const LOGOUT_STATE_PATTERN = /^[A-Za-z0-9_-]+$/;
+const PAR_TRANSACTION_BOUND_PARAMETER_KEYS = new Set([
+  "client_id",
+  "response_type",
+  "redirect_uri",
+  "scope",
+  "state",
+  "code_challenge",
+  "code_challenge_method",
+  "nonce",
+  "response_mode",
+  "audience",
+  "resource",
+  "prompt",
+  "max_age",
+  "acr_values",
+  "request",
+  "request_uri",
+]);
 
 export class GuardhouseClientAdvanced extends GuardhouseClientToken {
   private readonly discoveryCacheContext = new Map<
     string,
     { authority: string; clientId: string }
   >();
+  private latestDiscoveryMetadata: OpenIdConfiguration | null = null;
+  private readonly pushedAuthorizationBindings = new Map<
+    string,
+    { state: string; expiresAt: number; authorizationEndpoint: string }
+  >();
+
+  private decodeDiscoveryMetadata(value: unknown): OpenIdConfiguration {
+    const data = this.requireRecord(
+      value,
+      "Discovery response",
+      "INVALID_DISCOVERY_RESPONSE",
+    );
+    if (typeof data["issuer"] !== "string" || data["issuer"].trim() === "") {
+      throw new GuardhouseError(
+        "Discovery response must contain issuer",
+        "INVALID_DISCOVERY_RESPONSE",
+      );
+    }
+    for (const key of DISCOVERY_ENDPOINT_KEYS) {
+      if (
+        data[key] !== undefined &&
+        (typeof data[key] !== "string" || data[key].trim() === "")
+      ) {
+        throw new GuardhouseError(
+          `Discovery metadata field ${key} is invalid`,
+          "INVALID_DISCOVERY_RESPONSE",
+        );
+      }
+    }
+    for (const key of [
+      "authorization_response_iss_parameter_supported",
+      "request_parameter_supported",
+      "request_uri_parameter_supported",
+      "require_request_uri_registration",
+    ]) {
+      if (data[key] !== undefined && typeof data[key] !== "boolean") {
+        throw new GuardhouseError(
+          `Discovery metadata field ${key} is invalid`,
+          "INVALID_DISCOVERY_RESPONSE",
+        );
+      }
+    }
+    for (const key of [
+      "response_types_supported",
+      "response_modes_supported",
+      "grant_types_supported",
+      "scopes_supported",
+      "code_challenge_methods_supported",
+    ]) {
+      const field = data[key];
+      if (
+        field !== undefined &&
+        (!Array.isArray(field) ||
+          field.some((entry) => typeof entry !== "string"))
+      ) {
+        throw new GuardhouseError(
+          `Discovery metadata field ${key} is invalid`,
+          "INVALID_DISCOVERY_RESPONSE",
+        );
+      }
+    }
+    return Object.freeze({ ...data }) as OpenIdConfiguration;
+  }
+
+  private requireDiscoveredEndpoint(
+    metadata: OpenIdConfiguration,
+    key: string,
+    feature: string,
+  ): string {
+    const endpoint = metadata[key];
+    if (typeof endpoint !== "string" || endpoint.trim() === "") {
+      throw new GuardhouseError(
+        `The configured issuer does not advertise ${key}`,
+        "UNSUPPORTED_FEATURE",
+        { feature },
+      );
+    }
+    return endpoint;
+  }
+
+  async createAuthorizationRequest(
+    options: CreateAuthorizationRequestOptions,
+  ): Promise<CreatedAuthorizationRequest> {
+    if (!options || typeof options !== "object") {
+      throw new GuardhouseError(
+        "Authorization request options are required",
+        "INVALID_REQUEST",
+      );
+    }
+    const redirectUri = validateAndNormalizeRedirectUri(options.redirectUri);
+    const scope = this.requireNonEmptyString(options.scope, "scope");
+    const responseMode = options.responseMode ?? "query";
+    if (responseMode !== "query" && responseMode !== "form_post") {
+      throw new GuardhouseError(
+        "responseMode must be query or form_post",
+        "INVALID_REQUEST",
+      );
+    }
+    if (
+      options.maxAgeSeconds !== undefined &&
+      (!Number.isInteger(options.maxAgeSeconds) || options.maxAgeSeconds < 0)
+    ) {
+      throw new GuardhouseError(
+        "maxAgeSeconds must be a non-negative integer",
+        "INVALID_REQUEST",
+      );
+    }
+
+    const unvalidatedResources =
+      options.resource === undefined
+        ? []
+        : typeof options.resource === "string"
+          ? [options.resource]
+          : [...options.resource];
+    if (unvalidatedResources.length > 16) {
+      throw new GuardhouseError(
+        "resource must contain no more than 16 values",
+        "INVALID_REQUEST",
+      );
+    }
+    let requestedResources: string[];
+    try {
+      requestedResources = unvalidatedResources.map((resource) =>
+        validateResourceIndicator(resource),
+      );
+    } catch (error) {
+      throw new GuardhouseError(
+        error instanceof Error
+          ? error.message
+          : "resource values must be absolute URIs without fragments",
+        "INVALID_REQUEST",
+        { cause: error },
+      );
+    }
+    const normalizeAssuranceValues = (
+      values: readonly string[] | undefined,
+      fieldName: string,
+    ): readonly string[] => {
+      if (values === undefined) return Object.freeze([]);
+      if (
+        !Array.isArray(values) ||
+        values.length > 16 ||
+        values.some(
+          (value) =>
+            typeof value !== "string" ||
+            value.trim() === "" ||
+            value.length > 128 ||
+            !/^[A-Za-z0-9._:/-]+$/.test(value),
+        )
+      ) {
+        throw new GuardhouseError(
+          `${fieldName} contains invalid values`,
+          "INVALID_REQUEST",
+        );
+      }
+      return Object.freeze(values.map((value) => value.trim()));
+    };
+    const requiredAcrValues = normalizeAssuranceValues(
+      options.requiredAcrValues,
+      "requiredAcrValues",
+    );
+    const requiredAmrValues = normalizeAssuranceValues(
+      options.requiredAmrValues,
+      "requiredAmrValues",
+    );
+
+    let applicationState = options.applicationState;
+    if (applicationState !== undefined) {
+      try {
+        const serialized = JSON.stringify(applicationState);
+        if (serialized === undefined || serialized.length > 65_536) {
+          throw new Error(
+            "application state is not serializable or is too large",
+          );
+        }
+        applicationState = JSON.parse(serialized) as unknown;
+      } catch (error) {
+        throw new GuardhouseError(
+          "applicationState must be JSON-serializable and no larger than 64 KiB",
+          "INVALID_REQUEST",
+          { cause: error },
+        );
+      }
+    }
+
+    const metadata = await this.discoverOpenIdConfiguration();
+    const authorizationEndpoint = metadata["authorization_endpoint"];
+    if (
+      typeof authorizationEndpoint !== "string" ||
+      authorizationEndpoint.trim() === ""
+    ) {
+      throw new GuardhouseError(
+        "Discovery metadata does not advertise an authorization endpoint",
+        "AUTHORIZATION_ENDPOINT_UNSUPPORTED",
+      );
+    }
+
+    const [{ codeVerifier, codeChallenge }, state, nonce] = await Promise.all([
+      generatePKCE(),
+      generateState(),
+      generateNonce(),
+    ]);
+    const createdAt = Date.now();
+    const transaction: AuthorizationTransaction = Object.freeze({
+      version: 2,
+      issuer: this.issuer,
+      clientId: this.config.clientId.trim(),
+      redirectUri,
+      state,
+      codeVerifier,
+      codeChallenge,
+      nonce,
+      requestedScope: scope,
+      requestedAudience: options.audience?.trim() || undefined,
+      requestedResources: Object.freeze(
+        [...requestedResources],
+      ),
+      requiredAcrValues,
+      requiredAmrValues,
+      prompt: options.prompt?.trim() || undefined,
+      maxAgeSeconds: options.maxAgeSeconds,
+      responseMode,
+      applicationState,
+      createdAt,
+      expiresAt: createdAt + 10 * 60 * 1000,
+      issRequired:
+        metadata["authorization_response_iss_parameter_supported"] === true,
+    });
+
+    const authorizationUrl = new URL(
+      generateAuthUrl({
+        authority: this.issuer,
+        authorizationEndpoint,
+        clientId: this.config.clientId,
+        redirectUri,
+        scope,
+        allowOfflineAccessScope: options.allowOfflineAccessScope,
+        allowAuthorizationWithoutAudience:
+          options.audiencePolicy === "oidc-optional",
+        responseType: "code",
+        state,
+        codeChallenge,
+        codeChallengeMethod: "S256",
+        nonce,
+        prompt: transaction.prompt,
+        acrValues: [...transaction.requiredAcrValues],
+        audience: transaction.requestedAudience,
+        resource: transaction.requestedResources,
+        responseMode,
+        maxAge: transaction.maxAgeSeconds,
+      }),
+    );
+    return { authorizationUrl: authorizationUrl.toString(), transaction };
+  }
 
   getSecureInputAttributes(
     inputKind: "otp" | "mfa" | "password" = "otp",
@@ -82,17 +364,61 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
       );
     }
 
-    const runtimeDomain = (options as { domain?: unknown }).domain;
-    if (typeof runtimeDomain === "string" && runtimeDomain.trim() !== "") {
+    if (Object.prototype.hasOwnProperty.call(options, "domain")) {
       throw new GuardhouseError(
         "Domain attribute is not allowed for SDK-managed cookies; use host-only cookies",
         "UNSAFE_COOKIE_DOMAIN",
       );
     }
 
-    const secure = options.secure ?? true;
-    const sameSite = options.sameSite ?? "Strict";
-    const path = options.path?.trim() || "/";
+    const runtimeSecure = (options as { secure?: unknown }).secure;
+    if (runtimeSecure !== undefined && typeof runtimeSecure !== "boolean") {
+      throw new GuardhouseError(
+        "secure must be a boolean",
+        "INVALID_COOKIE_OPTIONS",
+      );
+    }
+    const secure = runtimeSecure ?? true;
+    const runtimeSameSite = (options as { sameSite?: unknown }).sameSite;
+    if (runtimeSameSite !== undefined && typeof runtimeSameSite !== "string") {
+      throw new GuardhouseError(
+        "sameSite must be a string",
+        "INVALID_COOKIE_OPTIONS",
+      );
+    }
+    const sameSite = runtimeSameSite ?? "Lax";
+    const runtimePath = (options as { path?: unknown }).path;
+    if (runtimePath !== undefined && typeof runtimePath !== "string") {
+      throw new GuardhouseError(
+        "path must be a string",
+        "INVALID_COOKIE_OPTIONS",
+      );
+    }
+    const path = runtimePath?.trim() || "/";
+    if (!/^(?:Strict|Lax|None)$/.test(sameSite)) {
+      throw new GuardhouseError(
+        "SameSite must be Strict, Lax, or None",
+        "INVALID_COOKIE_OPTIONS",
+      );
+    }
+    if (!path.startsWith("/") || /[^\x20-\x7E]|[;\\]/.test(path)) {
+      throw new GuardhouseError(
+        "Cookie path is invalid",
+        "INVALID_COOKIE_OPTIONS",
+      );
+    }
+    if (sameSite === "None" && !secure) {
+      throw new GuardhouseError(
+        "SameSite=None requires Secure",
+        "INVALID_COOKIE_OPTIONS",
+      );
+    }
+    if (normalizedName.startsWith("__Host-") && (!secure || path !== "/")) {
+      throw new GuardhouseError(
+        "__Host- cookies require Secure and Path=/",
+        "INVALID_COOKIE_OPTIONS",
+      );
+    }
 
     const attributes = [
       `${normalizedName}=${encodeURIComponent(normalizedValue)}`,
@@ -104,11 +430,17 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
       attributes.push("Secure");
     }
 
-    if (
-      options.maxAgeSeconds !== undefined &&
-      Number.isInteger(options.maxAgeSeconds) &&
-      options.maxAgeSeconds >= 0
-    ) {
+    if (options.maxAgeSeconds !== undefined) {
+      if (
+        !Number.isSafeInteger(options.maxAgeSeconds) ||
+        options.maxAgeSeconds < 0 ||
+        options.maxAgeSeconds > 34_560_000
+      ) {
+        throw new GuardhouseError(
+          "maxAgeSeconds must be a non-negative integer",
+          "INVALID_COOKIE_OPTIONS",
+        );
+      }
       attributes.push(`Max-Age=${options.maxAgeSeconds}`);
     }
 
@@ -189,16 +521,46 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
   }
 
   async createPushedAuthorizationRequest(
-    params: Record<string, string>,
-    parEndpoint = "/connect/par",
-  ): Promise<PushedAuthorizationRequestResult> {
-    if (!params || typeof params !== "object" || Array.isArray(params)) {
-      throw new GuardhouseError("params must be an object", "INVALID_REQUEST");
+    transactionValue: AuthorizationTransaction,
+    additionalParameters: Readonly<Record<string, string>> = {},
+  ): Promise<PushedAuthorizationRequest> {
+    const transaction = this.restoreAuthorizationTransaction(transactionValue);
+    if (
+      !additionalParameters ||
+      typeof additionalParameters !== "object" ||
+      Array.isArray(additionalParameters)
+    ) {
+      throw new GuardhouseError(
+        "additionalParameters must be an object",
+        "INVALID_REQUEST",
+      );
+    }
+    const body = new URLSearchParams({
+      client_id: transaction.clientId,
+      response_type: "code",
+      redirect_uri: transaction.redirectUri,
+      scope: transaction.requestedScope,
+      state: transaction.state,
+      code_challenge: transaction.codeChallenge,
+      code_challenge_method: "S256",
+      nonce: transaction.nonce,
+      response_mode: transaction.responseMode,
+    });
+    if (transaction.requestedAudience) {
+      body.set("audience", transaction.requestedAudience);
+    }
+    for (const resource of transaction.requestedResources) {
+      body.append("resource", resource);
+    }
+    if (transaction.prompt) body.set("prompt", transaction.prompt);
+    if (transaction.maxAgeSeconds !== undefined) {
+      body.set("max_age", String(transaction.maxAgeSeconds));
+    }
+    if (transaction.requiredAcrValues.length > 0) {
+      body.set("acr_values", transaction.requiredAcrValues.join(" "));
     }
 
-    const body = new URLSearchParams();
-
-    for (const [key, value] of Object.entries(params)) {
+    for (const [key, value] of Object.entries(additionalParameters)) {
       const normalizedKey = key.trim();
       const normalizedValue = value.trim();
       const normalizedKeyLower = normalizedKey.toLowerCase();
@@ -207,10 +569,7 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
         continue;
       }
 
-      if (
-        normalizedKeyLower === "request" ||
-        normalizedKeyLower === "request_uri"
-      ) {
+      if (PAR_TRANSACTION_BOUND_PARAMETER_KEYS.has(normalizedKeyLower)) {
         throw new GuardhouseError(
           `Invalid PAR parameter: ${normalizedKey}`,
           "INVALID_REQUEST",
@@ -238,16 +597,19 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
       body.set(normalizedKey, normalizedValue);
     }
 
-    if (!this.config.clientSecret && !body.has("client_id")) {
-      body.set("client_id", this.config.clientId);
-    }
+    const metadata = await this.discoverOpenIdConfiguration();
+    const discoveredParEndpoint = this.requireDiscoveredEndpoint(
+      metadata,
+      "pushed_authorization_request_endpoint",
+      "par",
+    );
 
     this.logger.debug("Submitting PAR request", {
-      endpoint: sanitizeUrlForLogs(this.buildRequestUrl(parEndpoint)),
+      endpoint: sanitizeUrlForLogs(discoveredParEndpoint),
       params: this.sanitizeParBodyForLogs(body),
     });
 
-    const response = await this.fetch(parEndpoint, {
+    const response = await this.fetch(discoveredParEndpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -256,37 +618,106 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
       skipDpopProof: true,
     });
 
-    const data = response.data as {
-      request_uri?: string;
-      expires_in?: number;
-    };
+    const data = this.requireRecord(
+      response.data,
+      "PAR response",
+      "INVALID_PAR_RESPONSE",
+    );
 
     if (
-      typeof data?.request_uri !== "string" ||
-      data.request_uri.trim() === ""
+      typeof data["request_uri"] !== "string" ||
+      data["request_uri"].trim() === ""
     ) {
       throw new GuardhouseError(
         "PAR response does not include request_uri",
-        "PAR_ERROR",
+        "INVALID_PAR_RESPONSE",
       );
     }
 
-    if (/\s/.test(data.request_uri)) {
+    if (/\s/.test(data["request_uri"])) {
       throw new GuardhouseError(
         "PAR response contains invalid request_uri",
-        "PAR_ERROR",
+        "INVALID_PAR_RESPONSE",
       );
     }
 
+    if (
+      typeof data["expires_in"] !== "number" ||
+      !Number.isInteger(data["expires_in"]) ||
+      data["expires_in"] <= 0
+    ) {
+      throw new GuardhouseError(
+        "PAR response contains invalid expires_in",
+        "INVALID_PAR_RESPONSE",
+      );
+    }
+
+    const requestUri = data["request_uri"];
+    if (this.pushedAuthorizationBindings.has(requestUri)) {
+      throw new GuardhouseError(
+        "PAR request_uri was already issued",
+        "PAR_REQUEST_URI_REPLAY",
+      );
+    }
+    const expiresIn = data["expires_in"];
+    const authorizationEndpoint = this.requireDiscoveredEndpoint(
+      metadata,
+      "authorization_endpoint",
+      "authorization",
+    );
+    this.pushedAuthorizationBindings.set(requestUri, {
+      state: body.get("state")!,
+      expiresAt: Date.now() + expiresIn * 1000,
+      authorizationEndpoint,
+    });
     return {
-      requestUri: data.request_uri,
-      expiresIn:
-        typeof data.expires_in === "number" ? data.expires_in : undefined,
-    };
+      requestUri,
+      expiresIn,
+    } as PushedAuthorizationRequest;
   }
 
-  buildLogoutUrl(request: LogoutRequest = {}): string {
-    const logoutEndpoint = request.logoutEndpoint || "/connect/logout";
+  buildPushedAuthorizationUrl(
+    request: PushedAuthorizationRequest,
+    transactionValue: AuthorizationTransaction,
+  ): string {
+    const transaction = this.restoreAuthorizationTransaction(transactionValue);
+    const binding = this.pushedAuthorizationBindings.get(request.requestUri);
+    if (!binding || binding.expiresAt <= Date.now()) {
+      this.pushedAuthorizationBindings.delete(request.requestUri);
+      throw new GuardhouseError(
+        "PAR request_uri is unknown, expired, or already consumed",
+        "PAR_REQUEST_URI_INVALID",
+      );
+    }
+    if (binding.state !== transaction.state) {
+      throw new GuardhouseError(
+        "PAR request_uri is not bound to this authorization transaction",
+        "PAR_TRANSACTION_MISMATCH",
+      );
+    }
+    this.pushedAuthorizationBindings.delete(request.requestUri);
+    const url = new URL(binding.authorizationEndpoint);
+    url.search = "";
+    url.hash = "";
+    url.searchParams.set("client_id", this.config.clientId.trim());
+    url.searchParams.set("request_uri", request.requestUri);
+    return url.toString();
+  }
+
+  private buildLogoutUrlFromMetadata(request: LogoutRequest): string {
+    const discoveredEndpoint =
+      this.latestDiscoveryMetadata?.["end_session_endpoint"];
+    if (
+      typeof discoveredEndpoint !== "string" ||
+      discoveredEndpoint.trim() === ""
+    ) {
+      throw new GuardhouseError(
+        "The configured issuer does not advertise end_session_endpoint",
+        "UNSUPPORTED_FEATURE",
+        { feature: "logout" },
+      );
+    }
+    const logoutEndpoint = discoveredEndpoint;
     const logoutUrl = new URL(this.buildRequestUrl(logoutEndpoint));
 
     if (request.postLogoutRedirectUri) {
@@ -319,7 +750,10 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
 
       // Align logout state validation with the SDK's Base64URL-safe state
       // generation while still enforcing a strict, URI-safe allowlist.
-      if (normalizedState.length > 128 || !LOGOUT_STATE_PATTERN.test(normalizedState)) {
+      if (
+        normalizedState.length > 128 ||
+        !LOGOUT_STATE_PATTERN.test(normalizedState)
+      ) {
         throw new GuardhouseError(
           "state must be 1-128 characters and contain only letters, numbers, hyphens, and underscores",
           "INVALID_REQUEST",
@@ -336,25 +770,30 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
     return logoutUrl.toString();
   }
 
+  async buildLogoutUrl(request: LogoutRequest = {}): Promise<string> {
+    await this.discoverOpenIdConfiguration();
+    return this.buildLogoutUrlFromMetadata(request);
+  }
+
   async prepareSharedDeviceLogout(
     request: LogoutRequest = {},
   ): Promise<string> {
-    await this.clearSessionState();
-
-    return this.buildLogoutUrl({
+    const logoutUrl = await this.buildLogoutUrl({
       ...request,
       federated: request.federated ?? true,
     });
+    await this.clearSessionState();
+    return logoutUrl;
   }
 
   async discoverOpenIdConfiguration(
     discoveryEndpoint = "/.well-known/openid-configuration",
-  ): Promise<Record<string, unknown>> {
+  ): Promise<OpenIdConfiguration> {
     const discoveryUrl = new URL(this.buildRequestUrl(discoveryEndpoint));
     const authorityUrl = new URL(this.baseURL);
     const cacheKey = discoveryUrl.toString();
     const cacheContext = {
-      authority: this.baseURL,
+      authority: this.issuer,
       clientId: this.config.clientId,
     };
 
@@ -374,6 +813,7 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
           cachedContext.clientId === cacheContext.clientId;
 
         if (cachedEntry.expiresAt > Date.now() && contextMatches) {
+          this.latestDiscoveryMetadata = { ...cachedEntry.data };
           return { ...cachedEntry.data };
         }
 
@@ -393,22 +833,14 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
       },
     });
 
-    if (!response.data || typeof response.data !== "object") {
-      throw new GuardhouseError(
-        "Discovery response is invalid",
-        "DISCOVERY_ERROR",
-      );
-    }
-
-    const discoveryData = {
-      ...(response.data as Record<string, unknown>),
-    };
+    const discoveryData = this.decodeDiscoveryMetadata(response.data);
 
     this.assertTrustedDiscoveryMetadata(discoveryData, authorityUrl);
 
     const issuer = discoveryData["issuer"];
-    const normalizedIssuer = typeof issuer === "string" ? issuer.trim() : "";
-    if (normalizedIssuer !== this.baseURL) {
+    const normalizedIssuer =
+      typeof issuer === "string" ? new URL(issuer).href : "";
+    if (normalizedIssuer !== this.issuer) {
       throw new GuardhouseError(
         "Discovery issuer must exactly match configured authority",
         "ISSUER_AUTHORITY_MISMATCH",
@@ -430,6 +862,8 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
       });
       this.discoveryCacheContext.set(cacheKey, cacheContext);
     }
+
+    this.latestDiscoveryMetadata = { ...discoveryData };
 
     return { ...discoveryData };
   }
@@ -556,8 +990,7 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
   async registerClient(
     metadata: Record<string, unknown>,
     initialAccessToken: string,
-    registrationEndpoint = "/connect/register",
-  ): Promise<Record<string, unknown>> {
+  ): Promise<DynamicClientRegistrationResponse> {
     this.assertRecentUserInteraction("Client registration");
 
     if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
@@ -611,7 +1044,13 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
       }
     }
 
-    const response = await this.fetch(registrationEndpoint, {
+    const metadataDocument = await this.discoverOpenIdConfiguration();
+    const discoveredRegistrationEndpoint = this.requireDiscoveredEndpoint(
+      metadataDocument,
+      "registration_endpoint",
+      "dynamic_client_registration",
+    );
+    const response = await this.fetch(discoveredRegistrationEndpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -620,14 +1059,36 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
       token: normalizedInitialAccessToken,
     });
 
-    if (!response.data || typeof response.data !== "object") {
+    const registration = this.requireRecord(
+      response.data,
+      "Client registration response",
+      "INVALID_REGISTRATION_RESPONSE",
+    );
+    if (
+      typeof registration["client_id"] !== "string" ||
+      registration["client_id"].trim() === ""
+    ) {
       throw new GuardhouseError(
-        "Client registration response is invalid",
-        "REGISTRATION_ERROR",
+        "Client registration response must contain client_id",
+        "INVALID_REGISTRATION_RESPONSE",
       );
     }
-
-    return response.data as Record<string, unknown>;
+    for (const key of [
+      "client_secret",
+      "registration_access_token",
+      "registration_client_uri",
+    ] as const) {
+      if (
+        registration[key] !== undefined &&
+        typeof registration[key] !== "string"
+      ) {
+        throw new GuardhouseError(
+          `Client registration response field ${key} is invalid`,
+          "INVALID_REGISTRATION_RESPONSE",
+        );
+      }
+    }
+    return { ...registration } as DynamicClientRegistrationResponse;
   }
 
   async assertAuthorizationPageClickjackingProtection(
@@ -652,12 +1113,17 @@ export class GuardhouseClientAdvanced extends GuardhouseClientToken {
 
     const warnings: string[] = [];
 
-    if (!xFrameOptions) {
-      warnings.push("X-Frame-Options header is missing");
-    }
-
-    if (!frameAncestorsPolicy) {
-      warnings.push("CSP frame-ancestors directive is missing");
+    const validXFrameOptions =
+      typeof xFrameOptions === "string" &&
+      /^(?:DENY|SAMEORIGIN)$/i.test(xFrameOptions);
+    if (frameAncestorsPolicy) {
+      if (!/^frame-ancestors\s+'(?:none|self)'$/i.test(frameAncestorsPolicy)) {
+        warnings.push(
+          "CSP frame-ancestors directive is not an exact 'none' or 'self' policy",
+        );
+      }
+    } else if (!validXFrameOptions) {
+      warnings.push("No enforceable clickjacking policy was found");
     }
 
     if (warnings.length > 0) {

@@ -30,7 +30,7 @@ GH_REDIRECT_URI=com.example.guardhouse://callback
 GH_AUTHORIZATION_ENDPOINT=/connect/authorize
 GH_REGISTRATION_ENDPOINT=/account/signup?returnUrl=
 GH_TOKEN_ENDPOINT=/connect/token
-GH_REVOCATION_ENDPOINT=/connect/revocation
+GH_REVOCATION_ENDPOINT=/connect/revoke
 ```
 
 3. Install dependencies:

@@ -11,6 +11,10 @@ export type {
   StorageAdapter,
   ProtectedRouteProps,
   WithAuthenticationRequiredOptions,
+  RedirectErrorRenderContext,
+  AuthContextValue,
+  GuardhouseProviderProps,
+  AudiencePolicy,
 } from "./types";
 export {
   SessionStorageAdapter,
@@ -21,4 +25,6 @@ export {
   parseQueryParams,
   removeQueryParams,
   validateIdToken,
+  getCurrentReturnTo,
+  normalizeReturnTo,
 } from "./utils";

@@ -8,7 +8,7 @@ describe("GuardhouseConstants", () => {
         ".well-known/openid-configuration",
       );
       expect(GuardhouseConstants.Endpoints.WellKnownJwks).toBe(
-        ".well-known/jwks.json",
+        ".well-known/jwks",
       );
       expect(GuardhouseConstants.Endpoints.ConnectToken).toBe("connect/token");
       expect(GuardhouseConstants.Endpoints.ConnectIntrospect).toBe(

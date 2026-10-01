@@ -1,6 +1,6 @@
 {
   "name": "@guardhouse/core",
-  "version": "1.0.1",
+  "version": "2.0.0-beta.1",
   "description": "Universal JavaScript/TypeScript SDK for OAuth 2.0 with PKCE",
   "keywords": [
     "guardhouse",
@@ -33,25 +33,25 @@
     "url": "git+https://github.com/legiosoft/guardhouse-sdk-js.git"
   },
   "scripts": {
-    "build": "tsup src/index.ts --format cjs,esm --dts --clean",
-    "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
+    "build": "tsup --config tsup.config.ts",
+    "dev": "tsup --config tsup.config.ts --watch",
     "test": "jest --passWithNoTests",
     "test:watch": "jest --watch --passWithNoTests",
     "test:coverage": "jest --coverage --passWithNoTests",
     "typecheck": "tsc --noEmit",
+    "typecheck:public": "tsc --noEmit -p type-tests/tsconfig.json",
     "lint": "eslint \"src/**/*.ts\"",
     "lint:fix": "eslint \"src/**/*.ts\" --fix",
     "format": "prettier --write \"src/**/*.{ts,md,json}\""
-  },
-  "dependencies": {
-    "react-native": "0.75.5"
   },
   "peerDependencies": {
     "typescript": ">=5.0.0"
   },
   "devDependencies": {
+    "@babel/preset-env": "^7.29.0",
     "@eslint/js": "^9.39.3",
     "@types/jest": "^29.5.14",
+    "babel-jest": "^29.7.0",
     "eslint": "^9.39.3",
     "eslint-config-prettier": "^10.1.8",
     "globals": "^17.3.0",
@@ -62,8 +62,28 @@
     "typescript-eslint": "^8.56.1"
   },
   "jest": {
-    "preset": "ts-jest",
     "testEnvironment": "node",
+    "transform": {
+      "^.+\\.tsx?$": "ts-jest",
+      "^.+\\.m?js$": [
+        "babel-jest",
+        {
+          "presets": [
+            [
+              "@babel/preset-env",
+              {
+                "targets": {
+                  "node": "current"
+                }
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    "transformIgnorePatterns": [
+      "node_modules[\\\\/](?!jose[\\\\/])"
+    ],
     "testMatch": [
       "**/__tests__/**/*.test.[jt]s?(x)"
     ],
@@ -87,5 +107,8 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "dependencies": {
+    "jose": "^6.2.3"
   }
 }

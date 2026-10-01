@@ -154,6 +154,6 @@ export function resolveReactNativeCryptoAdapter(
   }
 
   throw new Error(
-    "No native SHA-256 provider available. Install react-native-quick-crypto or pass a custom cryptoAdapter to GuardhouseProvider.",
+    "No native SHA-256 provider available. Install react-native-quick-crypto or pass a custom cryptoAdapter to GuardhouseClient.",
   );
 }

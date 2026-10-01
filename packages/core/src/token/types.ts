@@ -1,65 +1,50 @@
 export interface JWTPayload {
-  sub?: string;
-  name?: string;
-  email?: string;
-  picture?: string;
-  iss?: string;
-  aud?: string | string[];
-  azp?: string;
-  acr?: string;
-  amr?: string[];
-  auth_time?: number;
-  at_hash?: string;
-  c_hash?: string;
-  exp?: number;
-  nbf?: number;
-  iat?: number;
-  jti?: string;
-  nonce?: string;
-  sid?: string;
-  cnf?: {
-    jkt?: string;
-    [key: string]: unknown;
+  readonly sub?: string;
+  readonly name?: string;
+  readonly email?: string;
+  readonly picture?: string;
+  readonly iss?: string;
+  readonly aud?: string | readonly string[];
+  readonly azp?: string;
+  readonly acr?: string;
+  readonly amr?: readonly string[];
+  readonly auth_time?: number;
+  readonly at_hash?: string;
+  readonly c_hash?: string;
+  readonly exp?: number;
+  readonly nbf?: number;
+  readonly iat?: number;
+  readonly jti?: string;
+  readonly nonce?: string;
+  readonly sid?: string;
+  readonly cnf?: {
+    readonly jkt?: string;
+    readonly [key: string]: unknown;
   };
-  profile?: Record<string, unknown>;
-  address?: Record<string, unknown>;
-  roles?: string[];
-  scopes?: string[];
-  [key: string]: unknown;
+  readonly profile?: string;
+  readonly address?: Readonly<Record<string, unknown>>;
+  readonly roles?: readonly string[];
+  readonly scopes?: readonly string[];
+  readonly [key: string]: unknown;
 }
 
 export interface JWTHeader {
-  alg: string;
-  typ?: string;
-  kid?: string;
-  jku?: string;
-  crit?: string[];
-  [key: string]: unknown;
+  readonly alg: string;
+  readonly typ?: string;
+  readonly kid?: string;
+  readonly jku?: string;
+  readonly crit?: readonly string[];
+  readonly [key: string]: unknown;
 }
 
-export interface DecodedJWT {
-  header: JWTHeader;
-  payload: JWTPayload;
-}
-
-export interface TokenValidationResult {
-  valid: boolean;
-  signatureVerified: boolean;
-  expired: boolean;
-  notBeforeValid: boolean;
-  issuerValid: boolean;
-  audienceValid: boolean;
-  azpValid: boolean;
-  kidValid: boolean;
-  jwkMetadataValid: boolean;
-  nonceValid: boolean;
-  acrValid: boolean;
-  authTimeValid: boolean;
-  amrValid: boolean;
-  jtiValid: boolean;
-  cnfValid: boolean;
-  nestedClaimsTrusted: boolean;
-  errors: string[];
+/**
+ * A parsed JWT whose signature and claims have not been verified.
+ *
+ * Never use values from this object for authentication or authorization.
+ */
+export interface UntrustedDecodedJWT {
+  readonly header: JWTHeader;
+  readonly payload: JWTPayload;
 }
 
 export type ExpectedJwkKeyType = "RSA" | "EC" | "oct" | "OKP";
@@ -89,44 +74,6 @@ export interface JwkMetadataValidationResult {
   algValid: boolean;
   keyOpsValid: boolean;
   errors: string[];
-}
-
-export interface TokenValidationOptions {
-  issuer?: string;
-  audience?: string;
-  clientId?: string;
-  nonce?: string;
-  verifiedSignature?: VerifiedSignatureProof;
-  /** @deprecated Prefer verifiedSignature for type-safe verification context. */
-  signatureVerified?: boolean;
-  trustedJkuOrigins?: string[];
-  supportedCriticalHeaders?: string[];
-  allowedAlgorithms?: string[];
-  expectedKid?: string;
-  allowedKids?: string[];
-  resolvedJwk?: JwkMetadata;
-  expectedKeyType?: ExpectedJwkKeyType;
-  requiredAcrValues?: string[];
-  maxAgeSeconds?: number;
-  requiredAmrValues?: string[];
-  requirePhishingResistantMfa?: boolean;
-  requiredCnfJkt?: string;
-  enforceUniqueJti?: boolean;
-  jtiReplayCache?: {
-    consume(jti: string): boolean;
-  };
-  trustedNestedClaimPaths?: string[];
-  allowUntrustedNestedClaims?: boolean;
-  /** Clock skew tolerance in seconds. */
-  clockSkewTolerance?: number;
-  debug?: boolean;
-}
-
-export interface VerifiedSignatureProof {
-  verified: true;
-  algorithm: string;
-  kid?: string;
-  keyType?: ExpectedJwkKeyType;
 }
 
 export interface OidcHashValidationOptions {

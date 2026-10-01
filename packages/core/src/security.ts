@@ -15,6 +15,10 @@ const UNSAFE_OBJECT_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 const PUNYCODE_LABEL_PREFIX = "xn--";
 
 const MAX_SAFE_COMPARE_BYTES = 4096;
+const ABSOLUTE_URI_PATTERN = /^[A-Za-z][A-Za-z0-9+.-]*:/;
+// RFC 3986 URIs cannot contain raw whitespace or ASCII control characters.
+// eslint-disable-next-line no-control-regex -- validates protocol input
+const RAW_URI_WHITESPACE_OR_CONTROL_PATTERN = /[\u0000-\u0020\u007F]/;
 
 type TimingSafeComparable = string | Uint8Array;
 
@@ -127,7 +131,43 @@ export function validateRedirectUri(redirectUri: string): URL {
 export function validateAndNormalizeRedirectUri(redirectUri: string): string {
   const normalizedRedirectUri = redirectUri.trim();
   validateRedirectUri(normalizedRedirectUri);
+
   return normalizedRedirectUri;
+}
+
+/**
+ * Validates an RFC 8707 resource indicator.
+ *
+ * Resource indicators are absolute URIs, not necessarily HTTP URLs. This is
+ * why values such as `urn:example:resource` are accepted while relative
+ * references, fragments, raw whitespace, and control characters are rejected.
+ */
+export function validateResourceIndicator(resource: string): string {
+  if (typeof resource !== "string" || resource.length === 0) {
+    throw new Error("resource must be a non-empty absolute URI");
+  }
+  if (resource !== resource.trim()) {
+    throw new Error("resource must not contain surrounding whitespace");
+  }
+  if (
+    RAW_URI_WHITESPACE_OR_CONTROL_PATTERN.test(resource) ||
+    !ABSOLUTE_URI_PATTERN.test(resource)
+  ) {
+    throw new Error("resource must be an absolute URI without whitespace");
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(resource);
+  } catch {
+    throw new Error("resource must be a valid absolute URI");
+  }
+
+  if (parsed.hash || resource.includes("#")) {
+    throw new Error("resource must not contain a fragment");
+  }
+
+  return resource;
 }
 
 export function sanitizeUrlForLogs(value: string): string {

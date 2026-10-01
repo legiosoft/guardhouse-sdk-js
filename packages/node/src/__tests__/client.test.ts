@@ -37,7 +37,7 @@ describe("GuardhouseNodeClient", () => {
         json: async () => ({
           access_token: "test-access-token",
           expires_in: 3600,
-          refresh_token: "test-refresh-token",
+          token_type: "Bearer",
         }),
         text: async () => "",
       } as Response);
@@ -76,7 +76,7 @@ describe("GuardhouseNodeClient", () => {
         json: async () => ({
           access_token: "new-access-token",
           expires_in: 3600,
-          refresh_token: "new-refresh-token",
+          token_type: "Bearer",
         }),
         text: async () => "",
       } as Response);
@@ -96,7 +96,7 @@ describe("GuardhouseNodeClient", () => {
         json: async () => ({
           access_token: "new-access-token",
           expires_in: 3600,
-          refresh_token: "new-refresh-token",
+          token_type: "Bearer",
         }),
         text: async () => "",
       } as Response);
@@ -133,7 +133,7 @@ describe("GuardhouseNodeClient", () => {
           json: async () => ({
             access_token: "refreshed-access-token",
             expires_in: 3600,
-            refresh_token: "new-refresh-token",
+            token_type: "Bearer",
           }),
           text: async () => "",
         } as Response);
@@ -189,6 +189,7 @@ describe("GuardhouseNodeClient", () => {
         json: async () => ({
           access_token: "refreshed-access-token",
           expires_in: 3600,
+          token_type: "Bearer",
           refresh_token: "new-refresh-token",
         }),
         text: async () => "",

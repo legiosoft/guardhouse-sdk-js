@@ -70,34 +70,56 @@ From repository root:
 
 ```bash
 npm ci
+npm run release:check
+```
+
+The release check runs package tests, typechecks, lint, builds, a clean
+tarball-consumer smoke test, and a production dependency audit. The same check
+runs for pull requests in GitHub Actions.
+
+Before publishing, use a reachable test Guardhouse server with a separate
+authorization-code client and service client. In the React example, verify a
+protected-route login, callback URL cleanup, return to the original path,
+reload, refresh, and logout. For Node, verify service-token issuance and run
+`examples/node/resource-example.ts` against a token issued for its audience to
+check JWT middleware. A passing mocked test suite cannot establish these live
+flows.
+
+The individual commands are:
+
+`npm test` and `npm run typecheck` build Core first so workspace consumers
+resolve fresh declarations even in a clean checkout where `dist/` is absent.
+
+```bash
+npm ci
+npm test
+npm run typecheck
+npm run lint
 npm run build
 npm pack --dry-run -w @guardhouse/core
 npm pack --dry-run -w @guardhouse/react
-npm pack --dry-run -w @guardhouse/node --tag beta
-npm pack --dry-run -w @guardhouse/react-native --tag beta
+npm pack --dry-run -w @guardhouse/node
+npm pack --dry-run -w @guardhouse/react-native
 ```
 
 For this release train, set versions to:
 
-- `@guardhouse/core`: `1.0.0` (stable)
-- `@guardhouse/react`: `1.0.0` (stable)
-- `@guardhouse/node`: `1.0.0-beta.1` (beta)
-- `@guardhouse/react-native`: `1.0.0-beta.1` (beta)
+- `@guardhouse/core`: `2.0.0-beta.1`
+- `@guardhouse/react`: `2.0.0-beta.1`
+- `@guardhouse/node`: `1.0.2-beta.1`
+- `@guardhouse/react-native`: `1.0.2-beta.1`
 
-## Stable Publish (Core and React)
+Node and React Native retain their existing prerelease version while pinning the
+security-hardened Core `2.0.0-beta.1` exactly. Core and React use a major beta
+because this release deliberately removes unsafe public APIs.
 
-Publish in dependency order (`core` first):
+## Beta Publish
 
-```bash
-npm publish -w @guardhouse/core --access public
-npm publish -w @guardhouse/react --access public
-```
-
-## Beta Publish (Node and React Native)
-
-Publish beta packages after stable dependencies are live:
+Publish every prerelease with the `beta` tag so npm's `latest` tag remains on the current stable release. Publish in dependency order (`core` first):
 
 ```bash
+npm publish -w @guardhouse/core --tag beta --access public
+npm publish -w @guardhouse/react --tag beta --access public
 npm publish -w @guardhouse/node --tag beta --access public
 npm publish -w @guardhouse/react-native --tag beta --access public
 ```
@@ -107,17 +129,17 @@ npm publish -w @guardhouse/react-native --tag beta --access public
 When publishing all packages, use this order:
 
 1. `@guardhouse/core`
-2. `@guardhouse/node`
-3. `@guardhouse/react`
+2. `@guardhouse/react`
+3. `@guardhouse/node`
 4. `@guardhouse/react-native`
 
 ## Verify Published Versions
 
 ```bash
-npm view @guardhouse/core version
-npm view @guardhouse/react version
-npm view @guardhouse/node version
-npm view @guardhouse/react-native version
+npm view @guardhouse/core@beta version
+npm view @guardhouse/react@beta version
+npm view @guardhouse/node@beta version
+npm view @guardhouse/react-native@beta version
 npm view @guardhouse/core dist-tags
 npm view @guardhouse/react dist-tags
 npm view @guardhouse/node dist-tags
@@ -126,7 +148,7 @@ npm view @guardhouse/react-native dist-tags
 
 ## Beta Feedback
 
-Beta packages (`@guardhouse/node`, `@guardhouse/react-native`) are feature-complete but may have:
+Beta packages are feature-complete but may have:
 
 - API changes before stable release
 - Additional test coverage needed
@@ -134,37 +156,11 @@ Beta packages (`@guardhouse/node`, `@guardhouse/react-native`) are feature-compl
 
 Report issues at: https://github.com/legiosoft/guardhouse-sdk-js/issues
 
-## CI/CD (GitHub Actions) Example
+## Pull-request verification
 
-Store `NPM_TOKEN` in GitHub Secrets, then configure npm before publish:
-
-```yaml
-- name: Setup Node
-  uses: actions/setup-node@v4
-  with:
-    node-version: 20
-    registry-url: https://registry.npmjs.org
-
-- name: Configure npm token
-  run: npm config set //registry.npmjs.org/:_authToken "${NPM_TOKEN}"
-  env:
-    NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-- name: Build
-  run: npm run build
-
-- name: Publish core stable
-  run: npm publish -w @guardhouse/core --access public
-
-- name: Publish react stable
-  run: npm publish -w @guardhouse/react --access public
-
-- name: Publish node beta
-  run: npm publish -w @guardhouse/node --tag beta --access public
-
-- name: Publish react-native beta
-  run: npm publish -w @guardhouse/react-native --tag beta --access public
-```
+`.github/workflows/release-check.yml` runs `npm run release:check` and builds
+the maintained examples. It has read-only repository permissions and no npm
+publishing credentials.
 
 ## Common Errors
 

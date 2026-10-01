@@ -5,7 +5,7 @@ import { getCryptoAdapter } from "../crypto";
 import { base64UrlDecodeToBytes } from "./base64";
 import { tryLoadNodeCrypto } from "./node-crypto";
 import type {
-  DecodedJWT,
+  UntrustedDecodedJWT,
   OidcHashValidationOptions,
   OidcHashValidationResult,
 } from "./types";
@@ -96,7 +96,7 @@ async function computeOidcHashClaim(
 }
 
 export async function validateOidcHashClaims(
-  decodedJWT: DecodedJWT,
+  decodedJWT: UntrustedDecodedJWT,
   options: OidcHashValidationOptions,
 ): Promise<OidcHashValidationResult> {
   const {
