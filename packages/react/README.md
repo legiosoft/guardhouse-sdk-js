@@ -212,6 +212,14 @@ export function AuthGate() {
 ## Integration Checklist
 
 - Register exact `redirectUri` and `logoutRedirectUri` in your IdP client settings.
+- For separate OAuth clients on the same origin (for example, `/portal/` and
+  `/console/`), configure distinct `clientId` values and each client's registered
+  redirect URIs. Sessions are isolated by issuer and client ID, not URL path.
+- Each client completes its own authorization flow, which may reuse an existing
+  IdP SSO session. Logout uses only the current client's ID token and clears its
+  local session; the IdP controls whether the shared SSO session also ends.
+- When upgrading from v1, expect users to authenticate again because legacy
+  sessions are discarded.
 - Set a valid `audience` or `resource`, or explicitly choose
   `audiencePolicy: "oidc-optional"` for identity-only OIDC.
 - If requesting `offline_access`, set `allowOfflineAccessScope: true`.

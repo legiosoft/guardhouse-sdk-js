@@ -37,6 +37,10 @@ jest.mock("@guardhouse/core", () => {
 const { GuardhouseProvider, useAuth } = require("../context");
 const { ProtectedRoute } = require("../ProtectedRoute");
 const { SessionStorageAdapter } = require("../utils");
+const {
+  getOidcSessionStorageKey,
+  getLogoutStateStorageKey,
+} = require("../security-state");
 
 const baseConfig = {
   authority: "https://auth.test/",
@@ -270,6 +274,138 @@ describe("GuardhouseProvider operation safety", () => {
     expect(mockClients[0].buildLogoutUrl).not.toHaveBeenCalled();
     expect(global.window.location.href).toBe("https://app.test/");
 
+    await TestRenderer.act(async () => renderer.unmount());
+  });
+
+  it.each([
+    ["client-a", "client-b", false],
+    ["client-b", "client-a", false],
+    ["client-a", "client-b", true],
+    ["client-b", "client-a", true],
+  ])(
+    "isolates logout after navigating /%s to /%s (destination session: %s)",
+    async (source, destination, hasDestinationSession) => {
+      installBrowserStorage({}, `https://app.test/${source}/`);
+      const makeSession = (clientId) =>
+        storedSession({
+          clientId,
+          accessToken: `${clientId}-access-token`,
+          idToken: `${clientId}-id-token`,
+          expiresAt: 2_000_000_000,
+          identity: identity({ clientId, audiences: [clientId] }),
+        });
+      const sourceSession = makeSession(source);
+      const destinationSession = makeSession(destination);
+      const sourceKey = getOidcSessionStorageKey(baseConfig.authority, source);
+      const destinationKey = getOidcSessionStorageKey(
+        baseConfig.authority,
+        destination,
+      );
+      const sourceSerialized = JSON.stringify(sourceSession);
+      global.sessionStorage.setItem(sourceKey, sourceSerialized);
+      if (hasDestinationSession) {
+        global.sessionStorage.setItem(
+          destinationKey,
+          JSON.stringify(destinationSession),
+        );
+      }
+      mockVerifyIdToken.mockImplementation(async (token) => ({
+        payload: { sub: "user-1" },
+        identity:
+          token === sourceSession.idToken
+            ? sourceSession.identity
+            : destinationSession.identity,
+      }));
+      mockGetUserInfo.mockResolvedValue({ sub: "user-1" });
+
+      let renderer;
+      await TestRenderer.act(async () => {
+        renderer = TestRenderer.create(
+          provider({ ...baseConfig, clientId: source }),
+        );
+      });
+      await flushEffects();
+      expect(latestAuth.isAuthenticated).toBe(true);
+      await TestRenderer.act(async () => renderer.unmount());
+
+      // Address-bar navigation creates a new app but retains this tab's storage.
+      global.window.location.href = `https://app.test/${destination}/`;
+      mockVerifyIdToken.mockClear();
+      await TestRenderer.act(async () => {
+        renderer = TestRenderer.create(
+          provider({
+            ...baseConfig,
+            clientId: destination,
+            logoutRedirectUri: `https://app.test/${destination}/`,
+          }),
+        );
+      });
+      await flushEffects();
+      expect(latestAuth).toMatchObject({
+        isAuthenticated: hasDestinationSession,
+        isLoading: false,
+      });
+      expect(mockVerifyIdToken).not.toHaveBeenCalledWith(
+        sourceSession.idToken,
+        expect.anything(),
+      );
+      await TestRenderer.act(async () => {
+        expect(await latestAuth.getAccessToken()).toBe(
+          hasDestinationSession ? destinationSession.accessToken : null,
+        );
+      });
+
+      await TestRenderer.act(async () => latestAuth.logout());
+      expect(mockClients[1].buildLogoutUrl).toHaveBeenCalledWith({
+        postLogoutRedirectUri: `https://app.test/${destination}/`,
+        idTokenHint: hasDestinationSession
+          ? destinationSession.idToken
+          : undefined,
+        state: "generated-state-value",
+        federated: undefined,
+      });
+      expect(global.sessionStorage.getItem(sourceKey)).toBe(sourceSerialized);
+      expect(global.sessionStorage.getItem(destinationKey)).toBeNull();
+      expect(
+        global.sessionStorage.getItem(
+          getLogoutStateStorageKey(baseConfig.authority, destination),
+        ),
+      ).toBe("generated-state-value");
+      expect(mockRefreshOidcSession).not.toHaveBeenCalled();
+      expect(global.window.location.href).toBe(
+        "https://auth.test/connect/logout",
+      );
+      await TestRenderer.act(async () => renderer.unmount());
+    },
+  );
+
+  it("never uses a legacy shared session as a logout hint", async () => {
+    const legacySession = JSON.stringify({
+      accessToken: "client-b-access-token",
+      idToken: "client-b-id-token",
+      tokenType: "Bearer",
+      expiresAt: 2_000_000_000,
+      user: { sub: "user-1" },
+      oidc: { issuer: "https://auth.test/" },
+    });
+    global.sessionStorage.setItem("gh_oidc_session", legacySession);
+
+    let renderer;
+    await TestRenderer.act(async () => {
+      renderer = TestRenderer.create(provider(baseConfig));
+    });
+    await flushEffects();
+    expect(latestAuth.isAuthenticated).toBe(false);
+    expect(global.sessionStorage.getItem("gh_oidc_session")).toBeNull();
+
+    // A v1 app may write the shared key again after this provider initializes.
+    global.sessionStorage.setItem("gh_oidc_session", legacySession);
+    await TestRenderer.act(async () => latestAuth.logout());
+    expect(mockClients[0].buildLogoutUrl).toHaveBeenCalledWith(
+      expect.objectContaining({ idTokenHint: undefined }),
+    );
+    expect(global.sessionStorage.getItem("gh_oidc_session")).toBeNull();
+    expect(mockVerifyIdToken).not.toHaveBeenCalled();
     await TestRenderer.act(async () => renderer.unmount());
   });
 
@@ -652,6 +788,17 @@ describe("GuardhouseProvider operation safety", () => {
     });
     expect(global.sessionStorage.getItem(clientBSessionKey)).toBeNull();
     expect(mockVerifyIdToken).not.toHaveBeenCalled();
+
+    // Logout must also reject a foreign record written after initialization.
+    global.sessionStorage.setItem(
+      clientBSessionKey,
+      JSON.stringify(storedSession()),
+    );
+    await TestRenderer.act(async () => latestAuth.logout());
+    expect(mockClients[0].buildLogoutUrl).toHaveBeenCalledWith(
+      expect.objectContaining({ idTokenHint: undefined }),
+    );
+    expect(global.sessionStorage.getItem(clientBSessionKey)).toBeNull();
 
     await TestRenderer.act(async () => renderer.unmount());
   });
