@@ -35,12 +35,13 @@ const expectedFiles = [
   "package.json",
 ].sort();
 
-function runNode(file, args, cwd = root) {
+function runNode(file, args, cwd = root, extraEnv = {}) {
   const result = spawnSync(process.execPath, [file, ...args], {
     cwd,
     encoding: "utf8",
     maxBuffer: 10 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, ...extraEnv },
   });
 
   if (result.error || result.status !== 0) {
@@ -111,6 +112,7 @@ try {
     "--package-lock=false",
     ...archives,
     "react@18.3.1",
+    "react-dom@18.3.1",
     "@types/react@18.3.28",
     "typescript@5.9.3",
   ]);
@@ -174,6 +176,31 @@ try {
     ["--project", join(temporaryRoot, "tsconfig.json")],
     temporaryRoot,
   );
+
+  for (const reactVersion of ["18.3.1", "19.2.8"]) {
+    if (reactVersion !== "18.3.1") {
+      runNode(npmCli, [
+        "install",
+        "--prefix",
+        temporaryRoot,
+        "--ignore-scripts",
+        "--no-audit",
+        "--no-fund",
+        "--legacy-peer-deps",
+        "--package-lock=false",
+        `react@${reactVersion}`,
+        `react-dom@${reactVersion}`,
+      ]);
+    }
+    console.log(`Browser authentication checks with React ${reactVersion}`);
+    const browserResult = runNode(
+      "--test",
+      ["--test-concurrency=1", "tests/browser/auth-flow.test.mjs"],
+      root,
+      { GUARDHOUSE_BROWSER_CONSUMER_ROOT: temporaryRoot },
+    );
+    console.log(browserResult);
+  }
 
   console.log(
     "All four packed SDKs install and expose their public entry points.",

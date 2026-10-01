@@ -277,6 +277,94 @@ describe("GuardhouseProvider operation safety", () => {
     await TestRenderer.act(async () => renderer.unmount());
   });
 
+  it("does not restart login while the browser is navigating to logout", async () => {
+    const session = storedSession({ expiresAt: 2_000_000_000 });
+    global.sessionStorage.setItem(
+      getOidcSessionStorageKey(baseConfig.authority, baseConfig.clientId),
+      JSON.stringify(session),
+    );
+    mockVerifyIdToken.mockResolvedValue({
+      payload: { sub: "user-1" },
+      identity: session.identity,
+    });
+    mockGetUserInfo.mockResolvedValue({ sub: "user-1" });
+    mockCreateAuthorizationRequest.mockResolvedValue({
+      authorizationUrl: "https://auth.test/connect/authorize",
+      transaction: authorizationTransaction("new-login-state"),
+    });
+    // A location assignment starts navigation; the current React tree can still
+    // run effects until the destination response replaces the document.
+    const navigate = jest.fn();
+    Object.defineProperty(global.window.location, "href", {
+      get: () => "https://app.test/",
+      set: navigate,
+    });
+
+    let renderer;
+    await TestRenderer.act(async () => {
+      renderer = TestRenderer.create(
+        React.createElement(
+          GuardhouseProvider,
+          { config: baseConfig },
+          React.createElement(Probe),
+          React.createElement(ProtectedRoute, null, "Private page"),
+        ),
+      );
+    });
+    await flushEffects();
+    expect(latestAuth.isAuthenticated).toBe(true);
+    expect(mockCreateAuthorizationRequest).not.toHaveBeenCalled();
+
+    await TestRenderer.act(async () => latestAuth.logout());
+    await flushEffects();
+
+    // Background token requests and repeated clicks must not release the
+    // pending navigation or start a second authentication operation.
+    await TestRenderer.act(async () => {
+      expect(await latestAuth.getAccessTokenSilently()).toBeNull();
+      await latestAuth.logout();
+    });
+    await flushEffects();
+    expect(navigate).toHaveBeenCalledTimes(1);
+    expect(navigate).toHaveBeenCalledWith("https://auth.test/connect/logout");
+    expect(mockCreateAuthorizationRequest).not.toHaveBeenCalled();
+    expect(latestAuth).toMatchObject({
+      isLoading: true,
+      isAuthenticated: false,
+      user: null,
+    });
+    await TestRenderer.act(async () => renderer.unmount());
+  });
+
+  it("releases the pending logout state when browser navigation throws", async () => {
+    const navigate = jest.fn(() => {
+      throw new Error("Navigation blocked");
+    });
+    Object.defineProperty(global.window.location, "href", {
+      get: () => "https://app.test/",
+      set: navigate,
+    });
+    let renderer;
+    await TestRenderer.act(async () => {
+      renderer = TestRenderer.create(provider(baseConfig));
+    });
+    await flushEffects();
+
+    await TestRenderer.act(async () => {
+      await expect(latestAuth.logout()).rejects.toThrow("Navigation blocked");
+    });
+    expect(latestAuth).toMatchObject({
+      isLoading: false,
+      isAuthenticated: false,
+      error: expect.objectContaining({ message: "Navigation blocked" }),
+    });
+    navigate.mockImplementation(() => undefined);
+    await TestRenderer.act(async () => latestAuth.logout());
+    expect(navigate).toHaveBeenCalledTimes(2);
+    expect(latestAuth.isLoading).toBe(true);
+    await TestRenderer.act(async () => renderer.unmount());
+  });
+
   it.each([
     ["client-a", "client-b", false],
     ["client-b", "client-a", false],

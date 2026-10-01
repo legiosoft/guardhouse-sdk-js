@@ -12,6 +12,7 @@
     "test": "npm run build:core && npm run test:packages",
     "test:packages": "npm run test -w @guardhouse/core -w @guardhouse/node -w @guardhouse/react -w @guardhouse/react-native",
     "test:package": "node scripts/check-packages.mjs",
+    "test:browser": "npm run build:core && npm run build -w @guardhouse/react && node --test --test-concurrency=1 tests/browser/auth-flow.test.mjs",
     "typecheck": "npm run build:core && npm run typecheck:packages && npm run typecheck:public",
     "typecheck:packages": "npm run typecheck -w @guardhouse/core -w @guardhouse/node -w @guardhouse/react -w @guardhouse/react-native",
     "typecheck:public": "npm run typecheck:public -w @guardhouse/core -w @guardhouse/react",
@@ -23,10 +24,13 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.3",
+    "esbuild": "0.27.2",
     "eslint": "^9.39.3",
     "eslint-config-prettier": "^10.1.8",
     "globals": "^17.3.0",
+    "playwright": "1.62.1",
     "prettier": "3.7.4",
+    "react-dom": "18.3.1",
     "typescript": "5.9.3",
     "typescript-eslint": "^8.56.1"
   }

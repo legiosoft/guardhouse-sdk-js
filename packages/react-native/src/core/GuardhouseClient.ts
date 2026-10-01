@@ -199,7 +199,10 @@ export class GuardhouseClient {
   loginWithPasskey(
     options: LoginWithPasskeyOptions = {},
   ): Promise<GuardhouseAuthResult> {
-    return this.passkeyManager.loginWithPasskey(options);
+    return this.passkeyManager.loginWithPasskey(
+      options,
+      this.authManager.createTokenPersistenceOperation(),
+    );
   }
 
   /**

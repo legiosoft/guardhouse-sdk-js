@@ -100,10 +100,31 @@ function scopeContains(scope: string | undefined, value: string): boolean {
     .some((entry) => entry === value);
 }
 
+function useStableStringArray(values: readonly string[] | undefined) {
+  const snapshot = useRef<string[] | undefined>(undefined);
+  if (
+    values === undefined ||
+    snapshot.current?.length !== values.length ||
+    values.some((value, index) => value !== snapshot.current?.[index])
+  ) {
+    snapshot.current = values === undefined ? undefined : [...values];
+  }
+  return snapshot.current;
+}
+
 export function GuardhouseProvider({
   config,
   children,
 }: GuardhouseProviderProps) {
+  // Equivalent inline arrays and redirect callbacks must not restart an
+  // in-flight callback or logout. Real security-policy changes still revalidate.
+  const allowedPostLogoutRedirectUris = useStableStringArray(
+    config.allowedPostLogoutRedirectUris,
+  );
+  const requiredAcrValues = useStableStringArray(config.requiredAcrValues);
+  const requiredAmrValues = useStableStringArray(config.requiredAmrValues);
+  const onRedirectCallbackRef = useRef(config.onRedirectCallback);
+  onRedirectCallbackRef.current = config.onRedirectCallback;
   const [state, setState] = useState<AuthState>({
     isAuthenticated: false,
     isLoading: true,
@@ -111,6 +132,7 @@ export function GuardhouseProvider({
     user: null,
   });
   const initializedNamespaceRef = useRef<string | null>(null);
+  const logoutRedirectRef = useRef<{ namespace: string } | null>(null);
   const verifiedSessionRef = useRef<{
     serialized: string;
     epoch: number;
@@ -186,7 +208,7 @@ export function GuardhouseProvider({
       maxSilentAuthAttempts: config.maxSilentAuthAttempts,
       requireUserInteractionForSensitiveOperations:
         config.requireUserInteractionForSensitiveOperations,
-      allowedPostLogoutRedirectUris: config.allowedPostLogoutRedirectUris,
+      allowedPostLogoutRedirectUris,
       allowUnsafeHttpMethods: config.allowUnsafeHttpMethods,
       requireDpopForAccessTokenRequests:
         config.requireDpopForAccessTokenRequests,
@@ -196,7 +218,7 @@ export function GuardhouseProvider({
     [
       config.allowScopeNarrowing,
       config.allowUnsafeHttpMethods,
-      config.allowedPostLogoutRedirectUris,
+      allowedPostLogoutRedirectUris,
       config.authority,
       config.clientId,
       config.debug,
@@ -304,7 +326,9 @@ export function GuardhouseProvider({
     ) {
       setState({
         isAuthenticated: false,
-        isLoading: false,
+        // The document is still alive until the logout navigation completes.
+        // Route guards must not start another login in this interval.
+        isLoading: true,
         error: null,
         user: null,
       });
@@ -486,8 +510,8 @@ export function GuardhouseProvider({
           sessionData.accessToken,
           {
             idToken: sessionData.idToken,
-            requiredAcrValues: config.requiredAcrValues,
-            requiredAmrValues: config.requiredAmrValues,
+            requiredAcrValues,
+            requiredAmrValues,
           },
         );
         if (!oidcIdentitiesEqual(restored.identity, sessionData.identity)) {
@@ -499,8 +523,8 @@ export function GuardhouseProvider({
       }
       const verified = await client.verifyIdToken(sessionData.idToken, {
         purpose: "session",
-        requiredAcrValues: config.requiredAcrValues,
-        requiredAmrValues: config.requiredAmrValues,
+        requiredAcrValues,
+        requiredAmrValues,
       });
       if (!oidcIdentitiesEqual(verified.identity, sessionData.identity)) {
         throw new Error(
@@ -513,7 +537,7 @@ export function GuardhouseProvider({
       );
       return user;
     },
-    [client, config.requiredAcrValues, config.requiredAmrValues],
+    [client, requiredAcrValues, requiredAmrValues],
   );
 
   const rememberVerifiedSession = useCallback(
@@ -635,8 +659,8 @@ export function GuardhouseProvider({
                 {
                   previousIdToken: sessionData.idToken,
                   grantedScope: sessionData.scope,
-                  requiredAcrValues: config.requiredAcrValues,
-                  requiredAmrValues: config.requiredAmrValues,
+                  requiredAcrValues,
+                  requiredAmrValues,
                 },
               );
               refreshResponseSucceeded = true;
@@ -768,8 +792,8 @@ export function GuardhouseProvider({
     [
       client,
       config.clientId,
-      config.requiredAcrValues,
-      config.requiredAmrValues,
+      requiredAcrValues,
+      requiredAmrValues,
       logger,
       isCurrentAuthOperation,
       issuerIdentifier,
@@ -1005,8 +1029,8 @@ export function GuardhouseProvider({
 
         rememberVerifiedSession(persistedSnapshot, operationEpoch);
         handleSuccess(authenticatedUser, tokenData);
-        if (config.onRedirectCallback) {
-          await config.onRedirectCallback(
+        if (onRedirectCallbackRef.current) {
+          await onRedirectCallbackRef.current(
             transaction.applicationState as AppState | undefined,
           );
         } else {
@@ -1082,7 +1106,6 @@ export function GuardhouseProvider({
     clearLegacyStorage,
     client,
     config.clientId,
-    config.onRedirectCallback,
     handleLoading,
     handleSuccess,
     rememberVerifiedSession,
@@ -1214,6 +1237,7 @@ export function GuardhouseProvider({
     }
 
     initializedNamespaceRef.current = oidcSessionStorageKey;
+    logoutRedirectRef.current = null;
     logger.debug("Initializing Guardhouse React provider");
     setState({
       isAuthenticated: false,
@@ -1330,8 +1354,8 @@ export function GuardhouseProvider({
             audience: requestedAudience,
             resource: requestedResource,
             maxAgeSeconds: options?.maxAgeSeconds ?? config.maxAgeSeconds,
-            requiredAcrValues: config.requiredAcrValues,
-            requiredAmrValues: config.requiredAmrValues,
+            requiredAcrValues,
+            requiredAmrValues,
             applicationState: {
               ...options?.appState,
               returnTo: normalizeReturnTo(
@@ -1411,8 +1435,8 @@ export function GuardhouseProvider({
       config.clientId,
       config.maxAgeSeconds,
       config.redirectUri,
-      config.requiredAcrValues,
-      config.requiredAmrValues,
+      requiredAcrValues,
+      requiredAmrValues,
       config.resource,
       config.scope,
       handleError,
@@ -1426,7 +1450,10 @@ export function GuardhouseProvider({
 
   const logout = useCallback(
     async (options?: LogoutOptions) => {
-      if (currentNamespaceRef.current !== oidcSessionStorageKey) {
+      if (
+        currentNamespaceRef.current !== oidcSessionStorageKey ||
+        logoutRedirectRef.current?.namespace === oidcSessionStorageKey
+      ) {
         return;
       }
 
@@ -1477,16 +1504,29 @@ export function GuardhouseProvider({
       }
 
       logger.debug("Clearing local auth state before redirecting to logout");
-      const clearEpoch = await clearAuthState();
+      const logoutRedirect = { namespace: oidcSessionStorageKey };
+      logoutRedirectRef.current = logoutRedirect;
+      try {
+        const clearEpoch = await clearAuthState();
 
-      if (!isCurrentAuthOperation(clearEpoch, oidcSessionStorageKey)) {
-        return;
+        if (!isCurrentAuthOperation(clearEpoch, oidcSessionStorageKey)) {
+          return;
+        }
+
+        logger.debug("Redirecting browser to logout endpoint", {
+          authority: config.authority,
+        });
+        window.location.href = logoutUrl;
+      } catch (error) {
+        if (
+          logoutRedirectRef.current === logoutRedirect &&
+          currentNamespaceRef.current === oidcSessionStorageKey
+        ) {
+          logoutRedirectRef.current = null;
+          handleError(error);
+        }
+        throw error;
       }
-
-      logger.debug("Redirecting browser to logout endpoint", {
-        authority: config.authority,
-      });
-      window.location.href = logoutUrl;
     },
     [
       clearAuthState,
@@ -1495,6 +1535,7 @@ export function GuardhouseProvider({
       config.debug,
       config.logoutRedirectUri,
       config.redirectUri,
+      handleError,
       logger,
       invalidateAuthOperations,
       isCurrentAuthOperation,
@@ -1508,6 +1549,9 @@ export function GuardhouseProvider({
   const getAccessTokenSilently = useCallback(async (): Promise<
     string | null
   > => {
+    if (logoutRedirectRef.current?.namespace === oidcSessionStorageKey) {
+      return null;
+    }
     const operationEpoch = authOperationEpochRef.current;
 
     if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
@@ -1546,7 +1590,9 @@ export function GuardhouseProvider({
     const now = Math.floor(Date.now() / 1000);
 
     const hasValidity =
-      sessionData.expiresAt > now + ACCESS_TOKEN_REFRESH_LEEWAY_SECONDS;
+      sessionData.expiresAt > now &&
+      (!sessionData.refreshToken ||
+        sessionData.expiresAt > now + ACCESS_TOKEN_REFRESH_LEEWAY_SECONDS);
     const verified = verifiedSessionRef.current;
     if (
       hasValidity &&

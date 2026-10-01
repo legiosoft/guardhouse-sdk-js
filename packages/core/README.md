@@ -131,6 +131,10 @@ keep their previous request/response behavior. Typed scope/audience values must
 be nonempty strings of at most 4096 characters; invalid values reject rather
 than silently disappear from the request.
 
+Refresh tokens are opaque credentials issued by the server. The 4096-character
+extension-parameter limit does not apply to them; encrypted refresh tokens may
+be longer. Their contents are sent unchanged through form encoding.
+
 ### Auth + PKCE Utilities
 
 - Application login flows use `createAuthorizationRequest()` so PKCE, state,

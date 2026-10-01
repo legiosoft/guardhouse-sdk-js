@@ -17,7 +17,7 @@ This repository is a monorepo with publishable SDK packages under `packages/*`.
 2. You must use one of the following auth methods for publish:
    - OTP (`--otp`) from your authenticator, or
    - a granular access token with **Bypass 2FA for publishing** enabled.
-3. Node.js 18+.
+3. Node.js 20+ for development and browser validation.
 
 ## Create a Token (Recommended)
 
@@ -70,12 +70,56 @@ From repository root:
 
 ```bash
 npm ci
+npx playwright install chromium --only-shell
 npm run release:check
 ```
 
 The release check runs package tests, typechecks, lint, builds, a clean
-tarball-consumer smoke test, and a production dependency audit. The same check
-runs for pull requests in GitHub Actions.
+tarball-consumer smoke test, browser authentication scenarios using those
+installed tarballs with React 18 and 19, and a production dependency audit.
+The browser scenarios
+use a local OIDC fixture with signed tokens and real document navigations;
+they do not certify a deployed identity server. The same check runs for pull
+requests in GitHub Actions.
+
+Before an authenticated test, verify the exact issuer and registered client
+configuration against the target server without sending user credentials:
+
+```bash
+node scripts/check-oidc-provider.mjs https://identity.example.com/ client-id https://app.example.com/callback "openid profile email"
+```
+
+This checks discovery, public keys, and the redirect to sign-in. It does not
+exchange user tokens or perform logout. `authority` must match discovery's
+`issuer` exactly, including a trailing slash when present. Do not disable
+issuer validation to accommodate a mismatched configuration.
+
+For an interactive React SDK check, create a local JSON array of public client
+configurations (never include a client secret):
+
+```json
+[
+  {
+    "authority": "https://identity.example.com/",
+    "clientId": "portal-client",
+    "redirectUri": "https://app.example.com/portal/",
+    "logoutRedirectUri": "https://app.example.com/portal/",
+    "allowedPostLogoutRedirectUris": ["https://app.example.com/portal/"],
+    "scope": "openid profile offline_access",
+    "allowOfflineAccessScope": true,
+    "audiencePolicy": "oidc-optional"
+  }
+]
+```
+
+After building, run `node scripts/check-live-browser.mjs path/to/clients.json`.
+It opens a separate Edge window; enter credentials directly on the identity
+server. The script serves the local candidate test UI at registered redirect
+paths in this isolated browser, without changing the deployed application.
+It checks login, reload, concurrent refresh and logout; add another same-origin
+client to check session isolation. This verifies SDK protocol flows, not the
+application's business screens. Refresh requires the client to allow
+`offline_access`. It does not record credentials or token values.
 
 Before publishing, use a reachable test Guardhouse server with a separate
 authorization-code client and service client. In the React example, verify a
@@ -84,6 +128,10 @@ reload, refresh, and logout. For Node, verify service-token issuance and run
 `examples/node/resource-example.ts` against a token issued for its audience to
 check JWT middleware. A passing mocked test suite cannot establish these live
 flows.
+
+Test the candidate tarballs before asking a publisher to release them. A Git
+push does not replace an already published npm version. Only after the live
+checks pass should changed packages receive new versions and be published.
 
 The individual commands are:
 
@@ -102,16 +150,17 @@ npm pack --dry-run -w @guardhouse/node
 npm pack --dry-run -w @guardhouse/react-native
 ```
 
-For this release train, set versions to:
+The current baseline package versions are:
 
 - `@guardhouse/core`: `2.0.0-beta.1`
 - `@guardhouse/react`: `2.0.0-beta.1`
 - `@guardhouse/node`: `1.0.2-beta.1`
 - `@guardhouse/react-native`: `1.0.2-beta.1`
 
-Node and React Native retain their existing prerelease version while pinning the
-security-hardened Core `2.0.0-beta.1` exactly. Core and React use a major beta
-because this release deliberately removes unsafe public APIs.
+Choose a new, unpublished version for every changed package. Do not republish
+these baseline versions. Packages whose code and dependencies have not changed
+do not need a new version. If Core changes, update dependent packages to pin its
+new version and update the lockfile before running the release check again.
 
 ## Beta Publish
 

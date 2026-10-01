@@ -13,9 +13,9 @@ const SENSITIVE_KEY_PATTERN =
 const BEARER_OR_BASIC_PATTERN = /^(?:Bearer|Basic)\s+/i;
 const JWT_PATTERN = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
 const QUERY_SECRET_PATTERN =
-  /([?&](?:access_token|refresh_token|id_token|client_secret|code_verifier|authorization|token)=)[^&#\s]*/gi;
+  /([?&](?:access_token|refresh_token|id_token|id_token_hint|client_secret|code_verifier|authorization|token)=)[^&#\s]*/gi;
 const ASSIGNMENT_SECRET_PATTERN =
-  /((?:access_token|refresh_token|id_token|client_secret|code_verifier|authorization|password|secret)\s*[=:]\s*)[^,\s]*/gi;
+  /((?:access_token|refresh_token|id_token|id_token_hint|client_secret|code_verifier|authorization|password|secret)\s*[=:]\s*)[^,\s]*/gi;
 const MAX_LOG_STRING_LENGTH = 4096;
 
 function shouldRedactKey(key: string): boolean {
@@ -23,19 +23,18 @@ function shouldRedactKey(key: string): boolean {
 }
 
 function sanitizeString(value: string): string {
-  if (value.length > MAX_LOG_STRING_LENGTH) {
-    return `${value.slice(0, MAX_LOG_STRING_LENGTH)}...[TRUNCATED]`;
-  }
-
   const trimmed = value.trim();
 
   if (BEARER_OR_BASIC_PATTERN.test(trimmed) || JWT_PATTERN.test(trimmed)) {
     return REDACTED_VALUE;
   }
 
-  return value
+  const sanitized = value
     .replace(QUERY_SECRET_PATTERN, `$1${REDACTED_VALUE}`)
     .replace(ASSIGNMENT_SECRET_PATTERN, `$1${REDACTED_VALUE}`);
+  return sanitized.length > MAX_LOG_STRING_LENGTH
+    ? `${sanitized.slice(0, MAX_LOG_STRING_LENGTH)}...[TRUNCATED]`
+    : sanitized;
 }
 
 function sanitizeLogValue(

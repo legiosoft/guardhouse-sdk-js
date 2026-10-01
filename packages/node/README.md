@@ -95,6 +95,13 @@ introspection, including cached introspection results. Every entry must be one
 valid OAuth scope token; duplicates are removed, comparison is case-sensitive,
 and a token with missing or partial scope data is rejected.
 
+Introspection uses OAuth token types (`Bearer` by default), while JWT validation
+uses JWT header types (`JWT` and `at+jwt` by default). Array audiences and roles
+are supported. With audience validation enabled, introspection must include the
+configured API audience; `active: true` alone is insufficient. A supplied issuer
+must match the configured authority. Responses without an expiration are checked
+online on every request instead of being cached.
+
 ### `GuardhouseNodeClient`
 
 OAuth 2.0 client with automatic token caching and refresh.

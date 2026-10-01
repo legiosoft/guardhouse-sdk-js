@@ -208,10 +208,17 @@ export function AuthGate() {
 - Concurrent refresh requests are deduplicated to avoid refresh-token rotation races.
 - `loginWithRedirect()` rejects with the original error. Handle rejection when
   starting login from an event handler.
+- During logout navigation, `isLoading` remains true so protected routes do not
+  start another login before the browser leaves. Catch logout errors in event
+  handlers; a failed navigation releases the pending state for a retry.
+- `ProtectedRoute` displays authentication errors instead of automatically
+  restarting a failed callback. Its Retry action restarts sign-in, or restores
+  a retained session after a temporary restoration failure.
 
 ## Integration Checklist
 
 - Register exact `redirectUri` and `logoutRedirectUri` in your IdP client settings.
+- Copy the exact discovery `issuer` into `authority`, including any trailing slash.
 - For separate OAuth clients on the same origin (for example, `/portal/` and
   `/console/`), configure distinct `clientId` values and each client's registered
   redirect URIs. Sessions are isolated by issuer and client ID, not URL path.

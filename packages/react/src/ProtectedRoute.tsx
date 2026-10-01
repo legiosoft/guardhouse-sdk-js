@@ -24,6 +24,7 @@ export function ProtectedRoute<P extends object>({
     error,
   } = useAuth();
   const hasTriggeredLogin = useRef(false);
+  const retryLoginRequested = useRef(false);
   const [redirectError, setRedirectError] = useState<Error | null>(null);
   const [retrySequence, setRetrySequence] = useState(0);
   const restorationError =
@@ -41,6 +42,7 @@ export function ProtectedRoute<P extends object>({
       return;
     }
     hasTriggeredLogin.current = false;
+    retryLoginRequested.current = true;
     setRedirectError(null);
     setRetrySequence((value) => value + 1);
   }, [getAccessTokenSilently, restorationError]);
@@ -49,7 +51,7 @@ export function ProtectedRoute<P extends object>({
     if (
       isLoading ||
       isAuthenticated ||
-      restorationError ||
+      (error && !retryLoginRequested.current) ||
       redirectError ||
       hasTriggeredLogin.current
     ) {
@@ -57,6 +59,7 @@ export function ProtectedRoute<P extends object>({
     }
 
     hasTriggeredLogin.current = true;
+    retryLoginRequested.current = false;
     let loginPromise: Promise<void>;
     try {
       const safeReturnTo = normalizeReturnTo(returnTo ?? getCurrentReturnTo());
@@ -81,6 +84,7 @@ export function ProtectedRoute<P extends object>({
     isAuthenticated,
     isLoading,
     loginWithRedirect,
+    error,
     redirectError,
     restorationError,
     retrySequence,
@@ -92,7 +96,7 @@ export function ProtectedRoute<P extends object>({
   }
 
   if (!isAuthenticated) {
-    const authError = redirectError ?? restorationError;
+    const authError = redirectError ?? error;
     if (authError) {
       return (
         <>

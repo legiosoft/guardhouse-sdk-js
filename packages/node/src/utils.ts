@@ -144,7 +144,12 @@ export function buildClaimsFromIntrospection(
   }
 
   if (introspectionResult.roles) {
-    const roleArray = introspectionResult.roles.split(" ").filter(Boolean);
+    const roleArray = Array.isArray(introspectionResult.roles)
+      ? introspectionResult.roles
+      : introspectionResult.roles.split(" ").filter(Boolean);
+    if (roleArray.some((role: unknown) => typeof role !== "string")) {
+      throw new Error("Introspection roles must contain only strings");
+    }
     roleArray.forEach((role: string) => roles.add(role));
   }
 
@@ -161,7 +166,9 @@ export function buildClaimsFromIntrospection(
   }
 
   if (introspectionResult.aud) {
-    claims.aud = introspectionResult.aud.split(" ").filter(Boolean);
+    claims.aud = Array.isArray(introspectionResult.aud)
+      ? [...introspectionResult.aud]
+      : [introspectionResult.aud];
   }
 
   if (introspectionResult.iss) {

@@ -224,12 +224,8 @@ export class GuardhouseClientToken extends GuardhouseClientSession {
       "refreshToken",
     );
 
-    if (normalizedRefreshToken.length > MAX_TOKEN_PARAM_VALUE_LENGTH) {
-      throw new GuardhouseError(
-        `refreshToken exceeds maximum allowed length (${MAX_TOKEN_PARAM_VALUE_LENGTH})`,
-        "INVALID_REQUEST",
-      );
-    }
+    // Refresh tokens are opaque issuer credentials, not extension parameters.
+    // Encrypted Guardhouse tokens can exceed the extension-value size limit.
 
     // Reserved protocol fields enter through typed options, never extensions.
     const protocolParams: Record<string, string> = {};

@@ -168,6 +168,122 @@ function createManager({
 }
 
 describe("React Native Core v2 auth integration", () => {
+  it("rejects a passkey result from an operation started before logout", async () => {
+    const { manager, coreClient } = createManager();
+    const persist = manager.createTokenPersistenceOperation();
+    await manager.logout();
+    await expect(
+      persist(
+        { access_token: "late-token", token_type: "Bearer", expires_in: 3600 },
+        "api",
+      ),
+    ).rejects.toMatchObject({ code: "AUTH_OPERATION_SUPERSEDED" });
+    expect(coreClient.verifyIdToken).not.toHaveBeenCalled();
+    await expect(manager.getSession()).resolves.toBeNull();
+  });
+
+  it("orders logout cleanup after a pending secure-storage write", async () => {
+    const sessionStorage = new MemoryStorage();
+    const refreshTokenStorage = new MemoryStorage();
+    const { manager } = createManager({ sessionStorage, refreshTokenStorage });
+    let finishWrite;
+    let writeStarted;
+    const started = new Promise((resolve) => {
+      writeStarted = resolve;
+    });
+    refreshTokenStorage.setItem = async (key, value) => {
+      writeStarted();
+      await new Promise((resolve) => {
+        finishWrite = resolve;
+      });
+      refreshTokenStorage.values.set(key, value);
+    };
+    const pending = manager.persistTokenResponse(
+      {
+        access_token: "old-access",
+        refresh_token: "old-refresh",
+        token_type: "Bearer",
+        expires_in: 3600,
+        scope: "api",
+      },
+      "api",
+    );
+    const outcome = pending.then(
+      () => null,
+      (error) => error,
+    );
+    await started;
+    const logout = manager.logout();
+    finishWrite();
+    await logout;
+    expect(await outcome).toMatchObject({ code: "AUTH_OPERATION_SUPERSEDED" });
+    expect(sessionStorage.values.size).toBe(0);
+    expect(refreshTokenStorage.values.size).toBe(0);
+    await expect(manager.getSession()).resolves.toBeNull();
+  });
+
+  it("an old restoration cannot repopulate the cache after logout", async () => {
+    const { manager, coreClient } = createManager();
+    const identity = createIdentity();
+    await seedOidcSession(manager, coreClient, identity);
+    let finishUserInfo;
+    let userInfoStarted;
+    const started = new Promise((resolve) => {
+      userInfoStarted = resolve;
+    });
+    coreClient.verifyIdToken.mockResolvedValue(createVerifiedIdToken(identity));
+    coreClient.getUserInfo.mockImplementation(() => {
+      userInfoStarted();
+      return new Promise((resolve) => {
+        finishUserInfo = resolve;
+      });
+    });
+    const outcome = manager.getSession().then(
+      () => null,
+      (error) => error,
+    );
+    await started;
+    await manager.logout();
+    finishUserInfo({ sub: identity.subject });
+    expect(await outcome).toMatchObject({ code: "AUTH_OPERATION_SUPERSEDED" });
+    await expect(manager.getSession()).resolves.toBeNull();
+  });
+  it("does not restore a session when UserInfo completes after logout", async () => {
+    const { manager, coreClient, sessionStorage, refreshTokenStorage } =
+      createManager();
+    const identity = createIdentity();
+    let finishUserInfo;
+    let userInfoStarted;
+    const started = new Promise((resolve) => {
+      userInfoStarted = resolve;
+    });
+    coreClient.verifyIdToken.mockResolvedValue(createVerifiedIdToken(identity));
+    coreClient.getUserInfo.mockImplementation(() => {
+      userInfoStarted();
+      return new Promise((resolve) => {
+        finishUserInfo = resolve;
+      });
+    });
+    const pending = manager.persistTokenResponse({
+      access_token: "late-access",
+      refresh_token: "late-refresh",
+      id_token: "signed-id-token",
+      token_type: "Bearer",
+      expires_in: 3600,
+      scope: "openid profile offline_access",
+    });
+    const outcome = pending.then(
+      () => null,
+      (error) => error,
+    );
+    await started;
+    await manager.logout();
+    finishUserInfo({ sub: identity.subject });
+    expect(await outcome).toMatchObject({ code: "AUTH_OPERATION_SUPERSEDED" });
+    expect(sessionStorage.values.size).toBe(0);
+    expect(refreshTokenStorage.values.size).toBe(0);
+    await expect(manager.getSession()).resolves.toBeNull();
+  });
   it.each([
     "https://auth.example.com",
     "https://auth.example.com/",

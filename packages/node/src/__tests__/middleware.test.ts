@@ -136,6 +136,7 @@ describe("GuardhouseResourceService", () => {
           active: true,
           sub: "user-123",
           scope: "read",
+          aud: "test-audience",
           exp: Math.floor(Date.now() / 1000) + 3600,
         }),
         text: async () => "",
@@ -166,6 +167,7 @@ describe("GuardhouseResourceService", () => {
           active: true,
           sub: "user-123",
           exp: Math.floor(Date.now() / 1000) + 3600,
+          aud: "test-audience",
         }),
         text: async () => "",
       } as Response);
@@ -191,6 +193,7 @@ describe("GuardhouseResourceService", () => {
           active: true,
           sub: "user-123",
           scope: "write read extra",
+          aud: "test-audience",
           exp: Math.floor(Date.now() / 1000) + 3600,
         }),
         text: async () => "",

@@ -72,6 +72,7 @@ export class PasskeyManager {
    */
   async loginWithPasskey(
     options: LoginWithPasskeyOptions = {},
+    persistTokenResponse = this.persistTokenResponse,
   ): Promise<GuardhouseAuthResult> {
     const passkeyAdapter = this.requirePasskeyAdapter();
     const scope = trimToUndefined(options.scope) ?? this.defaultScope;
@@ -113,7 +114,7 @@ export class PasskeyManager {
     );
 
     const tokenResponse = parseTokenResponsePayload(verificationPayload);
-    return this.persistTokenResponse(tokenResponse, scope);
+    return persistTokenResponse(tokenResponse, scope);
   }
 
   private requirePasskeyAdapter(): GuardhousePasskeyAdapter {

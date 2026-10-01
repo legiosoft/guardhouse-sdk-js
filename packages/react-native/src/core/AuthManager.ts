@@ -74,6 +74,7 @@ interface PersistedIdentity {
 }
 
 interface PersistTokenOptions {
+  readonly generation: number;
   readonly existingSession?: StoredSession;
   readonly requestedScope?: string;
   readonly identity?: PersistedIdentity;
@@ -349,6 +350,27 @@ export class AuthManager {
   private refreshTokenCache: string | null = null;
   private refreshPromise: Promise<GuardhouseAuthResult> | null = null;
   private refreshRequestKey: string | null = null;
+  private sessionGeneration = 0;
+  private storageMutation: Promise<void> = Promise.resolve();
+  private pendingStorageClears = 0;
+
+  private assertCurrentOperation(generation: number): void {
+    if (generation !== this.sessionGeneration) {
+      throw new GuardhouseAuthError(
+        "Authentication operation was superseded by session cleanup",
+        "AUTH_OPERATION_SUPERSEDED",
+      );
+    }
+  }
+
+  private mutateStorage<T>(action: () => Promise<T>): Promise<T> {
+    const operation = this.storageMutation.then(action);
+    this.storageMutation = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
 
   constructor(config: AuthManagerConfig) {
     this.issuer = canonicalizeIssuer(config.authority);
@@ -395,10 +417,18 @@ export class AuthManager {
    * Persists tokens returned by the Guardhouse passkey verification endpoint.
    * OIDC responses are verified before any identity is trusted.
    */
+  createTokenPersistenceOperation() {
+    const generation = this.sessionGeneration;
+    return (response: GuardhouseTokenResponse, scope: string) =>
+      this.persistTokenResponse(response, scope, generation);
+  }
+
   async persistTokenResponse(
     tokenResponse: GuardhouseTokenResponse,
     requestedScope = this.defaultScope,
+    generation = this.sessionGeneration,
   ): Promise<GuardhouseAuthResult> {
+    this.assertCurrentOperation(generation);
     assertOidcCryptoForScope(requestedScope);
     const existingSession = await this.loadStoredSession();
     const responseScope = tokenResponse.scope ?? requestedScope;
@@ -422,6 +452,7 @@ export class AuthManager {
       );
 
       return this.persistAuthResult(tokenResponse, {
+        generation,
         existingSession: existingSession ?? undefined,
         requestedScope,
         identity: {
@@ -442,6 +473,7 @@ export class AuthManager {
     }
 
     return this.persistAuthResult(tokenResponse, {
+      generation,
       existingSession: existingSession ?? undefined,
       requestedScope,
     });
@@ -450,6 +482,7 @@ export class AuthManager {
   async refreshToken(
     options: RefreshTokenOptions = {},
   ): Promise<GuardhouseAuthResult> {
+    const generation = this.sessionGeneration;
     const scopeOverride = trimToUndefined(options.scope);
     const audience = this.resolveAudience(options.audience);
     const requestKey = JSON.stringify([
@@ -460,6 +493,7 @@ export class AuthManager {
     return this.withRefreshLock(requestKey, async () => {
       const currentSession = await this.loadStoredSession();
       const refreshToken = await this.getStoredRefreshToken();
+      this.assertCurrentOperation(generation);
 
       if (!currentSession || !refreshToken) {
         await this.clearSession();
@@ -502,6 +536,7 @@ export class AuthManager {
             }
 
             return await this.persistAuthResult(refreshed.tokens, {
+              generation,
               existingSession: currentSession,
               requestedScope,
               identity: {
@@ -515,6 +550,7 @@ export class AuthManager {
           }
 
           return await this.persistAuthResult(refreshed.tokens, {
+            generation,
             existingSession: currentSession,
             requestedScope,
             identity: {
@@ -533,6 +569,7 @@ export class AuthManager {
         tokenRefreshCompleted = true;
 
         return await this.persistAuthResult(tokens, {
+          generation,
           existingSession: currentSession,
           requestedScope,
         });
@@ -544,8 +581,9 @@ export class AuthManager {
         );
 
         if (
-          tokenRefreshCompleted ||
-          this.shouldClearSessionAfterRefreshFailure(error)
+          generation === this.sessionGeneration &&
+          (tokenRefreshCompleted ||
+            this.shouldClearSessionAfterRefreshFailure(error))
         ) {
           await this.clearSession();
         }
@@ -558,6 +596,7 @@ export class AuthManager {
   async restoreSession(
     options: RestoreSessionOptions = {},
   ): Promise<GuardhouseAuthResult | null> {
+    const generation = this.sessionGeneration;
     const minValiditySeconds =
       options.minValiditySeconds === undefined
         ? 60
@@ -565,11 +604,13 @@ export class AuthManager {
     const currentSession = await this.loadStoredSession();
 
     if (!currentSession) {
+      if (generation !== this.sessionGeneration) return null;
       if (await this.getStoredRefreshToken()) {
         await this.clearSession();
       }
       return null;
     }
+    this.assertCurrentOperation(generation);
 
     // Keep configuration failures outside invalid-session cleanup.
     if (currentSession.kind === "oidc") assertOidcCryptoAvailable();
@@ -577,7 +618,11 @@ export class AuthManager {
       try {
         return await this.restoreCurrentSession(currentSession);
       } catch (error) {
-        if (!isTransientAuthError(error)) await this.clearSession();
+        if (
+          generation === this.sessionGeneration &&
+          !isTransientAuthError(error)
+        )
+          await this.clearSession();
         throw this.wrapCoreError(
           error,
           "TOKEN_REQUEST_FAILED",
@@ -594,7 +639,10 @@ export class AuthManager {
     try {
       return await this.refreshToken(options);
     } catch (error) {
-      if (this.shouldClearSessionAfterRefreshFailure(error)) {
+      if (
+        generation === this.sessionGeneration &&
+        this.shouldClearSessionAfterRefreshFailure(error)
+      ) {
         await this.clearSession();
         return null;
       }
@@ -603,16 +651,21 @@ export class AuthManager {
   }
 
   async getSession(): Promise<GuardhouseSession | null> {
+    const generation = this.sessionGeneration;
     const stored = await this.loadStoredSession();
     if (!stored || this.isExpired(stored.expiresAt, 0)) {
       return null;
     }
+    this.assertCurrentOperation(generation);
 
     if (stored.kind === "oidc") assertOidcCryptoAvailable();
     try {
-      return (await this.restoreCurrentSession(stored)).session;
+      const result = await this.restoreCurrentSession(stored);
+      this.assertCurrentOperation(generation);
+      return result.session;
     } catch (error) {
-      if (!isTransientAuthError(error)) await this.clearSession();
+      if (generation === this.sessionGeneration && !isTransientAuthError(error))
+        await this.clearSession();
       throw this.wrapCoreError(
         error,
         "TOKEN_REQUEST_FAILED",
@@ -624,7 +677,10 @@ export class AuthManager {
   async getAccessToken(
     options: GetAccessTokenOptions = {},
   ): Promise<string | null> {
+    const generation = this.sessionGeneration;
     const stored = await this.loadStoredSession();
+    if (!stored && generation !== this.sessionGeneration) return null;
+    this.assertCurrentOperation(generation);
     const minValiditySeconds =
       options.minValiditySeconds === undefined
         ? 60
@@ -634,9 +690,14 @@ export class AuthManager {
       if (stored.kind === "oidc") assertOidcCryptoAvailable();
       try {
         await this.restoreCurrentSession(stored);
+        this.assertCurrentOperation(generation);
         return stored.accessToken;
       } catch (error) {
-        if (!isTransientAuthError(error)) await this.clearSession();
+        if (
+          generation === this.sessionGeneration &&
+          !isTransientAuthError(error)
+        )
+          await this.clearSession();
         throw this.wrapCoreError(
           error,
           "TOKEN_REQUEST_FAILED",
@@ -656,6 +717,7 @@ export class AuthManager {
   }
 
   async logout(options: GuardhouseLogoutOptions = {}): Promise<void> {
+    this.sessionGeneration++;
     const currentSession = await this.loadStoredSession();
     const refreshToken = await this.getStoredRefreshToken();
     let revokeError: GuardhouseAuthError | null = null;
@@ -700,6 +762,7 @@ export class AuthManager {
     options: BrowserLoginOptions,
     registrationFlow: boolean,
   ): Promise<GuardhouseAuthResult> {
+    const generation = this.sessionGeneration;
     if (this.pendingBrowserFlow) {
       throw new GuardhouseAuthError(
         "An authorization transaction is already in progress",
@@ -735,6 +798,7 @@ export class AuthManager {
         options.requiredAmrValues,
       ),
     });
+    this.assertCurrentOperation(generation);
     this.pendingBrowserFlow = created.transaction;
 
     const browserOptions: BrowserSessionOptions = {
@@ -752,6 +816,7 @@ export class AuthManager {
         this.redirectUri,
         browserOptions,
       );
+      this.assertCurrentOperation(generation);
       const callback = await this.coreClient.validateOAuthCallback(
         { mode: "query", url: browserResult.url },
         created.transaction,
@@ -770,9 +835,11 @@ export class AuthManager {
       return await this.persistAuthorizationResult(
         exchanged,
         created.transaction,
+        generation,
       );
     } catch (error) {
-      await this.coreClient.clearSessionState();
+      if (generation === this.sessionGeneration)
+        await this.coreClient.clearSessionState();
       throw this.wrapCoreError(
         error,
         "TOKEN_REQUEST_FAILED",
@@ -828,6 +895,7 @@ export class AuthManager {
   private async persistAuthorizationResult(
     result: AuthorizationCodeExchangeResult,
     transaction: AuthorizationTransaction,
+    generation: number,
   ): Promise<GuardhouseAuthResult> {
     const existingSession = await this.loadStoredSession();
     const appState = isRecord(transaction.applicationState)
@@ -836,6 +904,7 @@ export class AuthManager {
 
     if (result.mode === "oidc") {
       return this.persistAuthResult(result.tokens, {
+        generation,
         existingSession: existingSession ?? undefined,
         requestedScope: transaction.requestedScope,
         appState,
@@ -850,6 +919,7 @@ export class AuthManager {
     }
 
     return this.persistAuthResult(result.tokens, {
+      generation,
       existingSession: existingSession ?? undefined,
       requestedScope: transaction.requestedScope,
       appState,
@@ -860,6 +930,7 @@ export class AuthManager {
     tokenResponse: CoreTokenResponse,
     options: PersistTokenOptions,
   ): Promise<GuardhouseAuthResult> {
+    this.assertCurrentOperation(options.generation);
     const expiresAt = Math.floor(Date.now() / 1000) + tokenResponse.expires_in;
     if (!Number.isSafeInteger(expiresAt) || expiresAt <= 0) {
       throw new GuardhouseAuthError(
@@ -917,14 +988,22 @@ export class AuthManager {
       });
     }
 
-    const persistedRefreshToken = await this.getStoredRefreshToken();
-    const refreshToken =
-      tokenResponse.refresh_token ?? persistedRefreshToken ?? undefined;
+    let refreshToken: string | undefined;
     try {
-      await this.persistRefreshToken(refreshToken);
-      await this.persistSessionRecord(record, user);
+      await this.mutateStorage(async () => {
+        this.assertCurrentOperation(options.generation);
+        const persistedRefreshToken = await this.getStoredRefreshToken();
+        this.assertCurrentOperation(options.generation);
+        refreshToken =
+          tokenResponse.refresh_token ?? persistedRefreshToken ?? undefined;
+        await this.persistRefreshToken(refreshToken, options.generation);
+        this.assertCurrentOperation(options.generation);
+        await this.persistSessionRecord(record, user, options.generation);
+        this.assertCurrentOperation(options.generation);
+      });
     } catch (error) {
-      await this.clearSession();
+      if (options.generation === this.sessionGeneration)
+        await this.clearSession();
       throw error;
     }
 
@@ -944,6 +1023,7 @@ export class AuthManager {
   private async restoreCurrentSession(
     record: StoredSession,
   ): Promise<GuardhouseAuthResult> {
+    const generation = this.sessionGeneration;
     let user: CoreUser | null = null;
     if (record.kind === "oidc") {
       if (
@@ -956,6 +1036,7 @@ export class AuthManager {
           this.sessionCache.user !== null
         ) {
           const refreshToken = await this.getStoredRefreshToken();
+          this.assertCurrentOperation(generation);
           const session = this.toPublicSession(
             record,
             refreshToken ?? undefined,
@@ -1005,6 +1086,7 @@ export class AuthManager {
     }
 
     const refreshToken = await this.getStoredRefreshToken();
+    this.assertCurrentOperation(generation);
     this.sessionCache = { record, user };
     const session = this.toPublicSession(
       record,
@@ -1032,6 +1114,8 @@ export class AuthManager {
   }
 
   private async loadStoredSession(): Promise<StoredSession | null> {
+    if (this.pendingStorageClears) await this.storageMutation;
+    const generation = this.sessionGeneration;
     if (this.sessionCache) {
       return this.sessionCache.record;
     }
@@ -1042,6 +1126,7 @@ export class AuthManager {
     const serialized = await this.sessionStorage.getItem(
       this.sessionStorageKey,
     );
+    this.assertCurrentOperation(generation);
     if (!serialized) {
       return null;
     }
@@ -1121,6 +1206,7 @@ export class AuthManager {
   private async persistSessionRecord(
     record: StoredSession,
     user: CoreUser | null,
+    generation: number,
   ): Promise<void> {
     if (this.sessionStorage) {
       await this.sessionStorage.setItem(
@@ -1137,26 +1223,31 @@ export class AuthManager {
         );
       }
     }
+    this.assertCurrentOperation(generation);
     this.sessionCache = { record, user };
   }
 
   private async getStoredRefreshToken(): Promise<string | null> {
+    const generation = this.sessionGeneration;
     if (this.refreshTokenCache) {
       return this.refreshTokenCache;
     }
     const persisted = trimToUndefined(
       await this.refreshTokenStorage.getItem(this.refreshTokenStorageKey),
     );
+    this.assertCurrentOperation(generation);
     this.refreshTokenCache = persisted ?? null;
     return this.refreshTokenCache;
   }
 
   private async persistRefreshToken(
     refreshToken: string | undefined,
+    generation: number,
   ): Promise<void> {
     const normalized = trimToUndefined(refreshToken);
     if (!normalized) {
       await this.refreshTokenStorage.removeItem(this.refreshTokenStorageKey);
+      this.assertCurrentOperation(generation);
       this.refreshTokenCache = null;
       return;
     }
@@ -1173,11 +1264,25 @@ export class AuthManager {
         "STORAGE_ERROR",
       );
     }
+    this.assertCurrentOperation(generation);
     this.refreshTokenCache = normalized;
   }
 
   private async clearSession(): Promise<void> {
+    this.sessionGeneration++;
     this.pendingBrowserFlow = null;
+    this.sessionCache = null;
+    this.refreshTokenCache = null;
+
+    this.pendingStorageClears++;
+    try {
+      await this.mutateStorage(() => this.clearStoredSession());
+    } finally {
+      this.pendingStorageClears--;
+    }
+  }
+
+  private async clearStoredSession(): Promise<void> {
     this.sessionCache = null;
     this.refreshTokenCache = null;
 

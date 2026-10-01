@@ -368,6 +368,10 @@ All errors extend `GuardhouseError`:
 - `GuardhouseStorageError` – storage layer failures
 - `GuardhouseConfigurationError` – config errors
 
+An operation interrupted by logout rejects with `AUTH_OPERATION_SUPERSEDED`.
+Treat it as a cancelled operation; do not restore its previous session or retry
+its token grant. A new user-initiated login can start a new operation.
+
 ```ts
 import { GuardhouseAuthError } from "@guardhouse/react-native";
 
@@ -400,6 +404,9 @@ try {
 - RFC 8707 `resource` values must be absolute URIs (URNs are supported); relative
   values, fragments, whitespace, and controls are rejected.
 - Android `launchMode="singleTask"` prevents task hijacking
+- Logout invalidates pending login, passkey, restore and refresh completions.
+  Storage writes and cleanup are ordered within a client instance so a delayed
+  write cannot recreate credentials after logout completes.
 
 ## License
 

@@ -15,6 +15,10 @@
 - Run `npm run build:core` to build the core package first.
 - Use `npm run build` to build all packages in the correct order.
 - Publishing guide: see `DEPLOYMENT.md`.
+- With Node.js 20+, install the test browser with `npx playwright install chromium --only-shell`.
+- Run `npm run test:browser` for browser authentication regressions. `npm run release:check`
+  also runs these scenarios with React 18 and 19 against freshly packed SDKs
+  installed in a clean consumer.
 
 ## Debug Mode
 

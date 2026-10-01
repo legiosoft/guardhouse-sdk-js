@@ -121,7 +121,7 @@ export class GuardhouseResourceService {
       validationMode: options.validationMode || "jwt_signature",
     });
 
-    if (this.options.validationMode === "jwt_signature") {
+    if ((this.options.validationMode ?? "jwt_signature") === "jwt_signature") {
       const normalizedAuthority = this.options.authority.replace(/\/+$/, "");
       this.jwksUri = `${normalizedAuthority}/${GuardhouseConstants.Endpoints.WellKnownJwks}`;
 
@@ -426,10 +426,10 @@ export class GuardhouseResourceService {
       throw new Error("Token is not active");
     }
 
+    const allowedTokenTypes = this.options.tokenTypes ?? ["Bearer"];
     if (
       introspectionResult.token_type &&
-      this.options.tokenTypes &&
-      !this.options.tokenTypes.includes(introspectionResult.token_type)
+      !allowedTokenTypes.includes(introspectionResult.token_type)
     ) {
       this.logger.warn("Rejecting token because token type is not allowed", {
         tokenType: introspectionResult.token_type,
@@ -446,15 +446,48 @@ export class GuardhouseResourceService {
       throw new Error(`Invalid algorithm: ${introspectionResult.alg}`);
     }
 
-    if (introspectionResult.exp && this.options.validateLifetime !== false) {
-      const now = Math.floor(Date.now() / 1000);
-      if (introspectionResult.exp < now) {
-        throw new Error("Token has expired");
+    if (
+      this.options.validateIssuer !== false &&
+      introspectionResult.iss !== undefined
+    ) {
+      const expectedIssuer = this.options.authority.replace(/\/$/, "");
+      if (introspectionResult.iss.replace(/\/$/, "") !== expectedIssuer) {
+        throw new Error("Invalid issuer");
       }
     }
 
-    if (this.options.introspectionCacheTtlSeconds) {
-      const tokenExp = introspectionResult.exp || Date.now() + 3600;
+    if (this.options.validateAudience !== false) {
+      const audiences =
+        typeof introspectionResult.aud === "string"
+          ? [introspectionResult.aud]
+          : introspectionResult.aud;
+      if (!audiences?.includes(this.options.audience)) {
+        throw new Error("Invalid audience");
+      }
+    }
+
+    if (this.options.validateLifetime !== false) {
+      const now = Math.floor(Date.now() / 1000);
+      if (
+        introspectionResult.exp !== undefined &&
+        introspectionResult.exp <= now
+      ) {
+        throw new Error("Token has expired");
+      }
+      if (
+        introspectionResult.nbf !== undefined &&
+        introspectionResult.nbf >
+          now + GuardhouseConstants.Defaults.ClockSkewMinutes * 60
+      ) {
+        throw new Error("Token not yet valid (nbf in future)");
+      }
+    }
+
+    if (
+      this.options.introspectionCacheTtlSeconds &&
+      introspectionResult.exp !== undefined
+    ) {
+      const tokenExp = introspectionResult.exp;
       const now = Math.floor(Date.now() / 1000);
       const tokenRemaining = Math.max(0, tokenExp - now);
       const cacheTtl = Math.min(
@@ -646,10 +679,14 @@ export function guardhouseMiddleware(
     validAlgorithms: options.validAlgorithms || [
       GuardhouseConstants.Algorithms.RS256,
     ],
-    tokenTypes: options.tokenTypes || [
-      GuardhouseConstants.TokenTypes.Jwt,
-      GuardhouseConstants.TokenTypes.AtJwt,
-    ],
+    tokenTypes:
+      options.tokenTypes ||
+      (validationMode === "introspection"
+        ? ["Bearer"]
+        : [
+            GuardhouseConstants.TokenTypes.Jwt,
+            GuardhouseConstants.TokenTypes.AtJwt,
+          ]),
     introspectionCredentialTransmission,
     requireHttpsMetadata: options.requireHttpsMetadata,
     ...options,

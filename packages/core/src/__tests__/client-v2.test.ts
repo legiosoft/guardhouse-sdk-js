@@ -614,6 +614,33 @@ describe("GuardhouseClient v2 trust boundaries", () => {
     });
   });
 
+  it("round-trips a large opaque refresh token without imposing extension limits", async () => {
+    const refreshToken = "opaque+value/=".repeat(1000);
+    const fetchMock = jest
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        jsonResponse({
+          access_token: "new-access",
+          token_type: "Bearer",
+          expires_in: 3600,
+        }),
+      );
+    const client = new GuardhouseClient({
+      authority: "https://auth.example.com/",
+      clientId: "client-id",
+    });
+    await expect(client.refreshOAuthToken(refreshToken)).resolves.toMatchObject(
+      { access_token: "new-access" },
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const form = new URLSearchParams(
+      fetchMock.mock.calls[0]?.[1]?.body as string,
+    );
+    expect(form.get("refresh_token")).toBe(refreshToken);
+    expect(form.get("grant_type")).toBe("refresh_token");
+    expect(form.get("client_id")).toBe("client-id");
+  });
+
   it("uses form encoding before Basic authentication encoding", async () => {
     const fetchMock = jest
       .spyOn(globalThis, "fetch")
