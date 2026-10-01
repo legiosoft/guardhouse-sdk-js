@@ -12,7 +12,8 @@ npm install @guardhouse/react-native@1.0.2-beta.1
 
 - `react >=18.0.0`
 - `react-native >=0.70.0`
-- `react-native-quick-crypto >=0.7.0` (optional, if Web Crypto is unavailable)
+- `react-native-quick-crypto >=0.7.0` (optional PKCE provider; this peer range does
+  not guarantee OIDC/Web Crypto support — see the runtime setup below)
 
 ### Required native modules
 
@@ -209,7 +210,8 @@ export const expoBrowserAdapter = {
 
 - `KeychainStorageAdapter` – uses `react-native-keychain` (default for production)
 - `ChunkedSecureStore` – wraps any adapter to split large values
-- Provide your own `GuardhouseStorageAdapter` for Expo Go or custom runtimes
+- Provide your own `GuardhouseStorageAdapter` for custom runtimes. A storage
+  adapter alone does not make OIDC work in Expo Go.
 
 ```ts
 interface GuardhouseStorageAdapter {
@@ -219,27 +221,61 @@ interface GuardhouseStorageAdapter {
 }
 ```
 
-### Crypto adapter
+### OIDC Web Crypto and PKCE adapters
 
-PKCE requires SHA-256 and secure random. If your React Native runtime provides `globalThis.crypto.subtle`, no extra setup is needed. Otherwise, install `react-native-quick-crypto` and provide a `CryptoAdapter`:
+`CryptoAdapter` supplies only secure random bytes and SHA-256 for PKCE. OIDC
+(`openid` scope) additionally uses Core's `jose` verifier, which requires a
+compatible global `crypto.subtle` implementation with `importKey`, `verify` and
+`digest`, including support for your issuer's signing algorithm. Providing only
+`randomBytes`/`sha256`, `expo-crypto`, or a random-values polyfill is insufficient.
+
+If the runtime already provides compatible Web Crypto, no extra provider is
+needed. For React Native 0.75+ using the New Architecture, the Expo example pins:
+
+```bash
+npm install --save-exact react-native-quick-crypto@1.1.7 react-native-nitro-modules@0.33.2 react-native-quick-base64@3.0.1
+```
+
+Follow the provider's [native setup instructions](https://margelo.github.io/react-native-quick-crypto/docs/introduction/complete-setup).
+Initialize it in a separate bootstrap module, imported **before** your app/SDK:
 
 ```ts
-import type { CryptoAdapter } from "@guardhouse/core";
-
-const cryptoAdapter: CryptoAdapter = {
-  async sha256(data) {
-    // return Uint8Array hash
-  },
-  async randomBytes(count) {
-    // return Uint8Array
-  },
-};
-
-const client = new GuardhouseClient({
-  // ...
-  cryptoAdapter,
-});
+// installCrypto.ts
+import { install } from "react-native-quick-crypto";
+install();
 ```
+
+```ts
+// index.js — bootstrap dependency must execute before App's dependencies.
+import "./installCrypto";
+import App from "./App";
+// Register App with AppRegistry / registerRootComponent as usual.
+```
+
+The SDK does not replace global crypto on your behalf. A custom PKCE adapter can
+still be used alongside the installed Web Crypto implementation. Older React
+Native architectures may use another compatible provider; the 1.x setup above
+does not support them. Core also expects standard fetch/Response/Headers,
+TextEncoder/TextDecoder and base64 APIs; install runtime polyfills before
+importing it if your runtime does not supply them.
+
+For Expo, add `react-native-quick-crypto` to `expo.plugins`, use a development build
+(`npx expo run:android` or `npx expo run:ios`), and rebuild after adding native
+dependencies. This setup does **not** work in stock Expo Go. The example uses
+Expo 54 / React Native 0.81.5 and explicitly enables the New Architecture.
+
+Missing Web Crypto operations raise `GuardhouseConfigurationError` (`CONFIG_ERROR`)
+before OIDC login/registration/passkey interaction or refresh. OIDC restoration
+also rejects before cryptographic verification without deleting stored credentials;
+retry after fixing initialization. A configured default OIDC scope is checked in
+the constructor, and scope overrides are checked at operation time. OAuth-only
+PKCE remains usable without Web Crypto when its adapter supplies the required
+primitives. Invalid signatures/claims are still rejected by the unchanged verifier.
+
+The availability check is not a cryptographic self-test: run login, refresh and
+cold restoration on Android and iOS with your actual provider/issuer algorithms
+before release. Node tests exercise real signatures but cannot validate native
+module linking or device-specific algorithm support.
 
 ## API
 

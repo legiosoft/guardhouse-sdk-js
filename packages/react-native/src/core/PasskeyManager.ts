@@ -11,6 +11,7 @@ import type { FetchLike } from "../types/index";
 import type { GuardhouseLogger } from "../utils/logger";
 import { compactRecord, trimToUndefined } from "../utils/url";
 import { parseTokenResponsePayload } from "./AuthManager";
+import { assertOidcCryptoForScope } from "../crypto";
 
 interface ParsedPasskeyChallenge {
   challengeId?: string;
@@ -74,6 +75,7 @@ export class PasskeyManager {
   ): Promise<GuardhouseAuthResult> {
     const passkeyAdapter = this.requirePasskeyAdapter();
     const scope = trimToUndefined(options.scope) ?? this.defaultScope;
+    assertOidcCryptoForScope(scope);
     const audience = trimToUndefined(options.audience) ?? this.defaultAudience;
 
     const challengeRequestBody = compactRecord({

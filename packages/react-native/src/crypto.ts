@@ -1,5 +1,23 @@
 import type { CryptoAdapter } from "@guardhouse/core";
 import { createReactNativeLogger } from "./debug";
+import { GuardhouseConfigurationError } from "./types/errors";
+
+/** CryptoAdapter supplies PKCE primitives; jose uses the global Web Crypto API. */
+export function assertOidcCryptoAvailable(): void {
+  const subtle = globalThis.crypto?.subtle;
+  const missing = (["digest", "importKey", "verify"] as const).filter(
+    (operation) => typeof subtle?.[operation] !== "function",
+  );
+  if (missing.length > 0) {
+    throw new GuardhouseConfigurationError(
+      `OIDC requires Web Crypto: crypto.subtle.${missing.join(", crypto.subtle.")} is unavailable. Install a compatible Web Crypto implementation before creating the client or starting OIDC operations. A cryptoAdapter only supplies PKCE random bytes and SHA-256; it does not verify ID-token signatures.`,
+    );
+  }
+}
+
+export function assertOidcCryptoForScope(scope: string): void {
+  if (scope.split(/\s+/).includes("openid")) assertOidcCryptoAvailable();
+}
 
 type DynamicRequire = (moduleName: string) => unknown;
 
@@ -141,7 +159,7 @@ export function resolveReactNativeCryptoAdapter(
 
   if (
     typeof globalThis.crypto?.getRandomValues === "function" &&
-    typeof globalThis.crypto?.subtle === "object"
+    typeof globalThis.crypto?.subtle?.digest === "function"
   ) {
     logger.debug("Using React Native Web Crypto adapter");
     return new ReactNativeWebCryptoAdapter();

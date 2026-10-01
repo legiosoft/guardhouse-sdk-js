@@ -162,6 +162,7 @@ export interface GuardhouseClientConfig extends Omit<
    */
   audience?: string;
   requireBiometrics?: boolean;
+  /** PKCE random bytes/SHA-256 only. OIDC also requires global Web Crypto. */
   cryptoAdapter?: CryptoAdapter;
   /**
    * @deprecated Use refreshTokenStorage instead.

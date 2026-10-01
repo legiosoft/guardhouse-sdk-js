@@ -6,6 +6,8 @@
     "scheme": "com.example.guardhouse",
     "orientation": "portrait",
     "platforms": ["ios", "android"],
+    "plugins": ["react-native-quick-crypto"],
+    "newArchEnabled": true,
     "ios": {
       "bundleIdentifier": "com.example.guardhouse"
     },

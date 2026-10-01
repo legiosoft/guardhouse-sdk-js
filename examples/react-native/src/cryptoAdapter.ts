@@ -5,6 +5,7 @@ import {
   getRandomBytesAsync,
 } from "expo-crypto";
 
+// Optional PKCE adapter only. installCrypto.ts supplies Web Crypto for OIDC.
 export const expoCryptoAdapter: CryptoAdapter = {
   name: "ExpoCrypto",
 

@@ -24,6 +24,19 @@ const {
 const { GuardhouseClient } = require("../core/GuardhouseClient");
 const { GuardhouseError: CoreError } = require("@guardhouse/core");
 const { sanitizeAuthority, resolveEndpoint } = require("../utils/url");
+const { webcrypto } = require("node:crypto");
+const originalCrypto = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+beforeEach(() => {
+  Object.defineProperty(globalThis, "crypto", {
+    configurable: true,
+    value: webcrypto,
+  });
+});
+afterEach(() => {
+  if (originalCrypto)
+    Object.defineProperty(globalThis, "crypto", originalCrypto);
+  else delete globalThis.crypto;
+});
 
 class MemoryStorage {
   constructor() {

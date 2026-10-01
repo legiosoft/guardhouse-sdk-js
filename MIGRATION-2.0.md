@@ -520,6 +520,16 @@ Core `2.0.0-beta.1` and are part of the same beta release train.
 - React Native persisted sessions must be issuer/client-bound and rebuilt from a
   verified identity. Legacy records should cause reauthentication. User and
   nested custom claims returned by the SDK are immutable.
+- React Native OIDC requires global Web Crypto for `jose` signature verification;
+  a `CryptoAdapter` supplies PKCE only. Initialize a compatible provider before
+  importing/creating the SDK. Missing `subtle.importKey`, `verify` or `digest`
+  produces `CONFIG_ERROR` before OIDC interaction, refresh or restoration.
+  Stored credentials are retained when this preflight fails; no unverified
+  identity is returned. OAuth-only PKCE is unchanged. See the
+  [Native runtime setup](./packages/react-native/README.md#oidc-web-crypto-and-pkce-adapters)
+  and updated Expo development-build example. The documented Quick Crypto 1.x
+  setup requires React Native 0.75+ / New Architecture; stock Expo Go is not
+  supported by that provider. Verify algorithms on Android/iOS before release.
 
 Rebuild and typecheck all workspaces after updating; a successful Core build is
 required before packages that consume its generated declarations.

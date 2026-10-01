@@ -10,6 +10,7 @@ It includes:
 - Refresh/logout
 - Deep-link callback handling
 - Expo browser + secure storage adapters
+- Web Crypto bootstrap for signed ID-token verification (native development build)
 
 ## Quick start
 
@@ -33,10 +34,10 @@ GH_TOKEN_ENDPOINT=/connect/token
 GH_REVOCATION_ENDPOINT=/connect/revoke
 ```
 
-3. Install dependencies:
+3. Use Node 22 and install the locked dependencies:
 
 ```bash
-npm install
+npm ci
 ```
 
 4. Typecheck:
@@ -45,11 +46,35 @@ npm install
 npm run typecheck
 ```
 
-5. Run:
+5. Build and run the native development client (iOS requires macOS/Xcode):
 
 ```bash
-npm start
+npx expo run:android
+# or, on macOS:
+npx expo run:ios
 ```
+
+For subsequent Metro sessions use `npm run start:dev-client`. Rebuild the native
+app after changing native dependencies. Stock Expo Go cannot load this example's
+OIDC crypto provider.
+
+## Signed ID-token verification
+
+`index.js` imports `src/installCrypto.ts` before App. The bootstrap calls
+`react-native-quick-crypto`'s `install()` to provide Web Crypto for Core/jose. The
+example pins Quick Crypto 1.1.7, Nitro Modules 0.33.2 and Quick Base64 3.0.1, enables
+the New Architecture, and registers the Expo config plugin in `app.json`.
+
+The existing `expoCryptoAdapter` remains a PKCE adapter only; it is not a
+replacement for `crypto.subtle.importKey/verify`. The SDK reports `CONFIG_ERROR`
+before OIDC interaction if these required methods are missing. The provider must
+also support your issuer's signing algorithm; the SDK never disables signature
+verification to accommodate an unsupported runtime.
+
+On both Android and iOS verify login → refresh with an ID token → app restart →
+refresh without an ID token → app restart → logout. Use a test issuer to check
+that a wrongly signed ID token is rejected. These device checks are required in
+addition to TypeScript and the Node-based SDK tests.
 
 ## Registration `returnUrl` behavior
 
@@ -62,7 +87,7 @@ The SDK detects the `returnUrl` query key and injects a full authorize URL into 
 ## Redirect URI modes
 
 - `GH_REDIRECT_URI=auto`
-  - Useful for Expo Go while iterating.
+  - Derives the callback from the development build's configured scheme.
 - `GH_REDIRECT_URI=com.example.guardhouse://callback`
   - Recommended for dev builds / production-style testing.
 

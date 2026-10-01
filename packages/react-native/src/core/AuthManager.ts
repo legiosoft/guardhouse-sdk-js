@@ -33,6 +33,7 @@ import type {
 import type { GuardhouseStorageAdapter } from "../adapters/StorageAdapter";
 import type { GuardhouseLogger } from "../utils/logger";
 import { trimToUndefined } from "../utils/url";
+import { assertOidcCryptoAvailable, assertOidcCryptoForScope } from "../crypto";
 
 interface StoredSessionBase {
   readonly version: 3;
@@ -397,6 +398,7 @@ export class AuthManager {
     tokenResponse: GuardhouseTokenResponse,
     requestedScope = this.defaultScope,
   ): Promise<GuardhouseAuthResult> {
+    assertOidcCryptoForScope(requestedScope);
     const existingSession = await this.loadStoredSession();
     const responseScope = tokenResponse.scope ?? requestedScope;
     this.assertScopeNotEscalated(requestedScope, responseScope);
@@ -459,6 +461,8 @@ export class AuthManager {
         );
       }
 
+      // A missing runtime dependency must not consume/rotate a refresh token.
+      if (currentSession.kind === "oidc") assertOidcCryptoAvailable();
       const grantedScope = currentSession.scope ?? this.defaultScope;
       const requestedScope = trimToUndefined(options.scope) ?? grantedScope;
       this.assertScopeNotEscalated(grantedScope, requestedScope);
@@ -558,6 +562,8 @@ export class AuthManager {
       return null;
     }
 
+    // Keep configuration failures outside invalid-session cleanup.
+    if (currentSession.kind === "oidc") assertOidcCryptoAvailable();
     if (!this.isExpired(currentSession.expiresAt, minValiditySeconds)) {
       try {
         return await this.restoreCurrentSession(currentSession);
@@ -593,6 +599,7 @@ export class AuthManager {
       return null;
     }
 
+    if (stored.kind === "oidc") assertOidcCryptoAvailable();
     try {
       return (await this.restoreCurrentSession(stored)).session;
     } catch (error) {
@@ -615,6 +622,7 @@ export class AuthManager {
         : Math.max(0, options.minValiditySeconds);
 
     if (stored && !this.isExpired(stored.expiresAt, minValiditySeconds)) {
+      if (stored.kind === "oidc") assertOidcCryptoAvailable();
       try {
         await this.restoreCurrentSession(stored);
         return stored.accessToken;
@@ -692,6 +700,7 @@ export class AuthManager {
 
     const browser = this.requireBrowserAdapter();
     const scope = trimToUndefined(options.scope) ?? this.defaultScope;
+    assertOidcCryptoForScope(scope);
     const audience = this.resolveAudience(options.audience);
     this.logger.info("Starting transaction-bound browser authorization", {
       registrationFlow,

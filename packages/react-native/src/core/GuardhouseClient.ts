@@ -24,7 +24,10 @@ import {
   InAppBrowserAuthAdapter,
   type GuardhouseBrowserAdapter,
 } from "../adapters/BrowserAdapter";
-import { resolveReactNativeCryptoAdapter } from "../crypto";
+import {
+  assertOidcCryptoForScope,
+  resolveReactNativeCryptoAdapter,
+} from "../crypto";
 import { createLogger } from "../utils/logger";
 import {
   resolveEndpoint,
@@ -90,6 +93,7 @@ export class GuardhouseClient {
       );
     }
 
+    assertOidcCryptoForScope(defaultScope);
     const cryptoAdapter = resolveReactNativeCryptoAdapter(
       config.cryptoAdapter,
       debug,
