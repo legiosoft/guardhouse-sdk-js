@@ -4,7 +4,10 @@ import type {
   User as CoreUser,
   VerifiedIdTokenPayload,
 } from "@guardhouse/core";
-import { restoreAuthorizationTransaction } from "@guardhouse/core";
+import {
+  restoreAuthorizationTransaction,
+  isTransientAuthError,
+} from "@guardhouse/core";
 import type { OidcSessionData, StorageAdapter, TokenData } from "./types";
 import { parseQueryParams } from "./utils";
 
@@ -30,12 +33,6 @@ const OAUTH_RESPONSE_KEYS = [
   "scope",
   ...FRONT_CHANNEL_TOKEN_KEYS,
 ] as const;
-
-const RETRYABLE_PRE_RESPONSE_REFRESH_ERROR_CODES = new Set([
-  "NETWORK_ERROR",
-  "REQUEST_TIMEOUT",
-  "OIDC_METADATA_REQUEST_FAILED",
-]);
 
 export type LoginTransactionData = AuthorizationTransaction;
 
@@ -209,13 +206,7 @@ export function isAuthOperationCurrent(
 }
 
 export function isRetryablePreResponseRefreshError(error: unknown): boolean {
-  if (!error || typeof error !== "object") return false;
-
-  const code = (error as Record<string, unknown>)["code"];
-  return (
-    typeof code === "string" &&
-    RETRYABLE_PRE_RESPONSE_REFRESH_ERROR_CODES.has(code.trim().toUpperCase())
-  );
+  return isTransientAuthError(error);
 }
 
 export async function removeStorageValueIfMatches(

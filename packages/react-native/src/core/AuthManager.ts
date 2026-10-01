@@ -1,6 +1,7 @@
 import {
   GuardhouseError as CoreGuardhouseError,
   canonicalizeIssuer,
+  isTransientAuthError,
 } from "@guardhouse/core";
 import type {
   AuthorizationCodeExchangeResult,
@@ -559,7 +560,7 @@ export class AuthManager {
       try {
         return await this.restoreCurrentSession(currentSession);
       } catch (error) {
-        await this.clearSession();
+        if (!isTransientAuthError(error)) await this.clearSession();
         throw this.wrapCoreError(
           error,
           "TOKEN_REQUEST_FAILED",
@@ -593,7 +594,7 @@ export class AuthManager {
     try {
       return (await this.restoreCurrentSession(stored)).session;
     } catch (error) {
-      await this.clearSession();
+      if (!isTransientAuthError(error)) await this.clearSession();
       throw this.wrapCoreError(
         error,
         "TOKEN_REQUEST_FAILED",
@@ -616,7 +617,7 @@ export class AuthManager {
         await this.restoreCurrentSession(stored);
         return stored.accessToken;
       } catch (error) {
-        await this.clearSession();
+        if (!isTransientAuthError(error)) await this.clearSession();
         throw this.wrapCoreError(
           error,
           "TOKEN_REQUEST_FAILED",
@@ -1280,10 +1281,9 @@ export class AuthManager {
     if (error instanceof CoreGuardhouseError) {
       return new GuardhouseAuthError(
         error.message,
-        error.code === "NETWORK_ERROR" || error.code === "REQUEST_TIMEOUT"
-          ? "NETWORK_ERROR"
-          : fallbackCode,
+        isTransientAuthError(error) ? "NETWORK_ERROR" : fallbackCode,
         error.statusCode,
+        error,
       );
     }
     return new GuardhouseAuthError(

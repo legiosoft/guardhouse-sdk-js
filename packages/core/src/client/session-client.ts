@@ -10,7 +10,7 @@ import type {
   AuthorizationTransaction,
   ValidatedAuthorizationCallback,
 } from "../auth";
-import { GuardhouseError } from "../config";
+import { GuardhouseError, isTransientAuthError } from "../config";
 import { OidcIdTokenVerifier } from "../token";
 import type { IdTokenValidationContext, VerifiedIdToken } from "../token";
 import type { OidcIdentity } from "../token/id-token-verifier";
@@ -431,8 +431,9 @@ export class GuardhouseClientSession extends GuardhouseClientBase {
               purpose: "session",
             })
           ).identity;
-        } catch {
+        } catch (error) {
           if (generation !== this.sessionOperationGeneration) return null;
+          if (isTransientAuthError(error)) throw error;
           await this.clearSessionStateIfUnchanged(persistedSnapshot);
           return null;
         }
@@ -596,8 +597,9 @@ export class GuardhouseClientSession extends GuardhouseClientBase {
           verifiedIdentity = (
             await this.verifyIdToken(idToken, { purpose: "session" })
           ).identity;
-        } catch {
+        } catch (error) {
           if (generation !== this.sessionOperationGeneration) return null;
+          if (isTransientAuthError(error)) throw error;
           await this.clearSessionStateIfUnchanged(serialized);
           return null;
         }
@@ -639,6 +641,7 @@ export class GuardhouseClientSession extends GuardhouseClientBase {
         );
       }
       if (generation !== this.sessionOperationGeneration) return null;
+      if (isTransientAuthError(error)) throw error;
       if (persistedSnapshot !== null && persistedSnapshot !== undefined) {
         await this.clearSessionStateIfUnchanged(persistedSnapshot);
       }

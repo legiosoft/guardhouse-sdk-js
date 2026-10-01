@@ -6,7 +6,195 @@ import {
 } from "../token";
 import { verifyHistoricalIdTokenIdentity } from "../token/id-token-verifier";
 import { GuardhouseClient } from "../client";
+import { isTransientAuthError } from "../config";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
+describe("session restoration availability failures", () => {
+  let fixture: SigningFixture;
+  const authority = "https://auth.example.com/";
+  let outage: { endpoint: string; mode: string | number } | null;
+  beforeAll(async () => {
+    fixture = await createSigningFixture("restore-key");
+  });
+  beforeEach(() => {
+    outage = null;
+    jest.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (outage && url.endsWith(outage.endpoint)) {
+        if (outage.mode === "offline")
+          throw new TypeError("Network unavailable");
+        if (outage.mode === "malformed") return new Response("{");
+        return new Response("unavailable", { status: Number(outage.mode) });
+      }
+      if (url.endsWith("/.well-known/openid-configuration"))
+        return jsonResponse({
+          issuer: authority,
+          jwks_uri: authority + "jwks",
+          id_token_signing_alg_values_supported: ["RS256"],
+        });
+      if (url.endsWith("/jwks"))
+        return jsonResponse({ keys: [fixture.publicJwk] });
+      throw new Error("Unexpected test request");
+    });
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  async function persistedClient(warm: boolean) {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: async (key: string) => values.get(key) ?? null,
+      setItem: async (key: string, value: string) => {
+        values.set(key, value);
+      },
+      removeItem: async (key: string) => {
+        values.delete(key);
+      },
+    };
+    const client = new GuardhouseClient({
+      authority,
+      clientId: "client-id",
+      storage,
+      discoveryCacheTtlMs: 0,
+    });
+    const raw = await signIdToken(fixture, { iss: authority });
+    const verified = await client.verifyIdToken(raw, SESSION_CONTEXT);
+    const serialized = JSON.stringify({
+      version: 3,
+      kind: "oidc",
+      issuer: authority,
+      clientId: "client-id",
+      accessToken: "access",
+      tokenType: "Bearer",
+      expiresAt: Date.now() + 3_600_000,
+      hasRefreshToken: true,
+      idToken: raw,
+      identity: verified.identity,
+    });
+    const key =
+      "guardhouse:session:v3:" + encodeURIComponent(authority) + ":client-id";
+    values.set(key, serialized);
+    if (warm) expect(await client.getSessionState()).not.toBeNull();
+    return { client, values, key, serialized };
+  }
+
+  it.each(
+    [false, true].flatMap((warm) =>
+      ["/.well-known/openid-configuration", "/jwks"].flatMap((endpoint) =>
+        ["offline", 503].map((mode) => [warm, endpoint, mode] as const),
+      ),
+    ),
+  )(
+    "preserves Core storage across failure and retry (warm=%s, %s, %s)",
+    async (warm, endpoint, mode) => {
+      const { client, values, key, serialized } = await persistedClient(warm);
+      outage = { endpoint, mode };
+      await expect(client.getSessionState()).rejects.toMatchObject({
+        code: "OIDC_METADATA_REQUEST_FAILED",
+      });
+      expect(values.get(key)).toBe(serialized);
+      outage = null;
+      await expect(client.getSessionState()).resolves.toMatchObject({
+        accessToken: "access",
+        hasRefreshToken: true,
+      });
+      expect(values.get(key)).toBe(serialized);
+    },
+  );
+
+  it.each([
+    ["/.well-known/openid-configuration", "malformed"],
+    ["/jwks", "malformed"],
+    ["/jwks", 404],
+  ] as const)(
+    "still clears invalid metadata (%s, %s)",
+    async (endpoint, mode) => {
+      const { client, values } = await persistedClient(false);
+      outage = { endpoint, mode };
+      await expect(client.getSessionState()).resolves.toBeNull();
+      expect(values.size).toBe(0);
+    },
+  );
+
+  it("preserves a newer stored record when an older check loses the network", async () => {
+    const { client, values, key, serialized } = await persistedClient(false);
+    const newer = JSON.stringify({
+      ...JSON.parse(serialized),
+      accessToken: "newer-access",
+    });
+    jest.spyOn(client, "verifyIdToken").mockImplementationOnce(async () => {
+      values.set(key, newer);
+      const { GuardhouseError } = await import("../config");
+      throw new GuardhouseError("Offline", "NETWORK_ERROR");
+    });
+    await expect(client.getSessionState()).rejects.toMatchObject({
+      code: "NETWORK_ERROR",
+    });
+    expect(values.get(key)).toBe(newer);
+    await expect(client.getSessionState()).resolves.toMatchObject({
+      accessToken: "newer-access",
+    });
+  });
+
+  it("can retry a key rotation immediately after forced JWKS reload is unavailable", async () => {
+    const rotated = await createSigningFixture("restore-key");
+    let keys = [fixture.publicJwk];
+    let unavailable = false;
+    const fetcher = jest.fn(async (input: Parameters<typeof fetch>[0]) => {
+      if (String(input).endsWith("/.well-known/openid-configuration"))
+        return jsonResponse({
+          issuer: "https://auth.example.com",
+          jwks_uri: authority + "jwks",
+          id_token_signing_alg_values_supported: ["RS256"],
+        });
+      if (unavailable) return new Response("unavailable", { status: 503 });
+      return jsonResponse({ keys });
+    });
+    const verifier = createVerifier(fetcher);
+    await verifier.verify(await signIdToken(fixture), SESSION_CONTEXT);
+    const token = await signIdToken(rotated);
+    unavailable = true;
+    await expect(verifier.verify(token, SESSION_CONTEXT)).rejects.toMatchObject(
+      {
+        code: "OIDC_METADATA_REQUEST_FAILED",
+        statusCode: 503,
+      },
+    );
+    unavailable = false;
+    keys = [rotated.publicJwk];
+    await expect(
+      verifier.verify(token, SESSION_CONTEXT),
+    ).resolves.toMatchObject({ identity: { subject: "user-1" } });
+  });
+
+  it("classifies a JWKS deadline as availability failure, including a stalled body", async () => {
+    const fetcher = jest.fn(async (input: Parameters<typeof fetch>[0]) => {
+      if (String(input).endsWith("/.well-known/openid-configuration"))
+        return jsonResponse({
+          issuer: "https://auth.example.com",
+          jwks_uri: authority + "jwks",
+          id_token_signing_alg_values_supported: ["RS256"],
+        });
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("{"));
+          },
+        }),
+      );
+    });
+    const verifier = createVerifier(fetcher, { metadataRequestTimeoutMs: 5 });
+    let failure: unknown;
+    try {
+      await verifier.verify(await signIdToken(fixture), SESSION_CONTEXT);
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({
+      code: "OIDC_METADATA_REQUEST_FAILED",
+      retryable: true,
+    });
+    expect(isTransientAuthError(failure)).toBe(true);
+  });
+});
 
 interface SigningFixture {
   kid: string;

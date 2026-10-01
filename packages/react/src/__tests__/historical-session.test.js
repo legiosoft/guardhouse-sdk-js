@@ -3,6 +3,7 @@ const Renderer = require("react-test-renderer");
 const { generateKeyPairSync, sign, webcrypto } = require("node:crypto");
 const { GuardhouseClient } = require("@guardhouse/core");
 const { GuardhouseProvider, useAuth } = require("../context");
+const { ProtectedRoute } = require("../ProtectedRoute");
 const {
   buildRefreshedOidcSession,
   getOidcSessionStorageKey,
@@ -24,7 +25,14 @@ const jwk = {
 };
 const now = () => Math.floor(Date.now() / 1000);
 const originalCrypto = global.crypto;
-let values, calls, userInfo, responseTokens, userInfoStatus, renderer, auth;
+let values,
+  calls,
+  userInfo,
+  responseTokens,
+  userInfoStatus,
+  renderer,
+  auth,
+  failure;
 
 function token(overrides = {}) {
   const header = Buffer.from(
@@ -75,7 +83,7 @@ async function refreshedSnapshot(raw = token()) {
   );
 }
 
-async function mount(record) {
+async function mount(record, protectedRoute = false) {
   values.set(key, JSON.stringify(record));
   function Probe() {
     auth = useAuth();
@@ -95,7 +103,18 @@ async function mount(record) {
             requiredAmrValues: ["otp"],
           },
         },
-        React.createElement(Probe),
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(Probe),
+          protectedRoute
+            ? React.createElement(
+                ProtectedRoute,
+                null,
+                React.createElement("span", null, "Private content"),
+              )
+            : null,
+        ),
       ),
     );
   });
@@ -113,6 +132,7 @@ beforeEach(() => {
   calls = [];
   auth = null;
   renderer = null;
+  failure = null;
   userInfo = { sub: "user-1", roles: ["reader"] };
   userInfoStatus = 200;
   responseTokens = {
@@ -133,6 +153,23 @@ beforeEach(() => {
   };
   jest.spyOn(global, "fetch").mockImplementation(async (url, options = {}) => {
     calls.push({ url: String(url), ...options });
+    if (failure && String(url).endsWith(failure.endpoint)) {
+      if (failure.mode === "offline")
+        throw new TypeError("Synthetic network outage");
+      if (failure.mode === "pending") return failure.promise;
+      if (failure.mode === "body") {
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.error(new TypeError("Stream interrupted"));
+            },
+          }),
+        );
+      }
+      return new Response(JSON.stringify({ error: "server_error" }), {
+        status: failure.mode,
+      });
+    }
     let body;
     if (String(url).endsWith("/.well-known/openid-configuration")) {
       body = {
@@ -274,4 +311,144 @@ it("does not promote historical restoration into a current ID token", async () =
   ).rejects.toMatchObject({
     code: "ID_TOKEN_VALIDATION_FAILED",
   });
+});
+
+it.each(
+  [false, true].flatMap((historical) =>
+    ["/.well-known/openid-configuration", "/jwks", "/connect/userinfo"].flatMap(
+      (endpoint) =>
+        ["offline", 503, 429, "body"].map((mode) => [
+          historical,
+          endpoint,
+          mode,
+        ]),
+    ),
+  ),
+)(
+  "preserves credentials and denies tokens until retry (historical=%s, %s, %s)",
+  async (historical, endpoint, mode) => {
+    const record = await refreshedSnapshot(
+      token({ exp: historical ? now() - 120 : now() + 3600 }),
+    );
+    record.idTokenCurrent = !historical;
+    failure = { endpoint, mode };
+    await mount(record);
+    expect(auth).toMatchObject({
+      isAuthenticated: false,
+      user: null,
+      error: expect.any(Error),
+    });
+    expect(values.get(key)).toBe(JSON.stringify(record));
+    await Renderer.act(async () => {
+      expect(await auth.getAccessToken()).toBeNull();
+      expect(await auth.getAccessTokenSilently()).toBeNull();
+    });
+    expect(values.get(key)).toBe(JSON.stringify(record));
+    failure = null;
+    await Renderer.act(async () => {
+      expect(await auth.getAccessTokenSilently()).toBe(record.accessToken);
+    });
+    expect(auth).toMatchObject({
+      isAuthenticated: true,
+      user: expect.objectContaining({ sub: "user-1" }),
+      error: null,
+    });
+    expect(values.get(key)).toBe(JSON.stringify(record));
+    const requestCount = calls.length;
+    expect(await auth.getAccessToken()).toBe(record.accessToken);
+    expect(calls).toHaveLength(requestCount);
+  },
+);
+
+it("ProtectedRoute retries restoration without redirecting to login during an outage", async () => {
+  const record = await refreshedSnapshot();
+  const login = jest.spyOn(
+    GuardhouseClient.prototype,
+    "createAuthorizationRequest",
+  );
+  failure = { endpoint: "/connect/userinfo", mode: 503 };
+  await mount(record, true);
+  expect(login).not.toHaveBeenCalled();
+  expect(JSON.stringify(renderer.toJSON())).not.toContain("Private content");
+  expect(JSON.stringify(renderer.toJSON())).toContain(
+    "Unable to restore your session",
+  );
+  failure = null;
+  await Renderer.act(async () => {
+    renderer.root.findByType("button").props.onClick();
+  });
+  for (let attempt = 0; attempt < 200 && !auth.isAuthenticated; attempt++) {
+    await Renderer.act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    });
+  }
+  expect(auth.isAuthenticated).toBe(true);
+  expect(login).not.toHaveBeenCalled();
+  expect(JSON.stringify(renderer.toJSON())).toContain("Private content");
+});
+
+it("does not resurrect a session when logout wins over pending retry", async () => {
+  const record = await refreshedSnapshot();
+  failure = { endpoint: "/connect/userinfo", mode: "offline" };
+  await mount(record);
+  let release;
+  failure = {
+    endpoint: "/connect/userinfo",
+    mode: "pending",
+    promise: new Promise((resolve) => {
+      release = resolve;
+    }),
+  };
+  let retry;
+  await Renderer.act(async () => {
+    retry = auth.getAccessTokenSilently();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+  jest
+    .spyOn(GuardhouseClient.prototype, "buildLogoutUrl")
+    .mockResolvedValue("https://historical.test/logout");
+  await Renderer.act(async () => {
+    await auth.logout();
+  });
+  await Renderer.act(async () => {
+    release(new Response(JSON.stringify(userInfo)));
+    expect(await retry).toBeNull();
+  });
+  expect(values.has(key)).toBe(false);
+  expect(auth.isAuthenticated).toBe(false);
+});
+
+it("retains a newer record when an older restoration fails temporarily", async () => {
+  const record = await refreshedSnapshot();
+  failure = { endpoint: "/connect/userinfo", mode: "offline" };
+  await mount(record);
+  let reject;
+  failure = {
+    endpoint: "/connect/userinfo",
+    mode: "pending",
+    promise: new Promise((_resolve, rejectPromise) => {
+      reject = rejectPromise;
+    }),
+  };
+  let retry;
+  await Renderer.act(async () => {
+    retry = auth.getAccessTokenSilently();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+  const newer = {
+    ...record,
+    accessToken: "newer-access",
+    refreshToken: "newer-refresh",
+  };
+  values.set(key, JSON.stringify(newer));
+  await Renderer.act(async () => {
+    reject(new TypeError("Synthetic outage"));
+    expect(await retry).toBeNull();
+  });
+  expect(values.get(key)).toBe(JSON.stringify(newer));
+  failure = null;
+  await Renderer.act(async () => {
+    expect(await auth.getAccessToken()).toBe("newer-access");
+  });
+  expect(auth.isAuthenticated).toBe(true);
 });

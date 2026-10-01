@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ComponentType } from "react";
+import { isTransientAuthError } from "@guardhouse/core";
 import { useAuth } from "./context";
 import type {
   ProtectedRouteProps,
@@ -15,21 +16,40 @@ export function ProtectedRoute<P extends object>({
   onRedirecting,
   onRedirectError,
 }: ProtectedRouteProps<P>) {
-  const { isAuthenticated, isLoading, loginWithRedirect } = useAuth();
+  const {
+    isAuthenticated,
+    isLoading,
+    loginWithRedirect,
+    getAccessTokenSilently,
+    error,
+  } = useAuth();
   const hasTriggeredLogin = useRef(false);
   const [redirectError, setRedirectError] = useState<Error | null>(null);
   const [retrySequence, setRetrySequence] = useState(0);
+  const restorationError =
+    !redirectError && isTransientAuthError(error) ? error : null;
 
   const retry = useCallback(() => {
+    if (restorationError) {
+      void getAccessTokenSilently().catch((error: unknown) => {
+        setRedirectError(
+          error instanceof Error
+            ? error
+            : new Error("Session restoration failed"),
+        );
+      });
+      return;
+    }
     hasTriggeredLogin.current = false;
     setRedirectError(null);
     setRetrySequence((value) => value + 1);
-  }, []);
+  }, [getAccessTokenSilently, restorationError]);
 
   useEffect(() => {
     if (
       isLoading ||
       isAuthenticated ||
+      restorationError ||
       redirectError ||
       hasTriggeredLogin.current
     ) {
@@ -40,7 +60,9 @@ export function ProtectedRoute<P extends object>({
     let loginPromise: Promise<void>;
     try {
       const safeReturnTo = normalizeReturnTo(returnTo ?? getCurrentReturnTo());
-      loginPromise = loginWithRedirect({ appState: { returnTo: safeReturnTo } });
+      loginPromise = loginWithRedirect({
+        appState: { returnTo: safeReturnTo },
+      });
     } catch (error) {
       hasTriggeredLogin.current = false;
       setRedirectError(
@@ -49,19 +71,18 @@ export function ProtectedRoute<P extends object>({
       return;
     }
 
-    void loginPromise.catch(
-      (error: unknown) => {
-        hasTriggeredLogin.current = false;
-        setRedirectError(
-          error instanceof Error ? error : new Error("Login redirect failed"),
-        );
-      },
-    );
+    void loginPromise.catch((error: unknown) => {
+      hasTriggeredLogin.current = false;
+      setRedirectError(
+        error instanceof Error ? error : new Error("Login redirect failed"),
+      );
+    });
   }, [
     isAuthenticated,
     isLoading,
     loginWithRedirect,
     redirectError,
+    restorationError,
     retrySequence,
     returnTo,
   ]);
@@ -71,14 +92,19 @@ export function ProtectedRoute<P extends object>({
   }
 
   if (!isAuthenticated) {
-    if (redirectError) {
+    const authError = redirectError ?? restorationError;
+    if (authError) {
       return (
         <>
           {onRedirectError ? (
-            onRedirectError({ error: redirectError, retry })
+            onRedirectError({ error: authError, retry })
           ) : (
             <div role="alert">
-              <p>Unable to start sign in.</p>
+              <p>
+                {restorationError
+                  ? "Unable to restore your session."
+                  : "Unable to start sign in."}
+              </p>
               <button type="button" onClick={retry}>
                 Retry
               </button>

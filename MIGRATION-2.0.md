@@ -289,8 +289,34 @@ only the subject in that case. Its same-instance historical session cache remain
 available. Current-token login and restoration keep their existing behavior.
 React adds an optional `idTokenCurrent` flag to v3 records; earlier v3 records
 remain readable, and expired ID tokens follow the historical restoration path.
-Storage namespaces and the v3 schema version are unchanged. Existing handling of
-transient restoration errors is not changed by this fix.
+Storage namespaces and the v3 schema version are unchanged.
+
+### Recovering from temporary restoration failures
+
+Network failures, metadata timeouts and HTTP 408/429/5xx availability failures
+during session verification preserve stored credentials. They do not authenticate
+the user. Signature, identity, subject-binding and revoked-token failures still
+reject and clear the invalid session. Invalid metadata is not treated as a network
+outage merely because verification could not complete.
+
+React reports restoration failures in `auth.error`. Calling `getAccessToken()` or
+`getAccessTokenSilently()` again revalidates the saved session; neither returns a
+token from a record that has not been verified in this provider. A successfully
+verified, unchanged record can still use the existing fast path. ProtectedRoute
+shows Retry for temporary restoration failures instead of starting a new login;
+its existing `onRedirectError` renderer also receives these errors and a retry
+callback that repeats restoration.
+
+Core `getSessionState()` now rejects with the availability error instead of
+silently returning null and deleting the record. Native restoration/getter methods
+also preserve credentials and reject on temporary failure. Callers can use the
+additive `isTransientAuthError(error)` helper to decide when to offer another
+attempt. Retry is explicit; this change adds no background retry loop.
+
+This classification does not authorize replaying a refresh grant that might have
+already consumed its token. Existing cleanup after a successful refresh response
+followed by validation/UserInfo failure remains unchanged; the old rotated refresh
+token must not be reused.
 
 OAuth-only exchanges and refreshes reject an unexpected ID token. Refresh scope
 may narrow but must not escalate beyond the previously granted scope.

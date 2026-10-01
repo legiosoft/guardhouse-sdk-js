@@ -6,7 +6,7 @@ import {
   type FetchImplementation,
 } from "jose";
 
-import { GuardhouseError } from "../config";
+import { GuardhouseError, isTransientAuthError } from "../config";
 import {
   enforceNonSpoofableHostname,
   enforceSecureHttpUrl,
@@ -167,6 +167,7 @@ interface DiscoveryMetadata {
 }
 
 function failValidation(reason: string, cause?: unknown): never {
+  if (isTransientAuthError(cause)) throw cause;
   throw new GuardhouseError(
     `ID token validation failed: ${reason}`,
     "ID_TOKEN_VALIDATION_FAILED",
@@ -1080,12 +1081,16 @@ export class OidcIdTokenVerifier {
       return this.remoteJwks;
     }
 
-    const boundedFetch: FetchImplementation = (url, options) =>
-      this.fetcher(url, {
-        ...options,
-        cache: "no-store",
-        credentials: "omit",
-      });
+    // Read the response before handing it to jose: jose otherwise drops HTTP
+    // status and body-stream failures, making outages look like bad signatures.
+    const boundedFetch: FetchImplementation = async (url) =>
+      new Response(
+        JSON.stringify(await this.fetchJson(String(url), "OIDC JWKS", true)),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
 
     this.remoteJwks = createRemoteJWKSet(new URL(jwksUri), {
       timeoutDuration: this.metadataRequestTimeoutMs,
@@ -1117,6 +1122,7 @@ export class OidcIdTokenVerifier {
       return false;
     }
 
+    const previousRefreshAt = this.lastForcedRefreshAt;
     this.lastForcedRefreshAt = now;
     const refresh = remoteJwks.reload();
     this.jwksRefreshRequest = refresh;
@@ -1125,6 +1131,8 @@ export class OidcIdTokenVerifier {
       await refresh;
       return true;
     } catch (error) {
+      if (isTransientAuthError(error))
+        this.lastForcedRefreshAt = previousRefreshAt;
       failValidation("JWKS refresh failed", error);
     } finally {
       if (this.jwksRefreshRequest === refresh) {
@@ -1219,13 +1227,23 @@ export class OidcIdTokenVerifier {
     return value;
   }
 
-  private async fetchJson(url: string, name: string): Promise<unknown> {
+  private async fetchJson(
+    url: string,
+    name: string,
+    isJwks = false,
+  ): Promise<unknown> {
     const controller = new AbortController();
     let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_resolve, reject) => {
       timeoutHandle = setTimeout(() => {
         controller.abort();
-        reject(new Error(`${name} request timed out`));
+        reject(
+          new GuardhouseError(
+            `${name} request timed out`,
+            "OIDC_METADATA_REQUEST_FAILED",
+            { retryable: true },
+          ),
+        );
       }, this.metadataRequestTimeoutMs);
     });
 
@@ -1242,7 +1260,7 @@ export class OidcIdTokenVerifier {
         timeout,
       ]);
 
-      if (!response.ok) {
+      if (!response.ok || (isJwks && response.status !== 200)) {
         throw new GuardhouseError(
           `${name} request failed with status ${response.status}`,
           "OIDC_METADATA_REQUEST_FAILED",
@@ -1251,7 +1269,12 @@ export class OidcIdTokenVerifier {
       }
 
       const body = await Promise.race([
-        this.readBoundedResponseBody(response, controller, name),
+        this.readBoundedResponseBody(
+          response,
+          controller,
+          name,
+          isJwks ? Infinity : MAX_METADATA_RESPONSE_BYTES,
+        ),
         timeout,
       ]);
       if (!body) {
@@ -1275,7 +1298,7 @@ export class OidcIdTokenVerifier {
       throw new GuardhouseError(
         `${name} request failed`,
         "OIDC_METADATA_REQUEST_FAILED",
-        { cause: error },
+        { cause: error, retryable: true },
       );
     } finally {
       if (timeoutHandle) clearTimeout(timeoutHandle);
@@ -1286,12 +1309,13 @@ export class OidcIdTokenVerifier {
     response: Response,
     controller: AbortController,
     name: string,
+    maxBytes = MAX_METADATA_RESPONSE_BYTES,
   ): Promise<string> {
     const advertisedLength = response.headers.get("Content-Length");
     if (
       advertisedLength &&
       /^\d+$/.test(advertisedLength.trim()) &&
-      Number(advertisedLength) > MAX_METADATA_RESPONSE_BYTES
+      Number(advertisedLength) > maxBytes
     ) {
       controller.abort();
       throw new GuardhouseError(
@@ -1317,7 +1341,7 @@ export class OidcIdTokenVerifier {
         if (done) return body + decoder.decode();
 
         receivedBytes += value.byteLength;
-        if (receivedBytes > MAX_METADATA_RESPONSE_BYTES) {
+        if (receivedBytes > maxBytes) {
           controller.abort();
           await reader.cancel().catch(() => undefined);
           throw new GuardhouseError(

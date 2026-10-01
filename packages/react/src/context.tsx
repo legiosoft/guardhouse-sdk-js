@@ -11,6 +11,7 @@ import {
   GuardhouseClient,
   generateState,
   setGuardhouseDebug,
+  isTransientAuthError,
 } from "@guardhouse/core";
 import type {
   GuardhouseConfig as CoreGuardhouseConfig,
@@ -110,6 +111,12 @@ export function GuardhouseProvider({
     user: null,
   });
   const initializedNamespaceRef = useRef<string | null>(null);
+  const verifiedSessionRef = useRef<{
+    serialized: string;
+    epoch: number;
+    namespace: string;
+    verify: (session: OidcSessionData) => Promise<CoreUser>;
+  } | null>(null);
   const activeRefreshPromise = useRef<{
     namespace: string;
     epoch: number;
@@ -148,6 +155,7 @@ export function GuardhouseProvider({
   const currentNamespaceRef = useRef(oidcSessionStorageKey);
   currentNamespaceRef.current = oidcSessionStorageKey;
   const invalidateAuthOperations = useCallback((): number => {
+    verifiedSessionRef.current = null;
     authOperationEpochRef.current += 1;
     return authOperationEpochRef.current;
   }, []);
@@ -228,6 +236,7 @@ export function GuardhouseProvider({
 
   const handleError = useCallback(
     (error: unknown) => {
+      verifiedSessionRef.current = null;
       const normalizedError =
         error instanceof Error ? error : new Error("Authentication failed");
       logger.error("Authentication flow failed", {
@@ -507,6 +516,20 @@ export function GuardhouseProvider({
     [client, config.requiredAcrValues, config.requiredAmrValues],
   );
 
+  const rememberVerifiedSession = useCallback(
+    (snapshot: StoredOidcSessionSnapshot, epoch: number) => {
+      if (isCurrentAuthOperation(epoch, oidcSessionStorageKey)) {
+        verifiedSessionRef.current = {
+          serialized: snapshot.serialized,
+          epoch,
+          namespace: oidcSessionStorageKey,
+          verify: verifySessionIdentity,
+        };
+      }
+    },
+    [isCurrentAuthOperation, oidcSessionStorageKey, verifySessionIdentity],
+  );
+
   const refreshSession = useCallback(
     async (
       sessionSnapshot: StoredOidcSessionSnapshot,
@@ -555,6 +578,7 @@ export function GuardhouseProvider({
               logger.warn("Newer stored session could not be restored", {
                 error: String(error),
               });
+              if (isTransientAuthError(error)) throw error;
               await removePersistedSessionIfMatches(replacement);
               return null;
             }
@@ -712,7 +736,12 @@ export function GuardhouseProvider({
               ) {
                 return discardAndMaybeRecover(candidate, canRecoverNewer);
               }
-              return restoreCurrentWinner(candidate, canRecoverNewer);
+              const winner = await restoreCurrentWinner(
+                candidate,
+                canRecoverNewer,
+              );
+              if (winner) return winner;
+              throw error;
             }
           }
 
@@ -727,7 +756,9 @@ export function GuardhouseProvider({
       };
 
       try {
-        return await refreshPromise;
+        const result = await refreshPromise;
+        if (result) rememberVerifiedSession(result.snapshot, operationEpoch);
+        return result;
       } finally {
         if (activeRefreshPromise.current?.promise === refreshPromise) {
           activeRefreshPromise.current = null;
@@ -747,6 +778,7 @@ export function GuardhouseProvider({
       replacePersistedOidcSessionIfMatches,
       removePersistedSessionIfMatches,
       verifySessionIdentity,
+      rememberVerifiedSession,
     ],
   );
 
@@ -755,6 +787,7 @@ export function GuardhouseProvider({
       initialSnapshot: StoredOidcSessionSnapshot,
       allowNewerRecovery = true,
     ): Promise<RefreshedSessionResult | null> => {
+      const operationEpoch = authOperationEpochRef.current;
       const restore = async (
         candidate: StoredOidcSessionSnapshot,
         canRecoverNewer: boolean,
@@ -770,6 +803,7 @@ export function GuardhouseProvider({
           logger.warn("Stored session identity validation failed", {
             error: String(error),
           });
+          if (isTransientAuthError(error)) throw error;
           const replacement = await removePersistedSessionIfMatches(candidate);
           if (!replacement || !canRecoverNewer) return null;
           return restore(replacement, false);
@@ -788,7 +822,9 @@ export function GuardhouseProvider({
         return restore(current, false);
       };
 
-      return restore(initialSnapshot, allowNewerRecovery);
+      const result = await restore(initialSnapshot, allowNewerRecovery);
+      if (result) rememberVerifiedSession(result.snapshot, operationEpoch);
+      return result;
     },
     [
       logger,
@@ -796,6 +832,7 @@ export function GuardhouseProvider({
       refreshSession,
       removePersistedSessionIfMatches,
       verifySessionIdentity,
+      rememberVerifiedSession,
     ],
   );
 
@@ -966,6 +1003,7 @@ export function GuardhouseProvider({
           return true;
         }
 
+        rememberVerifiedSession(persistedSnapshot, operationEpoch);
         handleSuccess(authenticatedUser, tokenData);
         if (config.onRedirectCallback) {
           await config.onRedirectCallback(
@@ -1047,6 +1085,7 @@ export function GuardhouseProvider({
     config.onRedirectCallback,
     handleLoading,
     handleSuccess,
+    rememberVerifiedSession,
     invalidateAuthOperations,
     isCurrentAuthOperation,
     logger,
@@ -1152,16 +1191,12 @@ export function GuardhouseProvider({
       logger.error("Session check failed", {
         error: String(error),
       });
-      setState((prev) => ({
-        ...prev,
-        isLoading: false,
-        isAuthenticated: false,
-        user: null,
-      }));
+      handleError(error);
     }
   }, [
     handleLoading,
     handleSuccess,
+    handleError,
     isCurrentAuthOperation,
     logger,
     oidcSessionStorageKey,
@@ -1489,6 +1524,20 @@ export function GuardhouseProvider({
 
     if (!sessionSnapshot) {
       logger.debug("No OIDC session available for silent retrieval");
+      verifiedSessionRef.current = null;
+      setState((prev) =>
+        !prev.isLoading &&
+        !prev.isAuthenticated &&
+        prev.user === null &&
+        prev.error === null
+          ? prev
+          : {
+              isLoading: false,
+              isAuthenticated: false,
+              user: null,
+              error: null,
+            },
+      );
       return null;
     }
 
@@ -1496,22 +1545,44 @@ export function GuardhouseProvider({
 
     const now = Math.floor(Date.now() / 1000);
 
-    if (sessionData.expiresAt > now + ACCESS_TOKEN_REFRESH_LEEWAY_SECONDS) {
+    const hasValidity =
+      sessionData.expiresAt > now + ACCESS_TOKEN_REFRESH_LEEWAY_SECONDS;
+    const verified = verifiedSessionRef.current;
+    if (
+      hasValidity &&
+      verified?.serialized === sessionSnapshot.serialized &&
+      verified.epoch === operationEpoch &&
+      verified.namespace === oidcSessionStorageKey &&
+      verified.verify === verifySessionIdentity
+    ) {
       logger.debug("Using existing access token for silent retrieval", {
         expiresAt: sessionData.expiresAt,
       });
       return sessionData.accessToken;
     }
 
-    const refreshedSession = await refreshSession(sessionSnapshot);
+    let refreshedSession: RefreshedSessionResult | null;
+    try {
+      refreshedSession = hasValidity
+        ? await restoreSessionSnapshot(sessionSnapshot)
+        : await refreshSession(sessionSnapshot);
+    } catch (error) {
+      if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey))
+        return null;
+      if (!isTransientAuthError(error)) throw error;
+      handleError(error);
+      return null;
+    }
 
     if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
       return null;
     }
 
     if (!refreshedSession) {
+      verifiedSessionRef.current = null;
       setState((prev) => ({
         ...prev,
+        error: null,
         isLoading: false,
         isAuthenticated: false,
         user: null,
@@ -1534,41 +1605,12 @@ export function GuardhouseProvider({
     oidcSessionStorageKey,
     readStoredOidcSession,
     refreshSession,
+    restoreSessionSnapshot,
+    verifySessionIdentity,
+    handleError,
   ]);
 
-  const getAccessToken = useCallback(async (): Promise<string | null> => {
-    const operationEpoch = authOperationEpochRef.current;
-
-    if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
-      return null;
-    }
-
-    const sessionSnapshot = await readStoredOidcSession();
-
-    if (!isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)) {
-      return null;
-    }
-
-    if (!sessionSnapshot) {
-      logger.debug("No access token available in session storage");
-      return null;
-    }
-
-    const sessionData = sessionSnapshot.session;
-
-    const now = Math.floor(Date.now() / 1000);
-    if (sessionData.expiresAt > now + ACCESS_TOKEN_REFRESH_LEEWAY_SECONDS) {
-      return sessionData.accessToken;
-    }
-
-    return getAccessTokenSilently();
-  }, [
-    getAccessTokenSilently,
-    isCurrentAuthOperation,
-    logger,
-    oidcSessionStorageKey,
-    readStoredOidcSession,
-  ]);
+  const getAccessToken = getAccessTokenSilently;
 
   const contextValue: AuthContextValue = {
     ...state,

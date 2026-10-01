@@ -4,6 +4,7 @@ jest.mock("@guardhouse/core", () => {
       super(message);
       this.code = code;
       this.statusCode = options?.statusCode;
+      this.retryable = options?.retryable;
     }
   }
 
@@ -11,6 +12,8 @@ jest.mock("@guardhouse/core", () => {
     GuardhouseError: CoreGuardhouseError,
     canonicalizeIssuer: (value) => new URL(value.trim()).href,
     setCryptoAdapter: jest.fn(),
+    isTransientAuthError: jest.requireActual("../../../core/src/config")
+      .isTransientAuthError,
   };
 });
 
@@ -19,6 +22,7 @@ const {
   parseTokenResponsePayload,
 } = require("../core/AuthManager");
 const { GuardhouseClient } = require("../core/GuardhouseClient");
+const { GuardhouseError: CoreError } = require("@guardhouse/core");
 
 class MemoryStorage {
   constructor() {
@@ -372,6 +376,87 @@ describe("React Native Core v2 auth integration", () => {
     expect(sessionStorage.values.size).toBe(2);
     expect(refreshTokenStorage.values.size).toBe(2);
   });
+
+  it.each(
+    ["restoreSession", "getSession", "getAccessToken"].flatMap((method) =>
+      [false, true].flatMap((historical) =>
+        ["NETWORK_ERROR", "OIDC_METADATA_REQUEST_FAILED"].map((code) => [
+          method,
+          historical,
+          code,
+        ]),
+      ),
+    ),
+  )(
+    "retains credentials after %s fails temporarily (historical=%s, %s)",
+    async (method, historical, code) => {
+      const identity = {
+        ...createIdentity(),
+        ...(historical
+          ? { expiresAt: Math.floor(Date.now() / 1000) - 120 }
+          : {}),
+      };
+      const first = createManager();
+      await seedOidcSession(first.manager, first.coreClient, identity);
+      const snapshots = [...first.sessionStorage.values.entries()];
+      const refreshSnapshots = [...first.refreshTokenStorage.values.entries()];
+      const cold = createManager({
+        sessionStorage: first.sessionStorage,
+        refreshTokenStorage: first.refreshTokenStorage,
+      });
+      const verification = historical
+        ? cold.coreClient.restoreOidcSession
+        : cold.coreClient.verifyIdToken;
+      verification.mockRejectedValueOnce(
+        new CoreError("Temporarily unavailable", code, { retryable: true }),
+      );
+      await expect(cold.manager[method]()).rejects.toMatchObject({
+        code: "NETWORK_ERROR",
+      });
+      expect([...first.sessionStorage.values.entries()]).toEqual(snapshots);
+      expect([...first.refreshTokenStorage.values.entries()]).toEqual(
+        refreshSnapshots,
+      );
+      expect(cold.coreClient.clearSessionState).not.toHaveBeenCalled();
+      if (historical)
+        verification.mockResolvedValueOnce({
+          identity,
+          userInfo: { sub: identity.subject },
+        });
+      else {
+        verification.mockResolvedValueOnce(createVerifiedIdToken(identity));
+        cold.coreClient.getUserInfo.mockResolvedValueOnce({
+          sub: identity.subject,
+        });
+      }
+      expect(await cold.manager[method]()).not.toBeNull();
+      expect([...first.refreshTokenStorage.values.entries()]).toEqual(
+        refreshSnapshots,
+      );
+    },
+  );
+
+  it.each([
+    "invalid_token",
+    "USERINFO_SUBJECT_MISMATCH",
+    "ID_TOKEN_VALIDATION_FAILED",
+  ])(
+    "still deletes credentials after permanent restore failure %s",
+    async (code) => {
+      const first = createManager();
+      await seedOidcSession(first.manager, first.coreClient, createIdentity());
+      const cold = createManager({
+        sessionStorage: first.sessionStorage,
+        refreshTokenStorage: first.refreshTokenStorage,
+      });
+      cold.coreClient.verifyIdToken.mockRejectedValueOnce(
+        new CoreError("Rejected", code),
+      );
+      await expect(cold.manager.restoreSession()).rejects.toThrow();
+      expect(first.sessionStorage.values.size).toBe(0);
+      expect(first.refreshTokenStorage.values.size).toBe(0);
+    },
+  );
 
   it.each([true, false])(
     "restores historical sessions on cold start (userInfoOnLogin=%s)",

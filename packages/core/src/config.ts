@@ -90,6 +90,8 @@ export interface GuardhouseErrorOptions {
   statusCode?: number;
   cause?: unknown;
   feature?: string;
+  /** Transport failure; does not authorize replaying a token grant request. */
+  retryable?: boolean;
 }
 
 export class GuardhouseError extends Error {
@@ -97,6 +99,7 @@ export class GuardhouseError extends Error {
   public statusCode?: number;
   public cause?: unknown;
   public feature?: string;
+  public retryable?: boolean;
 
   constructor(
     message: string,
@@ -112,13 +115,41 @@ export class GuardhouseError extends Error {
       this.statusCode = statusCodeOrOptions;
       this.cause = options?.cause;
       this.feature = options?.feature;
+      this.retryable = options?.retryable;
       return;
     }
 
     this.statusCode = statusCodeOrOptions?.statusCode;
     this.cause = statusCodeOrOptions?.cause;
     this.feature = statusCodeOrOptions?.feature;
+    this.retryable = statusCodeOrOptions?.retryable;
   }
+}
+
+/** Availability failure during authentication checks, not proof of invalid credentials. */
+export function isTransientAuthError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const value = error as Record<string, unknown>;
+  const code =
+    typeof value["code"] === "string" ? value["code"].toUpperCase() : "";
+  if (
+    code === "NETWORK_ERROR" ||
+    code === "REQUEST_TIMEOUT" ||
+    code === "TEMPORARILY_UNAVAILABLE"
+  ) {
+    return true;
+  }
+  // Never reinterpret signature/identity/revocation errors using an incidental
+  // HTTP status or nested cause. Metadata transport is marked at the I/O boundary.
+  if (code !== "OIDC_METADATA_REQUEST_FAILED" && code !== "SERVER_ERROR")
+    return false;
+  if (code === "OIDC_METADATA_REQUEST_FAILED" && value["retryable"] === true)
+    return true;
+  const status = value["statusCode"];
+  return (
+    typeof status === "number" &&
+    (status === 408 || status === 429 || (status >= 500 && status <= 599))
+  );
 }
 
 export class ConfigValidationError extends GuardhouseError {

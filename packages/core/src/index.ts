@@ -34,7 +34,7 @@
 
 // Public API exports
 export { GuardhouseClient } from "./client";
-export { GuardhouseError } from "./config";
+export { GuardhouseError, isTransientAuthError } from "./config";
 export type {
   GuardhouseConfig,
   DPoPProofContext,

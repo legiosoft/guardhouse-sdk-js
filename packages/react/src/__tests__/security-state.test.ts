@@ -400,7 +400,9 @@ describe("pre-response refresh failure classification", () => {
   it.each(["NETWORK_ERROR", "REQUEST_TIMEOUT", "OIDC_METADATA_REQUEST_FAILED"])(
     "allows retry only for the known transient error %s",
     (code) => {
-      expect(isRetryablePreResponseRefreshError({ code })).toBe(true);
+      expect(
+        isRetryablePreResponseRefreshError({ code, retryable: true }),
+      ).toBe(true);
     },
   );
 
@@ -410,6 +412,7 @@ describe("pre-response refresh failure classification", () => {
     "INVALID_IDENTITY",
     "SCOPE_ESCALATION_DETECTED",
     "OIDC_DISCOVERY_FAILED",
+    "OIDC_METADATA_REQUEST_FAILED",
   ])("fails closed for the non-retryable error %s", (code) => {
     expect(isRetryablePreResponseRefreshError({ code })).toBe(false);
   });
