@@ -653,6 +653,7 @@ export function GuardhouseProvider({
             }
 
             let refreshResponseSucceeded = false;
+            let refreshedSnapshot: StoredOidcSessionSnapshot | null = null;
             try {
               const refreshResult = await client.refreshOidcSession(
                 sessionData.refreshToken,
@@ -677,6 +678,23 @@ export function GuardhouseProvider({
                 tokenResponse,
                 refreshResult.identity,
               );
+
+              // Rotation may have consumed the old refresh token. Retain the
+              // verified replacement before UserInfo I/O, without marking the
+              // session authenticated until its subject has been checked.
+              refreshedSnapshot = await replacePersistedOidcSessionIfMatches(
+                candidate,
+                refreshedSession,
+              );
+              if (!refreshedSnapshot) {
+                return restoreCurrentWinner(candidate, canRecoverNewer);
+              }
+              if (
+                !isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)
+              ) {
+                await removePersistedSessionIfMatches(refreshedSnapshot);
+                return null;
+              }
 
               let refreshedUser: CoreUser;
               if (refreshResult.identityStatus === "current") {
@@ -710,23 +728,6 @@ export function GuardhouseProvider({
                 return null;
               }
 
-              const refreshedSnapshot =
-                await replacePersistedOidcSessionIfMatches(
-                  candidate,
-                  refreshedSession,
-                );
-
-              if (!refreshedSnapshot) {
-                return restoreCurrentWinner(candidate, canRecoverNewer);
-              }
-
-              if (
-                !isCurrentAuthOperation(operationEpoch, oidcSessionStorageKey)
-              ) {
-                await removePersistedSessionIfMatches(refreshedSnapshot);
-                return null;
-              }
-
               const currentSnapshot = await readCurrentOidcSessionSnapshot();
               if (
                 currentSnapshot?.serialized !== refreshedSnapshot.serialized
@@ -754,14 +755,18 @@ export function GuardhouseProvider({
               logger.error("Token refresh failed", {
                 error: String(error),
               });
-              if (
-                refreshResponseSucceeded ||
-                !isRetryablePreResponseRefreshError(error)
-              ) {
-                return discardAndMaybeRecover(candidate, canRecoverNewer);
+              const canRetainSession = refreshedSnapshot
+                ? isTransientAuthError(error)
+                : !refreshResponseSucceeded &&
+                  isRetryablePreResponseRefreshError(error);
+              if (!canRetainSession) {
+                return discardAndMaybeRecover(
+                  refreshedSnapshot ?? candidate,
+                  canRecoverNewer,
+                );
               }
               const winner = await restoreCurrentWinner(
-                candidate,
+                refreshedSnapshot ?? candidate,
                 canRecoverNewer,
               );
               if (winner) return winner;

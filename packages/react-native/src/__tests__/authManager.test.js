@@ -168,6 +168,270 @@ function createManager({
 }
 
 describe("React Native Core v2 auth integration", () => {
+  it.each([false, true])(
+    "clears partial rotated credentials when session storage fails (silent=%s)",
+    async (silent) => {
+      const { manager, coreClient, sessionStorage, refreshTokenStorage } =
+        createManager();
+      const identity = createIdentity();
+      await seedOidcSession(manager, coreClient, identity);
+      coreClient.getUserInfo.mockClear();
+      coreClient.refreshOidcSession.mockResolvedValue({
+        identityStatus: "historical",
+        identity,
+        tokens: {
+          access_token: "rotated-access",
+          refresh_token: "rotated-refresh",
+          token_type: "Bearer",
+          expires_in: 3600,
+        },
+      });
+      sessionStorage.setItem = async () => {
+        if (!silent) throw new Error("Storage failed");
+      };
+      await expect(manager.refreshToken()).rejects.toThrow();
+      expect(sessionStorage.values.size).toBe(0);
+      expect(refreshTokenStorage.values.size).toBe(0);
+      expect(coreClient.getUserInfo).not.toHaveBeenCalled();
+      await expect(manager.getSession()).resolves.toBeNull();
+    },
+  );
+
+  it("still requires UserInfo before persisting an initial OIDC login", async () => {
+    const { manager, coreClient, sessionStorage, refreshTokenStorage } =
+      createManager();
+    coreClient.verifyIdToken.mockResolvedValue(
+      createVerifiedIdToken(createIdentity()),
+    );
+    coreClient.getUserInfo.mockRejectedValue(
+      new CoreError("Unavailable", "SERVER_ERROR", { statusCode: 503 }),
+    );
+    await expect(
+      manager.persistTokenResponse({
+        access_token: "initial-access",
+        refresh_token: "initial-refresh",
+        id_token: "initial-id-token",
+        token_type: "Bearer",
+        expires_in: 3600,
+        scope: "openid profile offline_access",
+      }),
+    ).rejects.toThrow();
+    expect(sessionStorage.values.size).toBe(0);
+    expect(refreshTokenStorage.values.size).toBe(0);
+  });
+
+  it.each(["oauth", "oidc"])(
+    "retains a valid %s session without refresh when the requested validity is longer",
+    async (kind) => {
+      const now = 1_800_000_000;
+      const clock = jest.spyOn(Date, "now").mockReturnValue(now * 1000);
+      try {
+        const first = createManager();
+        const identity = createIdentity();
+        first.coreClient.verifyIdToken.mockResolvedValue(
+          createVerifiedIdToken(identity),
+        );
+        first.coreClient.getUserInfo.mockResolvedValue({
+          sub: identity.subject,
+        });
+        await first.manager.persistTokenResponse(
+          {
+            access_token: "short-access",
+            token_type: "Bearer",
+            expires_in: 30,
+            ...(kind === "oidc" ? { id_token: "signed-id-token" } : {}),
+          },
+          kind === "oidc" ? "openid profile" : "api",
+        );
+        const snapshot = [...first.sessionStorage.values.entries()];
+        const cold = createManager({
+          coreClient: first.coreClient,
+          sessionStorage: first.sessionStorage,
+          refreshTokenStorage: first.refreshTokenStorage,
+        });
+        await expect(cold.manager.restoreSession()).resolves.toBeNull();
+        await expect(cold.manager.getAccessToken()).resolves.toBeNull();
+        await expect(
+          cold.manager.restoreSession({ minValiditySeconds: 30 }),
+        ).resolves.toBeNull();
+        expect([...first.sessionStorage.values.entries()]).toEqual(snapshot);
+        await expect(
+          cold.manager.restoreSession({ minValiditySeconds: 0 }),
+        ).resolves.toMatchObject({
+          session: { accessToken: "short-access" },
+        });
+        await expect(
+          cold.manager.getAccessToken({ minValiditySeconds: 0 }),
+        ).resolves.toBe("short-access");
+        expect(first.coreClient.refreshOidcSession).not.toHaveBeenCalled();
+        expect(first.coreClient.refreshOAuthToken).not.toHaveBeenCalled();
+        clock.mockReturnValue((now + 30) * 1000);
+        await expect(
+          cold.manager.restoreSession({ minValiditySeconds: 0 }),
+        ).resolves.toBeNull();
+        await expect(
+          cold.manager.getAccessToken({ minValiditySeconds: 0 }),
+        ).resolves.toBeNull();
+        expect(first.sessionStorage.values.size).toBe(0);
+      } finally {
+        clock.mockRestore();
+      }
+    },
+  );
+
+  it.each([true, false])(
+    "retains rotated tokens through a transient UserInfo failure and cold restore (new ID token=%s)",
+    async (current) => {
+      const first = createManager();
+      const identity = createIdentity();
+      await seedOidcSession(first.manager, first.coreClient, identity);
+      const tokens = {
+        access_token: "rotated-access",
+        refresh_token: "rotated-refresh",
+        token_type: "Bearer",
+        expires_in: 3600,
+        scope: "openid profile offline_access",
+        ...(current ? { id_token: "rotated-id-token" } : {}),
+      };
+      first.coreClient.refreshOidcSession.mockResolvedValue({
+        identityStatus: current ? "current" : "historical",
+        identity,
+        tokens,
+        ...(current ? { idToken: createVerifiedIdToken(identity) } : {}),
+      });
+      first.coreClient.getUserInfo.mockRejectedValueOnce(
+        new CoreError("UserInfo unavailable", "SERVER_ERROR", {
+          statusCode: 503,
+        }),
+      );
+      await expect(first.manager.refreshToken()).rejects.toThrow();
+      expect([...first.refreshTokenStorage.values.values()]).toEqual([
+        "rotated-refresh",
+      ]);
+      expect(
+        JSON.parse([...first.sessionStorage.values.values()][0]),
+      ).toMatchObject({
+        accessToken: "rotated-access",
+        idTokenCurrent: current,
+      });
+      expect(first.coreClient.clearSessionState).not.toHaveBeenCalled();
+      const cold = createManager({
+        sessionStorage: first.sessionStorage,
+        refreshTokenStorage: first.refreshTokenStorage,
+      });
+      const verify = current
+        ? cold.coreClient.verifyIdToken
+        : cold.coreClient.restoreOidcSession;
+      verify.mockRejectedValueOnce(
+        new CoreError("Still unavailable", "NETWORK_ERROR"),
+      );
+      await expect(cold.manager.getAccessToken()).rejects.toThrow();
+      expect([...first.refreshTokenStorage.values.values()]).toEqual([
+        "rotated-refresh",
+      ]);
+      if (current) {
+        verify.mockResolvedValue(createVerifiedIdToken(identity));
+        cold.coreClient.getUserInfo.mockResolvedValue({
+          sub: identity.subject,
+        });
+      } else {
+        verify.mockResolvedValue({
+          identity,
+          userInfo: { sub: identity.subject },
+        });
+      }
+      await expect(cold.manager.restoreSession()).resolves.toMatchObject({
+        session: {
+          accessToken: "rotated-access",
+          refreshToken: "rotated-refresh",
+        },
+        user: { sub: identity.subject },
+      });
+      expect(cold.coreClient.refreshOidcSession).not.toHaveBeenCalled();
+      cold.coreClient.refreshOidcSession.mockResolvedValue({
+        identityStatus: current ? "current" : "historical",
+        identity,
+        tokens,
+        ...(current ? { idToken: createVerifiedIdToken(identity) } : {}),
+      });
+      cold.coreClient.getUserInfo.mockResolvedValue({ sub: identity.subject });
+      await cold.manager.refreshToken();
+      expect(cold.coreClient.refreshOidcSession).toHaveBeenCalledWith(
+        "rotated-refresh",
+        expect.any(Object),
+      );
+      await cold.manager.logout();
+      expect(first.sessionStorage.values.size).toBe(0);
+      expect(first.refreshTokenStorage.values.size).toBe(0);
+    },
+  );
+
+  it.each(["USERINFO_SUBJECT_MISMATCH", "invalid_token"])(
+    "discards rotated credentials after permanent UserInfo failure %s",
+    async (code) => {
+      const { manager, coreClient, sessionStorage, refreshTokenStorage } =
+        createManager();
+      const identity = createIdentity();
+      await seedOidcSession(manager, coreClient, identity);
+      coreClient.refreshOidcSession.mockResolvedValue({
+        identityStatus: "historical",
+        identity,
+        tokens: {
+          access_token: "rotated-access",
+          refresh_token: "rotated-refresh",
+          token_type: "Bearer",
+          expires_in: 3600,
+        },
+      });
+      coreClient.getUserInfo.mockRejectedValue(new CoreError("Rejected", code));
+      await expect(manager.refreshToken()).rejects.toThrow();
+      expect(sessionStorage.values.size).toBe(0);
+      expect(refreshTokenStorage.values.size).toBe(0);
+    },
+  );
+
+  it.each([false, true])(
+    "logout wins while refreshed UserInfo is pending (failure=%s)",
+    async (failure) => {
+      const { manager, coreClient, sessionStorage, refreshTokenStorage } =
+        createManager();
+      const identity = createIdentity();
+      await seedOidcSession(manager, coreClient, identity);
+      coreClient.refreshOidcSession.mockResolvedValue({
+        identityStatus: "historical",
+        identity,
+        tokens: {
+          access_token: "rotated-access",
+          refresh_token: "rotated-refresh",
+          token_type: "Bearer",
+          expires_in: 3600,
+        },
+      });
+      let release;
+      let started;
+      const pending = new Promise((resolve) => {
+        started = resolve;
+      });
+      coreClient.getUserInfo.mockImplementationOnce(() => {
+        started();
+        return new Promise((resolve, reject) => {
+          release = () =>
+            failure
+              ? reject(new CoreError("Unavailable", "NETWORK_ERROR"))
+              : resolve({ sub: identity.subject });
+        });
+      });
+      const outcome = manager.refreshToken().catch((error) => error);
+      await pending;
+      await manager.logout();
+      release();
+      expect(await outcome).toBeInstanceOf(Error);
+      expect(sessionStorage.values.size).toBe(0);
+      expect(refreshTokenStorage.values.size).toBe(0);
+      await expect(manager.getSession()).resolves.toBeNull();
+    },
+  );
+
   it("rejects a passkey result from an operation started before logout", async () => {
     const { manager, coreClient } = createManager();
     const persist = manager.createTokenPersistenceOperation();

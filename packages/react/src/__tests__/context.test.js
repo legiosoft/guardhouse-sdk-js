@@ -768,9 +768,11 @@ describe("GuardhouseProvider operation safety", () => {
       payload: { sub: "user-2" },
       identity: winnerIdentity,
     });
-    mockGetUserInfo
-      .mockResolvedValueOnce({ sub: "user-1", roles: ["stale-refreshed"] })
-      .mockResolvedValueOnce({ sub: "user-2", roles: ["winner-role"] });
+    mockGetUserInfo.mockImplementation(async (accessToken) =>
+      accessToken === "winner-access-token"
+        ? { sub: "user-2", roles: ["winner-role"] }
+        : { sub: "user-1", roles: ["stale-refreshed"] },
+    );
 
     await TestRenderer.act(async () => {
       staleRefresh.resolve({
@@ -987,7 +989,81 @@ describe("GuardhouseProvider operation safety", () => {
     await TestRenderer.act(async () => renderer.unmount());
   });
 
-  it("clears a rotated refresh session when fresh UserInfo fails", async () => {
+  it.each(["success", "temporary failure", "permanent failure"])(
+    "preserves a newer session after pending refreshed UserInfo completes with %s",
+    async (outcome) => {
+      const sessionKey = getOidcSessionStorageKey(
+        baseConfig.authority,
+        baseConfig.clientId,
+      );
+      global.sessionStorage.setItem(
+        sessionKey,
+        JSON.stringify(storedSession()),
+      );
+      mockRefreshOidcSession.mockResolvedValueOnce({
+        identityStatus: "historical",
+        tokens: {
+          access_token: "rotated-access",
+          refresh_token: "rotated-refresh",
+          token_type: "Bearer",
+          expires_in: 3600,
+        },
+        identity: identity(),
+      });
+      const pendingUserInfo = createDeferred();
+      mockGetUserInfo.mockReturnValueOnce(pendingUserInfo.promise);
+      let renderer;
+      await TestRenderer.act(async () => {
+        renderer = TestRenderer.create(provider(baseConfig));
+      });
+      await flushEffects();
+      expect(
+        JSON.parse(global.sessionStorage.getItem(sessionKey)).refreshToken,
+      ).toBe("rotated-refresh");
+      expect(latestAuth.isAuthenticated).toBe(false);
+      const winnerIdentity = identity({ subject: "user-2" });
+      const winner = JSON.stringify(
+        storedSession({
+          accessToken: "winner-access",
+          refreshToken: "winner-refresh",
+          idToken: "winner-id-token",
+          expiresAt: 2_000_000_000,
+          identity: winnerIdentity,
+        }),
+      );
+      global.sessionStorage.setItem(sessionKey, winner);
+      mockVerifyIdToken.mockResolvedValue({
+        payload: { sub: "user-2" },
+        identity: winnerIdentity,
+      });
+      mockGetUserInfo.mockResolvedValue({
+        sub: "user-2",
+        roles: ["winner-role"],
+      });
+      await TestRenderer.act(async () => {
+        if (outcome === "success") pendingUserInfo.resolve({ sub: "user-1" });
+        else
+          pendingUserInfo.reject(
+            Object.assign(new Error(outcome), {
+              code:
+                outcome === "temporary failure"
+                  ? "NETWORK_ERROR"
+                  : "USERINFO_SUBJECT_MISMATCH",
+            }),
+          );
+        await pendingUserInfo.promise.catch(() => undefined);
+      });
+      await flushEffects();
+      expect(global.sessionStorage.getItem(sessionKey)).toBe(winner);
+      expect(latestAuth).toMatchObject({
+        isAuthenticated: true,
+        user: { sub: "user-2", roles: ["winner-role"] },
+      });
+      await TestRenderer.act(async () => renderer.unmount());
+    },
+  );
+
+  it("clears a rotated refresh session on an unclassified UserInfo failure", async () => {
     const sessionKey = "gh:v3:session:https%3A%2F%2Fauth.test%2F:client-a";
     global.sessionStorage.setItem(sessionKey, JSON.stringify(storedSession()));
     mockRefreshOidcSession.mockResolvedValueOnce({

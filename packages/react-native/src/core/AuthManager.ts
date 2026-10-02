@@ -79,6 +79,8 @@ interface PersistTokenOptions {
   readonly requestedScope?: string;
   readonly identity?: PersistedIdentity;
   readonly appState?: Record<string, unknown>;
+  /** Refresh only: checkpoint rotated credentials before loading UserInfo. */
+  readonly onRefreshTokensPersisted?: () => void;
 }
 
 interface AuthManagerConfig {
@@ -513,6 +515,10 @@ export class AuthManager {
       // Keep later automatic refreshes bound to the saved, possibly narrowed scope.
       const refreshOptions = { grantedScope, scope: requestedScope, audience };
       let tokenRefreshCompleted = false;
+      let refreshTokensPersisted = false;
+      const onRefreshTokensPersisted = () => {
+        refreshTokensPersisted = true;
+      };
 
       try {
         if (currentSession.kind === "oidc") {
@@ -537,6 +543,7 @@ export class AuthManager {
 
             return await this.persistAuthResult(refreshed.tokens, {
               generation,
+              onRefreshTokensPersisted,
               existingSession: currentSession,
               requestedScope,
               identity: {
@@ -551,6 +558,7 @@ export class AuthManager {
 
           return await this.persistAuthResult(refreshed.tokens, {
             generation,
+            onRefreshTokensPersisted,
             existingSession: currentSession,
             requestedScope,
             identity: {
@@ -582,7 +590,8 @@ export class AuthManager {
 
         if (
           generation === this.sessionGeneration &&
-          (tokenRefreshCompleted ||
+          ((tokenRefreshCompleted &&
+            (!refreshTokensPersisted || !isTransientAuthError(error))) ||
             this.shouldClearSessionAfterRefreshFailure(error))
         ) {
           await this.clearSession();
@@ -632,7 +641,10 @@ export class AuthManager {
     }
 
     if (!(await this.getStoredRefreshToken())) {
-      await this.clearSession();
+      // An unmet validity margin is not expiration. Preserve the session for
+      // callers that accept its remaining lifetime, as before Core v2.
+      if (this.isExpired(currentSession.expiresAt, 0))
+        await this.clearSession();
       return null;
     }
 
@@ -964,11 +976,6 @@ export class AuthManager {
         identity: options.identity.metadata,
         idTokenCurrent: options.identity.idTokenCurrent,
       });
-      user = await this.resolveAuthenticatedUser(
-        record.accessToken,
-        options.identity.evidence,
-        options.identity.verifiedIdToken?.payload,
-      );
     } else {
       if (tokenResponse.id_token) {
         throw new GuardhouseAuthError(
@@ -989,22 +996,49 @@ export class AuthManager {
     }
 
     let refreshToken: string | undefined;
-    try {
-      await this.mutateStorage(async () => {
-        this.assertCurrentOperation(options.generation);
-        const persistedRefreshToken = await this.getStoredRefreshToken();
-        this.assertCurrentOperation(options.generation);
-        refreshToken =
-          tokenResponse.refresh_token ?? persistedRefreshToken ?? undefined;
-        await this.persistRefreshToken(refreshToken, options.generation);
-        this.assertCurrentOperation(options.generation);
-        await this.persistSessionRecord(record, user, options.generation);
-        this.assertCurrentOperation(options.generation);
-      });
-    } catch (error) {
-      if (options.generation === this.sessionGeneration)
-        await this.clearSession();
-      throw error;
+    const persist = async (authenticatedUser: CoreUser | null) => {
+      try {
+        await this.mutateStorage(async () => {
+          this.assertCurrentOperation(options.generation);
+          const persistedRefreshToken = await this.getStoredRefreshToken();
+          this.assertCurrentOperation(options.generation);
+          refreshToken =
+            tokenResponse.refresh_token ?? persistedRefreshToken ?? undefined;
+          await this.persistRefreshToken(refreshToken, options.generation);
+          this.assertCurrentOperation(options.generation);
+          await this.persistSessionRecord(
+            record,
+            authenticatedUser,
+            options.generation,
+          );
+          this.assertCurrentOperation(options.generation);
+        });
+      } catch (error) {
+        if (options.generation === this.sessionGeneration)
+          await this.clearSession();
+        throw error;
+      }
+    };
+
+    if (options.onRefreshTokensPersisted) {
+      // A null cached user forces restoration to validate UserInfo again.
+      // Never fall back to credentials consumed by refresh-token rotation.
+      await persist(null);
+      options.onRefreshTokensPersisted();
+    }
+    if (options.identity) {
+      user = await this.resolveAuthenticatedUser(
+        record.accessToken,
+        options.identity.evidence,
+        options.identity.verifiedIdToken?.payload,
+      );
+    }
+    if (options.onRefreshTokensPersisted) {
+      this.assertCurrentOperation(options.generation);
+      this.sessionCache = { record, user };
+    } else {
+      // Initial login still persists only after all identity checks succeed.
+      await persist(user);
     }
 
     const session = this.toPublicSession(record, refreshToken, user);
